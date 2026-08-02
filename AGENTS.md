@@ -72,6 +72,24 @@ Common parameters: `-Configuration Debug|Release` (default `Debug`),
 build if any `.csproj`/`.props`/`.targets`/`.slnx` references native Ahtola
 packages, P/Invoke, or Rust tooling.
 
+### Scripting: cross-platform PowerShell 7
+
+All shell scripting in this repo is **cross-platform PowerShell 7+**
+(`pwsh`), not bash/cmd and not Windows PowerShell 5.x. `build.ps1` and
+everything under `scripts/` assume `pwsh` runs identically on Windows, Linux,
+and macOS. When writing or editing scripts:
+
+- Target `pwsh` 7+ and avoid Windows-only assumptions (no `cmd.exe` chaining,
+  no `$env:ComSpec`, no backslash-only paths in string literals that flow to
+  cross-platform tools — use `Join-Path`/`Split-Path`).
+- Do not introduce bash/sh scripts as build entrypoints; there is no Makefile
+  by design. If a CI lane needs a shell, call `pwsh ./build.ps1 …`.
+- Avoid aliases that differ across hosts (`wget`, `curl`, `sed`); use
+  PowerShell cmdlets (`Invoke-WebRequest`, `Get-Content`, `-replace`) so the
+  same script works everywhere.
+- Keep line endings consistent with the repo (CRLF is normal here); don't
+  mix LF shell scripts into a CRLF tree.
+
 ### Running a single test or filtered subset
 
 Prefer the wrapper so the run is still proven to have executed (it parses TRX
