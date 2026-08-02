@@ -167,6 +167,38 @@ not add `DllImport`/`LibraryImport` to shipped library code. The only
 intentional OS P/Invoke is inside `Ahtola.Core/Storage` for page/WAL locks —
 that is engine code, not an SDK binding, and stays.
 
+### NativeAOT and trimming compatibility is required
+
+`Ahtola.Core` (the engine) is **NativeAOT-compatible and trimmable**, and the
+rest of the stack must stay that way: the shipped provider and EF Core packages
+are expected to publish and trim cleanly on `net8.0`/`net9.0`/`net10.0`. Treat
+this as a hard constraint on every change to shipped library code, not an
+aspiration. When generating or editing code, do **not** introduce patterns
+that break AOT/trim analysis:
+
+- No reflection-based serialization, deserialization, or type discovery that
+  the trimmer cannot see (e.g. `Type.GetType` of a name built at runtime,
+  unannotated `System.Text.Json` source generators, `Activator.CreateInstance`
+  of dynamically named types). Prefer generated/source-based alternatives.
+- No `MakeGenericMethod`/`MakeGenericType` over types/methods constructed at
+  runtime; use reified generic instantiations the compiler can root.
+- Avoid `dynamic`, runtime codegen (`Expression.CompileToDynamicMethod`),
+  and `Assembly.Load`/`Type.GetType` string lookups in shipped code paths.
+- Annotate reflection that *is* intentional with
+  `[DynamicallyAccessedMembers]` so the trimmer can follow it; never suppress
+  IL2050/IL2060/IL2070 analyzers with `UnconditionalSuppressMessage` to hide
+  a real hole.
+- Keep `AllowUnsafeBlocks` usage in `Ahtola.Core` to raw buffer/page work;
+  do not add unsafe just to bypass a managed API.
+- Do not add dependencies that are known AOT/trim-hostile (e.g. heavy
+  reflection-only libraries) to shipped projects. `Ahtola.Data` is embedded
+  into the shipped provider, so anything it references must also be AOT-clean.
+
+If a change can only be made to work by disabling AOT or trimming, that is a
+design problem — stop and discuss it rather than landing it. The pure-managed
+closure scan does not catch AOT/trim violations automatically, so review new
+reflection against this list yourself before committing.
+
 ### Multi-targeting and version pins
 
 `Directory.Build.props` defines shared properties consumed by every project:
