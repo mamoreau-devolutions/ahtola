@@ -5,6 +5,50 @@ vibe-ported from Turso's Rust core. There is **no native companion, no Rust
 toolchain, and no P/Invoke SDK** anywhere in this tree. Treat that invariant as
 a hard constraint when changing build/package configuration.
 
+## Referencing the Turso source
+
+A read-only `turso-src` git submodule pins the upstream Turso Rust core at a
+specific release tag (currently `v0.7.2`, commit `046e9cbf6`) so agents can
+read the original Rust sources while porting or comparing behavior, without
+cloning ad hoc or guessing at API shape.
+
+```powershell
+git submodule update --init --recursive      # first checkout / fresh clone
+git submodule update --remote turso-src      # bump to a newer tag/main (see below)
+```
+
+When working in this repo:
+
+- Treat `turso-src/` as **read-only reference material**. Never edit files
+  there; it is a vendored snapshot of `tursodatabase/turso`, not part of this
+  build. Nothing under `turso-src/` is compiled or shipped by Ahtola.
+- Prefer it over fetching Turso sources from the web: grep
+  `turso-src/core/`, `turso-src/sqlite/`, `turso-src/sync/`, etc. directly to
+  find the Rust type/function a C# port mirrors. Cross-reference when a C#
+  type's doc comment or the WAL contract names an upstream symbol.
+- The submodule pointer is the source of truth for "which Turso version this
+  port targets." If you need a newer release, bump the submodule to that tag
+  (see below) in the same change that ports the corresponding behavior, and
+  note the new tag in the commit message.
+- Keep `turso-src/` out of packaging: it must never appear in a nupkg, a
+  `Content`/`None` include, or the managed-closure scan. The closure
+  validator's native-archive pattern already rejects `runtimes/`/`native/`
+  entries; do not add the submodule to any shipped project's item groups.
+
+### Bumping the submodule to a newer release
+
+```powershell
+cd turso-src
+git fetch --tags origin
+git checkout <new-tag>            # e.g. v0.8.0
+cd ..
+git add turso-src                  # records the new Subproject commit
+```
+
+Then update the tag reference in this file and in any commit message. Prefer
+release tags over `main` so the reference is reproducible. Do not commit the
+submodule pointing at a moving branch tip in a release.
+
 ## Build, test, and lint
 
 `build.ps1` (PowerShell 7+) is the canonical entrypoint; there is no Makefile.
