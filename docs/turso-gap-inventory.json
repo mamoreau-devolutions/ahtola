@@ -44,8 +44,8 @@
         "L": 37
       },
       "by_status": {
-        "open": 165,
-        "closed": 6
+        "open": 164,
+        "closed": 7
       }
     },
     "schema": {
@@ -1173,7 +1173,7 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Expr::IsNull / NotNull (postfix ISNULL/NOTNULL/NOT NULL)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseEquality (NOT-postfix branch, line ~2312-2318) — no ISNULL/NOTNULL handling exists anywhere",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseComparison (postfix ISNULL/NOTNULL/NOT NULL lowered to IS/IS NOT NULL)",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
@@ -1186,8 +1186,8 @@
         "gencol.sqltest::gencol_validate_nested_isnull_arith",
         "gencol.sqltest::gencol_validate_nested_notnull_arith"
       ],
-      "notes": "SQLite's expr grammar has three null-test postfix forms: `expr ISNULL`, `expr NOTNULL`, and `expr NOT NULL` (all equivalent to `expr IS [NOT] NULL`). Ahtola's parser has no ISNULL/NOTNULL keyword handling at all, and its NOT-postfix branch only recognizes BETWEEN/IN/LIKE/GLOB/REGEXP/MATCH after NOT — the literal error thrown is 'Expected BETWEEN, IN, LIKE, GLOB, REGEXP, or MATCH after NOT.' when NULL follows NOT. This rejects extremely common SQL (`x ISNULL`, `x NOT NULL` as an expression) both at the top level and inside generated-column expressions.",
-      "status": "open"
+      "notes": "SQLite's expr grammar has three null-test postfix forms: `expr ISNULL`, `expr NOTNULL`, and `expr NOT NULL` (all equivalent to `expr IS [NOT] NULL`). Ahtola's parser has no ISNULL/NOTNULL keyword handling at all, and its NOT-postfix branch only recognizes BETWEEN/IN/LIKE/GLOB/REGEXP/MATCH after NOT — the literal error thrown is 'Expected BETWEEN, IN, LIKE, GLOB, REGEXP, or MATCH after NOT.' when NULL follows NOT.       This rejects extremely common SQL (`x ISNULL`, `x NOT NULL` as an expression) both at the top level and inside generated-column expressions. Fixed 2026-08-03: ParseComparison now parses postfix ISNULL/NOTNULL right after the IS arm and lowers them to BinaryExpression(Is|IsNot, LiteralExpression(SqlValue.Null)) — byte-equivalent compilation to IS NULL / IS NOT NULL — and postfix `expr NOT NULL` is accepted via the postfix-NOT machinery, matching Turso's precedence (comparison level, tighter than prefix NOT, so `1 ISNULL AND 1` = 0). All 8 mapped keys removed from managed-sqltest-expected-failures.txt; full lane 3765/3765.",
+            "status": "closed"
     },
     {
       "id": "parser-pragma-unrecognized-name-hard-rejection",

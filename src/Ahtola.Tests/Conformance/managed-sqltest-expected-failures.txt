@@ -163,8 +163,6 @@ foreign_keys.sqltest::fk-self-ipk-text-child-coerces-rowid-ok | expected success
 foreign_keys.sqltest::fk-deferred-update-self-ref-rowid-affinity-one-stmt | expected success but got error: FOREIGN KEY constraint failed
 foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates | expected success but got error: EXPLAIN is only supported for statements lowered to the bytecode compiler.
 foreign_keys.sqltest::fk-alter-table-add-column-enforced | expected success but got error: ALTER TABLE ADD COLUMN with REFERENCES is not supported.
-gencol.sqltest::gencol_validate_isnull | expected success but got error: Expected RightParen. At SQL offset 35.
-gencol.sqltest::gencol_validate_notnull | expected success but got error: Expected RightParen. At SQL offset 35.
 gencol.sqltest::gencol_func_substr | expected success but got error: function substr() is not allowed in a generated column
 gencol.sqltest::gencol_func_nested_upper_substr | expected success but got error: function substr() is not allowed in a generated column
 gencol.sqltest::gencol_alter_add_virtual | expected 2 row(s), got 2 row(s); row 0 expected '5/10' but was '5/'
@@ -211,14 +209,11 @@ gencol.sqltest::gencol_error_nested_subquery_in_case | error 'subqueries are not
 gencol.sqltest::gencol_error_nested_in_select | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
 gencol.sqltest::gencol_error_nested_exists_in_arith | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
 gencol.sqltest::gencol_error_nested_doubly_qualified | error 'Expected RightParen. At SQL offset 44.' does not match pattern 'the "." operator prohibited in generated columns'
-gencol.sqltest::gencol_validate_nested_isnull_arith | expected success but got error: Expected RightParen. At SQL offset 51.
-gencol.sqltest::gencol_validate_nested_notnull_arith | expected success but got error: Expected RightParen. At SQL offset 51.
 gencol.sqltest::fk-gencol-unique-idx-update-cascade | expected success but got error: FOREIGN KEY constraint failed
 gencol.sqltest::update-virtual-not-null-deferred-trigger-ignore | expected success but got error: NOT NULL constraint failed: t.b
 gencol.sqltest::update-virtual-not-null-transitive-deferred-trigger-ignore | expected success but got error: NOT NULL constraint failed: t.c
 gencol.sqltest::update-virtual-not-null-deferred-trigger-abort | error 'NOT NULL constraint failed: t.b' does not match pattern 'trigger rejects null'
 gencol.sqltest::update-virtual-not-null-transitive-deferred-trigger-abort | error 'NOT NULL constraint failed: t.c' does not match pattern 'trigger rejects null'
-glob/memory.sqltest::glob-null-other-types | expected success but got error: Expected BETWEEN, IN, LIKE, GLOB, REGEXP, or MATCH after NOT. At SQL offset 59.
 glob/memory.sqltest::glob-embedded-nul-1 | expected 1 row(s), got 1 row(s); row 0 expected '0' but was '1'
 glob/memory.sqltest::glob-embedded-nul-2 | expected 1 row(s), got 1 row(s); row 0 expected '0' but was '1'
 group-by-expression-index.sqltest::group-by-expr-index-basic | expected success but got error: no such column: m
@@ -288,9 +283,6 @@ mvcc-update-noop.sqltest::mvcc-update-self-data-intact | expected 2 row(s), got 
 mvcc-update-noop.sqltest::mvcc-update-self-multiple-rows | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'wal'
 mvcc-update-noop.sqltest::mvcc-update-different-value | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'wal'
 not_between.sqltest::not-between-subquery-bound-orderby-offset | expected success but got error: Expected keyword AND. At SQL offset 120.
-null/default.sqltest::isnull | expected success but got error: Expected End. At SQL offset 12.
-null/default.sqltest::notnull | expected success but got error: Expected End. At SQL offset 12.
-null/default.sqltest::not-null | expected success but got error: Expected BETWEEN, IN, LIKE, GLOB, REGEXP, or MATCH after NOT. At SQL offset 16.
 nulls-first-last.sqltest::window-two-different-nulls-orderings | expected 5 row(s), got 5 row(s); row 1 expected '4//2/5' but was '2/3/5/3'
 numeric-text-overflow.sqltest::ceil-text-i64-max-stays-integer | expected 1 row(s), got 1 row(s); row 0 expected '9223372036854775807/integer' but was '9.22337203685478e+18/real'
 on_conflict.sqltest::mvcc-upsert-set-pk-on-conflict-target-resolves | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'memory'

@@ -2384,6 +2384,23 @@ internal sealed class SqlParser
                     ParseIsRightOperand());
                 continue;
             }
+            // Postfix ISNULL / NOTNULL are spellings of IS NULL / IS NOT NULL.
+            if (ConsumeKeyword("ISNULL"))
+            {
+                expression = new BinaryExpression(
+                    expression,
+                    BinaryOperator.Is,
+                    new LiteralExpression(SqlValue.Null));
+                continue;
+            }
+            if (ConsumeKeyword("NOTNULL"))
+            {
+                expression = new BinaryExpression(
+                    expression,
+                    BinaryOperator.IsNot,
+                    new LiteralExpression(SqlValue.Null));
+                continue;
+            }
             var negated = ConsumeKeyword("NOT");
             if (ConsumeKeyword("BETWEEN"))
             {
@@ -2443,8 +2460,17 @@ internal sealed class SqlParser
                     : function;
                 continue;
             }
+            // Postfix NOT NULL is the third spelling of IS NOT NULL.
+            if (negated && ConsumeKeyword("NULL"))
+            {
+                expression = new BinaryExpression(
+                    expression,
+                    BinaryOperator.IsNot,
+                    new LiteralExpression(SqlValue.Null));
+                continue;
+            }
             if (negated)
-                throw Error("Expected BETWEEN, IN, LIKE, GLOB, REGEXP, or MATCH after NOT.");
+                throw Error("Expected BETWEEN, IN, LIKE, GLOB, REGEXP, MATCH, or NULL after NOT.");
             if (!TryParseEqualityOperator(out var operation))
                 return expression;
 
