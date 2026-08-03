@@ -20,7 +20,6 @@ agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_real
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_text_numeric_label_unchanged | expected success but got error: no such function: JSONB_GROUP_OBJECT
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_numeric_column_labels | expected success but got error: no such function: JSONB_GROUP_OBJECT
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_does_not_stringify_value | expected success but got error: no such function: JSONB_ARRAY
-agg-functions/memory.sqltest::filter-with-having | expected success but got error: no such column: cnt
 alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message | error 'Expected keyword BEGIN. At SQL offset 48.' does not match pattern 'no such column: main\.t\.b'
 alter-table-quoted-trigger-target.sqltest::drop-column-with-unrelated-quoted-trigger-target | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t2 (id INTEGER PRIMARY KEY, keep_col TEXT)' but was 'CREATE TABLE "t2" ("id" INTEGER PRIMARY KEY, "keep_col" TEXT)'
 alter-table-quoted-trigger-target.sqltest::rename-column-with-unrelated-quoted-trigger-target | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t2 (id INTEGER PRIMARY KEY, d TEXT)' but was 'CREATE TABLE "t2" ("id" INTEGER PRIMARY KEY, "d" TEXT)'
@@ -124,7 +123,6 @@ create_table.sqltest::create_table_trailing_named_column_constraint_primary_key_
 create_table.sqltest::create_table_primary_key_nulls_last_rejected | error 'Expected RightParen. At SQL offset 40.' does not match pattern 'NULLS'
 create_table.sqltest::create_table_unique_nulls_first_rejected | error 'Expected RightParen. At SQL offset 35.' does not match pattern 'NULLS'
 create_table.sqltest::create_table_unique_desc_nulls_first_rejected | error 'Expected RightParen. At SQL offset 41.' does not match pattern 'NULLS'
-create_table_as_select.sqltest::ctas_group_by_having | expected success but got error: no such column: total
 create_table_as_select.sqltest::ctas_schema_sql | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(id INT,name TEXT)' but was 'CREATE TABLE "dst" ("id" INT, "name" TEXT)'
 create_table_as_select.sqltest::ctas_schema_sql_expression_columns | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst("a + 1","count(*)")' but was 'CREATE TABLE "dst" ("BinaryExpression { Left = ColumnExpression { Name = a, Qualifier = , UnqualifiedNam
 create_table_as_select.sqltest::ctas_schema_sql_mixed_alias_expr | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(id INT,"b // c","length(b)")' but was 'CREATE TABLE "dst" ("id" INT, "BinaryExpression { Left = ColumnExpression { Name = b, Qualifier
@@ -208,27 +206,10 @@ gencol.sqltest::update-virtual-not-null-deferred-trigger-abort | error 'NOT NULL
 gencol.sqltest::update-virtual-not-null-transitive-deferred-trigger-abort | error 'NOT NULL constraint failed: t.c' does not match pattern 'trigger rejects null'
 glob/memory.sqltest::glob-embedded-nul-1 | expected 1 row(s), got 1 row(s); row 0 expected '0' but was '1'
 glob/memory.sqltest::glob-embedded-nul-2 | expected 1 row(s), got 1 row(s); row 0 expected '0' but was '1'
-group-by-expression-index.sqltest::group-by-expr-index-basic | expected success but got error: no such column: m
-group-by-expression-index.sqltest::group-by-compound-expr-no-index | expected success but got error: no such column: m
-group-by-expression-index.sqltest::group-by-func-expr-index | expected success but got error: no such column: n
 groupby/constant-expr.sqltest::group-by-order-by-constant-float | expected success but got error: Unsupported expression type StarExpression.
 groupby/constant-expr.sqltest::group-by-order-by-constant-string | expected success but got error: Unsupported expression type StarExpression.
 groupby/constant-expr.sqltest::group-by-order-by-null | expected success but got error: Unsupported expression type StarExpression.
 groupby/constant-expr.sqltest::group-by-view-constant-order-by | expected success but got error: Unsupported expression type StarExpression.
-groupby/memory.sqltest::having_or | expected success but got error: no such column: cnt
-groupby/memory.sqltest::group_by_nonconflicting_alias | expected success but got error: no such column: c
-groupby/memory.sqltest::group_by_column_having_alias | expected success but got error: no such column: total
-groupby/memory.sqltest::group_by_numeric_index_vs_alias | expected 4 row(s), got 1 row(s); row 0 expected '1/100' but was '1/1000'
-groupby/memory.sqltest::having_without_group_by_basic | expected success but got error: no such column: s
-groupby/memory.sqltest::having_without_group_by_no_match | expected success but got error: no such column: s
-groupby/memory.sqltest::having_without_group_by_multiple_aggregates | expected success but got error: no such column: c
-groupby/memory.sqltest::having_without_group_by_expression | expected success but got error: no such column: total
-groupby/memory.sqltest::having_without_group_by_complex_condition | expected success but got error: no such column: s
-groupby/memory.sqltest::having_without_group_by_count | expected success but got error: no such column: cnt
-groupby/memory.sqltest::having_without_group_by_max_min | expected success but got error: no such column: mx
-groupby/memory.sqltest::group-by-zero | expected an error but the statement succeeded
-groupby/memory.sqltest::group-by-out-of-range | expected an error but the statement succeeded
-groupby/memory.sqltest::group-by-negative | expected an error but the statement succeeded
 index-cursor-record-after-overflow-update.sqltest::rowid-after-overflow-update | expected success but got error: Unsupported PRAGMA cache_size. At SQL offset 18.
 indexed_by.sqltest::indexed-by-attached-qualified-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 indexed_by.sqltest::indexed-by-attached-update-delete | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
@@ -244,8 +225,6 @@ join/memory.sqltest::full-outer-join | expected an error but the statement succe
 join/memory.sqltest::join-3-1 | error 'NATURAL joins may not have an ON or USING clause. At SQL offset 45.' does not match pattern 'a NATURAL join may not have an ON or USING clause'
 join/memory.sqltest::join-3-2 | error 'NATURAL joins may not have an ON or USING clause. At SQL offset 41.' does not match pattern 'a NATURAL join may not have an ON or USING clause'
 join/outer_hash_join.sqltest::full-outer-join-using-errors | expected an error but the statement succeeded
-join/outer_hash_join.sqltest::full-outer-join-with-group-by | expected success but got error: no such column: key
-join/outer_hash_join.sqltest::full-outer-join-group-by-having | expected success but got error: no such column: key
 join/outer_hash_join.sqltest::three-way-full-outer-join-errors | expected an error but the statement succeeded
 join/outer_hash_join.sqltest::left-then-full-outer-chain-errors | expected an error but the statement succeeded
 join/outer_hash_join.sqltest::right-then-full-outer-chain-errors | expected an error but the statement succeeded
@@ -283,7 +262,6 @@ on_conflict_constraint_def.sqltest::ddl-reject-multiple-pk-columns | expected an
 orderby/memory.sqltest::orderby_rowid_truncation | expected success but got error: sub-select returns 2 columns - expected 1
 orderby/memory.sqltest::orderby_rowid_truncation_explicit_rowid | expected success but got error: sub-select returns 2 columns - expected 1
 orderby/memory.sqltest::order-by-plus-2 | expected 2 row(s), got 2 row(s); row 0 expected '2/9' but was '1/10'
-orderby/memory.sqltest::group-by-plus-1 | expected 2 row(s), got 1 row(s); row 0 expected 'x/3' but was 'x/6'
 orderby/memory.sqltest::order-by-negative-1 | expected an error but the statement succeeded
 orderby/memory.sqltest::order-by-negative-100 | expected an error but the statement succeeded
 orderby/memory.sqltest::order-by-out-of-range | expected an error but the statement succeeded
@@ -381,9 +359,6 @@ subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-function-call
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-oid | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-underscore | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-nested-group-by-subquery | expected an error but the statement succeeded
-subquery/memory.sqltest::subquery-uncorrelated-in-having | expected success but got error: no such column: total
-subquery/memory.sqltest::subquery-correlated-in-having-grouped-scalar-null | expected success but got error: no such column: total
-subquery/memory.sqltest::subquery-uncorrelated-in-having-in | expected success but got error: no such column: total
 subquery/memory.sqltest::subquery-column-affinity-inheritance | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
 subquery/memory.sqltest::subquery-correlated-exists-in-select-with-aggregate-empty-table | expected success but got error: no such column: t6.id
 subquery/memory.sqltest::correlated-exists-in-ungrouped-aggregate-empty-main-table | expected success but got error: no such column: t14.a
@@ -480,7 +455,6 @@ view-rowid.sqltest::view-rowid-select | expected an error but the statement succ
 views.sqltest::view-rejects-aggregate-order-by | expected an error but the statement succeeded
 views.sqltest::view-mutual-circle-detection | error 'no such table: vv' does not match pattern 'view v is circularly defined'
 views.sqltest::view-reserved-prefix-sqlite | expected an error but the statement succeeded
-where/memory.sqltest::where_alias_precedence_3 | expected success but got error: no such column: lmao
 window/dense_rank.sqltest::dense-rank-collate-nocase-peers | expected 4 row(s), got 4 row(s); row 1 expected 'apple/1' but was 'apple/3'
 window/dense_rank.sqltest::dense-rank-cross-type-numeric-peers | expected 6 row(s), got 6 row(s); row 0 expected 'zero/1' but was 'int/2'
 window/dense_rank.sqltest::dense-rank-float-precision-not-peers | expected 3 row(s), got 3 row(s); row 0 expected '2/1' but was '1/2'

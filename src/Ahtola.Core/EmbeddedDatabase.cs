@@ -11674,6 +11674,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         context.CheckInterrupt();
         ValidateSelectIndexDirectives(select, context);
         select = StripUnusableForcedIndexForCountStar(select, context);
+        select = ResolveSelectBindings(select, context, outerRow);
         ValidateGroupByCollations(select.GroupBy);
         ValidateOrderByAggregateMisuse(select);
         var canUseCompiledRoute = CanUseCompiledSelectRoute(select, context, outerRow);
@@ -18666,6 +18667,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         ValidateSelectIndexDirectives(statement, context);
         statement = StripUnusableForcedIndexForCountStar(statement, context);
         statement = ResolveNamedWindows(statement);
+        statement = ResolveSelectBindings(statement, context, outerRow);
         context = EnterCollationSource(context, statement.Source);
         ValidateGroupByCollations(statement.GroupBy);
         var resolvedOrderBy = ResolveOrderBy(statement.OrderBy, statement.Projections);

@@ -967,7 +967,7 @@
       "layer": "compilation",
       "kind": "divergent",
       "turso_ref": "turso-src/core/translate/expr.rs (SELECT-list alias binding visible in GROUP BY/HAVING/ON; ambiguous-column detection)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.SelectBindings.cs (rewrite pass); hooks in EmbeddedDatabase.cs ExecuteSelectStatement/ExecuteSelect",
       "severity": "s1-correctness",
       "effort": "M",
       "conformance_links": [
@@ -978,11 +978,10 @@
         "agg-functions/memory.sqltest::filter-with-having",
         "where/memory.sqltest::where_alias_precedence_3",
         "subquery/memory.sqltest::subquery-uncorrelated-in-having",
-        "select/memory.sqltest::ambiguous-self-join",
         "join/outer_hash_join.sqltest::full-outer-join-with-group-by"
       ],
-      "notes": "SELECT-list aliases are not visible in GROUP BY/HAVING/JOIN-USING contexts (\"no such column: cnt/total/key\"); ambiguous-column errors also misreport which name is ambiguous. Largest single functional cluster after the parser alias gap.",
-      "status": "open"
+      "notes": "Closed 2026-08-03. Added an AST rewrite pass (EmbeddedDatabase.SelectBindings.cs) invoked at the top of ExecuteSelectStatement and ExecuteSelect that makes SELECT-list aliases visible in GROUP BY/HAVING/WHERE, matching SQLite/Turso binding scope. GROUP BY: integer-literal terms resolve to result columns with SQLite's exact ordinal range error ('1st GROUP BY term out of range - should be between 1 and 2'); a bare name falls back to a matching projection alias only when it does not also resolve in the local FROM source (canonical-first). HAVING: a bare name that fails canonical resolution falls back to a projection alias, but only when it is not resolvable in the local source or an outer correlated row — ground-truth verified against sqlite3.exe that source columns win over same-named aliases. WHERE: same canonical-first alias fallback; correlated outer references are never shadowed. The rewrite is reference-preserving and skips subquery/window/aggregate-argument scopes. Expected-failures 516->490 (26 cleared, 0 added); full lane 3765/3765. The remaining ambiguity-detection sub-issue (ambiguous-self-join and the ambiguous-column error wording) is tracked under parser-error-message-parity.",
+      "status": "closed"
     },
     {
       "id": "compile-partial-index-support",
@@ -1488,7 +1487,8 @@
         "views.sqltest::view-mutual-circle-detection",
         "window/memory.sqltest::window-row-number-in-check-constraint",
         "default_value.sqltest::default-value-column-name",
-        "select/memory.sqltest::ambiguous-column-error-message-format"
+        "select/memory.sqltest::ambiguous-column-error-message-format",
+        "select/memory.sqltest::ambiguous-self-join"
       ],
       "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages.",
       "status": "open"
