@@ -19916,10 +19916,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var result = MaterializeQueryResult(
             ExecuteQuery(commonTableExpression.Query, parameters, cteContext, outerRow));
         var columns = ResolveCommonTableExpressionColumns(commonTableExpression, result.Columns);
+        var columnDefinitions = DescribeRuntimeSourceColumnDefinitions(commonTableExpression.Query, columns, cteContext);
         return new SourceData(
             columns,
             result.Rows.Select(row => new SourceRow(columns, row.ToArray())).ToArray(),
-            GetQueryOutputCollations(commonTableExpression.Query, cteContext));
+            GetQueryOutputCollations(commonTableExpression.Query, cteContext),
+            columnDefinitions);
     }
 
     // Safety cap on the number of rows a recursive CTE may materialize. SQLite streams
@@ -19979,6 +19981,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var anchor = MaterializeQueryResult(
             EvaluateRecursiveAnchor(compound, firstRecursiveIndex, parameters, cteContext, outerRow));
         var columns = ResolveCommonTableExpressionColumns(commonTableExpression, anchor.Columns);
+        // A recursive CTE's result-column affinities come from its anchor (base case), matching SQLite.
+        var columnDefinitions = DescribeRuntimeSourceColumnDefinitions(compound.Terms[0], columns, cteContext);
         var collations = GetQueryOutputCollations(commonTableExpression.Query, cteContext);
         var deduplicate = recursiveOperator == CompoundOperator.Union;
         var anchorsRoutable = AreRecursiveAnchorsRoutable(
@@ -20008,6 +20012,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 anchor.Rows,
                 columns,
                 collations,
+                columnDefinitions,
                 recursiveTerms[0],
                 deduplicate,
                 parameters,
@@ -20067,7 +20072,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             workingSet = produced;
         }
 
-        return new SourceData(columns, result, collations);
+        return new SourceData(columns, result, collations, columnDefinitions);
     }
 
     private static bool IsRoutableRecursiveTerm(
@@ -20163,6 +20168,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         IReadOnlyList<SqlValue[]> anchorRows,
         string[] columns,
         IReadOnlyList<string?> collations,
+        IReadOnlyList<EmbeddedColumn?>? columnDefinitions,
         SelectStatement recursiveTerm,
         bool deduplicate,
         SqlValue[] parameters,
@@ -20184,7 +20190,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         rows.Add(new SourceRow(columns, MaterializeQueryRow(runtime.CurrentRow!)));
                         break;
                     case ResumableStatementStepResult.Done:
-                        return new SourceData(columns, rows, collations);
+                        return new SourceData(columns, rows, collations, columnDefinitions);
                     default:
                         throw new EmbeddedSqlException("Recursive program yielded during evaluation.");
                 }
@@ -22626,7 +22632,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 commonTableExpression.Columns,
                 row.Values.ToArray(),
                 qualifiedColumns,
-                outerRow)).ToArray());
+                outerRow,
+                ColumnDefinitions: commonTableExpression.ColumnDefinitions)).ToArray(),
+            ColumnDefinitions: commonTableExpression.ColumnDefinitions);
     }
 
     private SourceData GetViewRows(
@@ -22641,6 +22649,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var result = MaterializeQueryResult(
             ExecuteQuery(view.Query, parameters, viewContext, outerRow));
         var columns = ApplyViewColumnNames(view, result.Columns);
+        var columnDefinitions = DescribeRuntimeSourceColumnDefinitions(view.Query, columns, viewContext);
         var rows = result.Rows.AsEnumerable();
         if (maximumRows is { } maximum && maximum < result.Rows.Count)
             rows = rows.Take((int)maximum);
@@ -22648,7 +22657,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var qualifiedColumns = BuildQualifiedColumns(source.Alias ?? view.Name, columns);
         return new SourceData(
             columns,
-            rows.Select(row => new SourceRow(columns, row.ToArray(), qualifiedColumns, outerRow)).ToArray());
+            rows.Select(row => new SourceRow(
+                columns,
+                row.ToArray(),
+                qualifiedColumns,
+                outerRow,
+                ColumnDefinitions: columnDefinitions)).ToArray(),
+            GetQueryOutputCollations(view.Query, viewContext),
+            columnDefinitions);
     }
 
     private static bool TryGetView(QueryContext context, string name, out ViewDefinition view)
@@ -22722,9 +22738,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var qualifiedColumns = source.Alias is null
             ? new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
             : BuildQualifiedColumns(source.Alias, result.Columns);
+        var columnDefinitions = DescribeRuntimeSourceColumnDefinitions(source.Query, result.Columns, context);
         return new SourceData(
             result.Columns,
-            rows.Select(row => new SourceRow(result.Columns, row.ToArray(), qualifiedColumns, outerRow)).ToArray());
+            rows.Select(row => new SourceRow(
+                result.Columns,
+                row.ToArray(),
+                qualifiedColumns,
+                outerRow,
+                ColumnDefinitions: columnDefinitions)).ToArray(),
+            GetQueryOutputCollations(source.Query, context),
+            columnDefinitions);
     }
 
     internal static string BuildCreateTableSql(string name, EmbeddedTable table)
@@ -23142,10 +23166,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return statement switch
         {
             SelectStatement select => DescribeSelectAffinities(select, context, commonTableExpressions),
-            CompoundSelectStatement compound => DescribeQueryAffinities(
-                compound.Terms[0],
-                context,
-                commonTableExpressions),
+            CompoundSelectStatement compound => DescribeCompoundAffinities(compound, context, commonTableExpressions),
             WithSelectStatement with => DescribeWithSelectAffinities(with, context, commonTableExpressions),
             ValuesClause values => Enumerable.Range(0, values.Rows[0].Count)
                 .Select(index => new QueryAffinityColumn(null, $"column{index + 1}", ColumnAffinity.Blob))
@@ -23158,17 +23179,43 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SelectStatement statement,
         QueryContext context,
         Dictionary<string, IReadOnlyList<QueryAffinityColumn>> commonTableExpressions)
+        => DescribeSelectArmColumns(statement, context, commonTableExpressions)
+            .Select(column => new QueryAffinityColumn(
+                column.Qualifier,
+                column.Name,
+                column.Affinity,
+                column.DeclaredType))
+            .ToArray();
+
+    // One result column of a single SELECT arm, carrying both its comparison affinity and
+    // the storage classes its projection expression can produce (for compound affinity).
+    private sealed record ArmColumn(
+        string? Qualifier,
+        string Name,
+        ColumnAffinity Affinity,
+        StorageClassMask Data,
+        string? DeclaredType = null);
+
+    private static IReadOnlyList<ArmColumn> DescribeSelectArmColumns(
+        SelectStatement statement,
+        QueryContext context,
+        Dictionary<string, IReadOnlyList<QueryAffinityColumn>> commonTableExpressions)
     {
         var output = GetSourceAffinityColumns(statement.Source, context, commonTableExpressions);
         var rawOutput = GetRawSourceAffinityColumns(statement.Source, context, commonTableExpressions);
-        var result = new List<QueryAffinityColumn>();
+        var result = new List<ArmColumn>();
         foreach (var projection in statement.Projections)
         {
             if (projection.Expression is StarExpression)
             {
                 if (output.Count == 0)
                     throw new EmbeddedSqlException("SELECT * requires a row source");
-                result.AddRange(output);
+                result.AddRange(output.Select(column => new ArmColumn(
+                    column.Qualifier,
+                    column.Name,
+                    column.Affinity,
+                    StorageClassFromAffinity(column.Affinity),
+                    column.DeclaredType)));
                 continue;
             }
 
@@ -23182,26 +23229,267 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     .ToArray();
                 if (matches.Length == 0)
                     throw new EmbeddedSqlException($"no such table: {qualifiedStar.Qualifier}");
-                result.AddRange(matches);
+                result.AddRange(matches.Select(column => new ArmColumn(
+                    column.Qualifier,
+                    column.Name,
+                    column.Affinity,
+                    StorageClassFromAffinity(column.Affinity),
+                    column.DeclaredType)));
                 continue;
             }
 
-            result.Add(new QueryAffinityColumn(
+            result.Add(new ArmColumn(
                 null,
                 projection.Alias ?? GetExpressionName(projection.Expression),
-                GetExpressionAffinity(
-                    projection.Expression,
-                    output,
-                    context,
-                    commonTableExpressions),
-                GetExpressionDeclaredType(
-                    projection.Expression,
-                    output,
-                    context,
-                    commonTableExpressions)));
+                GetExpressionAffinity(projection.Expression, output, context, commonTableExpressions),
+                GetExpressionStorageClassMask(projection.Expression, output, context, commonTableExpressions),
+                GetExpressionDeclaredType(projection.Expression, output, context, commonTableExpressions)));
         }
 
         return result;
+    }
+
+    // Maps a column affinity to the storage classes a pass-through reference of that
+    // affinity can produce, mirroring Turso's expr_data_type Column/Cast/Subquery arm.
+    private static StorageClassMask StorageClassFromAffinity(ColumnAffinity affinity)
+        => affinity switch
+        {
+            ColumnAffinity.Text => StorageClassMask.Text | StorageClassMask.Blob,
+            ColumnAffinity.Blob => StorageClassMask.All,
+            _ => StorageClassMask.Numeric | StorageClassMask.Blob,
+        };
+
+    // The set of storage classes an expression can produce, mirroring Turso's
+    // expr_data_type (core/translate/expr/affinity.rs). Used only for compound affinity.
+    private static StorageClassMask GetExpressionStorageClassMask(
+        Expression expression,
+        IReadOnlyList<QueryAffinityColumn> sourceColumns,
+        QueryContext context,
+        Dictionary<string, IReadOnlyList<QueryAffinityColumn>> commonTableExpressions)
+    {
+        switch (expression)
+        {
+            case CollationExpression collation:
+                return GetExpressionStorageClassMask(collation.Expression, sourceColumns, context, commonTableExpressions);
+            case UnaryExpression { Operator: UnaryOperator.Plus } unary:
+                return GetExpressionStorageClassMask(unary.Operand, sourceColumns, context, commonTableExpressions);
+            case LiteralExpression literal:
+                return literal.Value.Kind switch
+                {
+                    SqlValueKind.Null => StorageClassMask.None,
+                    SqlValueKind.Text => StorageClassMask.Text,
+                    SqlValueKind.Blob => StorageClassMask.Blob,
+                    _ => StorageClassMask.Numeric,
+                };
+            case BinaryExpression { Operator: BinaryOperator.Concatenate }:
+                return StorageClassMask.Text | StorageClassMask.Blob;
+            case FunctionExpression:
+            case ParameterExpression:
+                return StorageClassMask.All;
+            case CastExpression cast:
+                return StorageClassFromAffinity(EmbeddedTable.GetAffinity(cast.TypeName));
+            case CaseExpression caseExpression:
+                {
+                    var mask = StorageClassMask.None;
+                    foreach (var clause in caseExpression.Clauses)
+                        mask |= GetExpressionStorageClassMask(clause.Then, sourceColumns, context, commonTableExpressions);
+                    if (caseExpression.Else is not null)
+                        mask |= GetExpressionStorageClassMask(caseExpression.Else, sourceColumns, context, commonTableExpressions);
+                    return mask;
+                }
+            case ColumnExpression:
+            case ScalarSubqueryExpression:
+                return StorageClassFromAffinity(
+                    GetExpressionAffinity(expression, sourceColumns, context, commonTableExpressions));
+            default:
+                return StorageClassMask.Numeric;
+        }
+    }
+
+    // Describes the per-arm result columns of any query statement so the compound
+    // affinity reducer can combine them. Falls back to the affinity-only describer for
+    // statement shapes that do not have an arm-column walk.
+    private static IReadOnlyList<ArmColumn> DescribeQueryArmColumns(
+        QueryStatement statement,
+        QueryContext context,
+        Dictionary<string, IReadOnlyList<QueryAffinityColumn>> commonTableExpressions)
+    {
+        return statement switch
+        {
+            SelectStatement select => DescribeSelectArmColumns(select, context, commonTableExpressions),
+            ValuesClause values => Enumerable.Range(0, values.Rows[0].Count)
+                .Select(index => new ArmColumn(null, $"column{index + 1}", ColumnAffinity.Blob, StorageClassMask.All))
+                .ToArray(),
+            _ => DescribeQueryAffinities(statement, context, commonTableExpressions)
+                .Select(column => new ArmColumn(
+                    column.Qualifier,
+                    column.Name,
+                    column.Affinity,
+                    StorageClassFromAffinity(column.Affinity),
+                    column.DeclaredType))
+                .ToArray(),
+        };
+    }
+
+    // The combined affinity of one column across all arms of a compound SELECT, an exact
+    // port of Turso's compound_column_affinity (core/translate/plan.rs). A column keeps its
+    // first non-BLOB arm's affinity unless a later arm can produce a storage class that
+    // forces the result to BLOB (text arm with a numeric-producing arm, or vice versa).
+    private static ColumnAffinity CompoundColumnAffinity(
+        IReadOnlyList<IReadOnlyList<ArmColumn>> arms,
+        int index)
+    {
+        var affinity = arms[0][index].Affinity;
+        var dataTypes = StorageClassMask.None;
+        var armIndex = 0;
+        while (affinity == ColumnAffinity.Blob && armIndex + 1 < arms.Count)
+        {
+            dataTypes |= arms[armIndex][index].Data;
+            armIndex++;
+            affinity = arms[armIndex][index].Affinity;
+        }
+
+        if (affinity == ColumnAffinity.Blob)
+            return ColumnAffinity.Blob;
+
+        for (var other = armIndex + 1; other < arms.Count; other++)
+            dataTypes |= arms[other][index].Data;
+
+        if (affinity == ColumnAffinity.Text && dataTypes.HasFlag(StorageClassMask.Numeric))
+            return ColumnAffinity.Blob;
+        if (IsNumericAffinity(affinity) && dataTypes.HasFlag(StorageClassMask.Text))
+            return ColumnAffinity.Blob;
+
+        return affinity;
+    }
+
+    private static IReadOnlyList<QueryAffinityColumn> DescribeCompoundAffinities(
+        CompoundSelectStatement compound,
+        QueryContext context,
+        Dictionary<string, IReadOnlyList<QueryAffinityColumn>> commonTableExpressions)
+    {
+        var arms = compound.Terms
+            .Select(term => DescribeQueryArmColumns(term, context, commonTableExpressions))
+            .ToArray();
+        var width = arms[0].Count;
+        foreach (var arm in arms)
+        {
+            if (arm.Count != width)
+            {
+                throw new EmbeddedSqlException(
+                    "SELECTs to the left and right of a compound operator do not have the same number of result columns");
+            }
+        }
+
+        var result = new List<QueryAffinityColumn>(width);
+        for (var index = 0; index < width; index++)
+        {
+            var affinity = CompoundColumnAffinity(arms, index);
+            result.Add(new QueryAffinityColumn(
+                null,
+                arms[0][index].Name,
+                affinity,
+                // The pragma/view column-type walk reports the first branch's declared type
+                // (its pre-existing behavior); the compound affinity above is what comparison
+                // threading consumes, and it re-derives the declared type independently.
+                arms[0][index].DeclaredType));
+        }
+
+        return result;
+    }
+
+    // A declared-type string that round-trips GetAffinity back to the given affinity, so a
+    // derived/CTE column threaded as an EmbeddedColumn compares with the right affinity.
+    private static string? DeclaredTypeForAffinity(ColumnAffinity affinity)
+        => affinity switch
+        {
+            ColumnAffinity.Integer => "INTEGER",
+            ColumnAffinity.Real => "REAL",
+            ColumnAffinity.Numeric => "NUMERIC",
+            ColumnAffinity.Text => "TEXT",
+            _ => null,
+        };
+
+    // Builds the static CTE affinity map consumed by DescribeQueryAffinities from the
+    // runtime-materialized CTEs carried on a QueryContext, recovering each column's
+    // affinity from the threaded column definitions (BLOB when unavailable).
+    private static Dictionary<string, IReadOnlyList<QueryAffinityColumn>> BuildAffinityMapFromRuntimeCtes(
+        IReadOnlyDictionary<string, SourceData> runtimeCtes)
+    {
+        var map = new Dictionary<string, IReadOnlyList<QueryAffinityColumn>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in runtimeCtes)
+        {
+            var definitions = entry.Value.ColumnDefinitions;
+            map[entry.Key] = entry.Value.Columns
+                .Select((column, index) => new QueryAffinityColumn(
+                    null,
+                    column,
+                    definitions is not null
+                        && index < definitions.Count
+                        && definitions[index] is { } definition
+                        ? EmbeddedTable.GetAffinity(definition.DeclaredType)
+                        : ColumnAffinity.Blob,
+                    definitions is not null
+                        && index < definitions.Count
+                        && definitions[index] is { } declaredDefinition
+                        ? declaredDefinition.DeclaredType
+                        : null))
+                .ToArray();
+        }
+
+        return map;
+    }
+
+    // Materializes per-column definitions for a derived/CTE row source from a query's
+    // described affinities so comparisons against its columns apply SQLite's affinity
+    // rules. BLOB-affinity columns carry no definition (no affinity), matching SQLite.
+    private static IReadOnlyList<EmbeddedColumn?> BuildSourceColumnDefinitionsFromAffinities(
+        IReadOnlyList<QueryAffinityColumn> affinities,
+        string[] outputColumns)
+    {
+        var definitions = new EmbeddedColumn?[outputColumns.Length];
+        var count = Math.Min(affinities.Count, outputColumns.Length);
+        for (var index = 0; index < count; index++)
+        {
+            var affinity = affinities[index].Affinity;
+            if (affinity == ColumnAffinity.Blob)
+            {
+                definitions[index] = null;
+                continue;
+            }
+
+            definitions[index] = new EmbeddedColumn(
+                outputColumns[index],
+                DeclaredTypeForAffinity(affinity),
+                PrimaryKey: false,
+                NotNull: false,
+                Unique: false,
+                DefaultValue: null);
+        }
+
+        return definitions;
+    }
+
+    // Describes the per-column definitions a runtime row source (CTE, view, derived table)
+    // should expose so comparisons against its columns apply SQLite's affinity rules. Fails
+    // soft to no definitions if the static describer cannot model the query.
+    private static IReadOnlyList<EmbeddedColumn?> DescribeRuntimeSourceColumnDefinitions(
+        QueryStatement query,
+        string[] outputColumns,
+        QueryContext context)
+    {
+        try
+        {
+            var affinities = DescribeQueryAffinities(
+                query,
+                context,
+                BuildAffinityMapFromRuntimeCtes(context.CommonTableExpressions));
+            return BuildSourceColumnDefinitionsFromAffinities(affinities, outputColumns);
+        }
+        catch (EmbeddedSqlException)
+        {
+            return new EmbeddedColumn?[outputColumns.Length];
+        }
     }
 
     private static IReadOnlyList<QueryAffinityColumn> DescribeWithSelectAffinities(
@@ -24020,7 +24308,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             expression.Value,
             candidateExpression: null,
             row,
-            expression.Negated);
+            expression.Negated,
+            DescribeSubqueryCandidateAffinities(expression.Query, context));
     }
 
     private static void RequireSingleColumnSubquery(ExecutionResult result)
@@ -24742,7 +25031,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         Expression valueExpression,
         Expression? candidateExpression,
         SourceRow? row,
-        bool negated)
+        bool negated,
+        IReadOnlyList<ColumnAffinity?>? subqueryAffinities = null)
     {
         var foundNull = false;
         foreach (var candidate in candidates)
@@ -24753,7 +25043,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 candidate,
                 valueExpression,
                 candidateExpression,
-                row);
+                row,
+                subqueryAffinities);
             if (equality.Kind == SqlValueKind.Null)
             {
                 foundNull = true;
@@ -24774,7 +25065,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         IReadOnlyList<SqlValue> right,
         Expression leftExpression,
         Expression? rightExpression,
-        SourceRow? row)
+        SourceRow? row,
+        IReadOnlyList<ColumnAffinity?>? subqueryAffinities = null)
     {
         if (left.Count != right.Count)
             throw new EmbeddedSqlException("row value misused");
@@ -24804,7 +25096,24 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var rightElement = rightExpression is null
                 ? null
                 : GetExpressionElement(rightExpression, index);
-            ApplyComparisonAffinities(leftElement, rightElement, row, ref leftValue, ref rightValue);
+            if (rightExpression is null
+                && subqueryAffinities is not null
+                && index < subqueryAffinities.Count
+                && subqueryAffinities[index] is { } subqueryCandidateAffinity)
+            {
+                // An IN-subquery compares the LHS against the subquery's result column, whose
+                // affinity is the comparison affinity applied to the LHS operand.
+                ApplyAffinityToValues(
+                    GetComparisonAffinity(leftElement, row, null),
+                    subqueryCandidateAffinity,
+                    ref leftValue,
+                    ref rightValue);
+            }
+            else
+            {
+                ApplyComparisonAffinities(leftElement, rightElement, row, ref leftValue, ref rightValue);
+            }
+
             var collation = GetComparisonCollation(leftElement, rightElement, row);
             var comparison = Compare(leftValue, rightValue, collation);
             if (operation is BinaryOperator.Equal or BinaryOperator.NotEqual || isOperator)
@@ -25634,7 +25943,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             expression.Value,
             candidateExpression: null,
             representative,
-            expression.Negated);
+            expression.Negated,
+            DescribeSubqueryCandidateAffinities(expression.Query, context));
     }
 
     private SqlValue EvaluateAggregateBetween(
@@ -28647,6 +28957,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var rightAffinity = rightExpression is null
             ? null
             : GetComparisonAffinity(rightExpression, row, context);
+        ApplyAffinityToValues(leftAffinity, rightAffinity, ref left, ref right);
+    }
+
+    // Applies SQLite datatype3 §4.1 comparison affinity to two operands given their resolved
+    // affinities. Extracted so callers that know the affinities directly (IN-subquery
+    // candidates) can apply the same coercion without re-resolving expressions.
+    private static void ApplyAffinityToValues(
+        ColumnAffinity? leftAffinity,
+        ColumnAffinity? rightAffinity,
+        ref SqlValue left,
+        ref SqlValue right)
+    {
         if (IsNumericAffinity(leftAffinity) && !IsNumericAffinity(rightAffinity))
         {
             right = ApplyComparisonNumericAffinity(right);
@@ -28676,8 +28998,61 @@ public sealed partial class EmbeddedDatabase : IDisposable
             CollationExpression collation => GetComparisonAffinity(collation.Expression, row, context),
             ColumnExpression column => GetColumnComparisonAffinity(column, row, context),
             CastExpression cast => EmbeddedTable.GetAffinity(cast.TypeName),
+            ScalarSubqueryExpression scalarSubquery => GetScalarSubqueryComparisonAffinity(scalarSubquery, context),
             _ => null,
         };
+    }
+
+    // The affinity of a scalar-subquery comparison operand, resolved statically from the
+    // subquery's single result column. Returns null for BLOB affinity, a multi-column result,
+    // or any shape the affinity describer cannot model (so the comparison falls back to the
+    // other operand's affinity), mirroring SQLite.
+    private static ColumnAffinity? GetScalarSubqueryComparisonAffinity(
+        ScalarSubqueryExpression subquery,
+        QueryContext? context)
+    {
+        if (context is null)
+            return null;
+
+        try
+        {
+            var affinities = DescribeQueryAffinities(
+                subquery.Query,
+                context,
+                BuildAffinityMapFromRuntimeCtes(context.CommonTableExpressions));
+            if (affinities.Count != 1)
+                return null;
+
+            var affinity = affinities[0].Affinity;
+            return affinity == ColumnAffinity.Blob ? null : affinity;
+        }
+        catch (EmbeddedSqlException)
+        {
+            return null;
+        }
+    }
+
+    // The per-column candidate affinities of an IN-subquery's result set, so the membership
+    // comparison can apply affinity to each LHS element (SQLite datatype3 §4.1). BLOB-affinity
+    // columns yield null (no candidate affinity); an undescribable subquery yields null overall.
+    private static IReadOnlyList<ColumnAffinity?>? DescribeSubqueryCandidateAffinities(
+        QueryStatement query,
+        QueryContext context)
+    {
+        try
+        {
+            var affinities = DescribeQueryAffinities(
+                query,
+                context,
+                BuildAffinityMapFromRuntimeCtes(context.CommonTableExpressions));
+            return affinities
+                .Select(column => column.Affinity == ColumnAffinity.Blob ? null : (ColumnAffinity?)column.Affinity)
+                .ToArray();
+        }
+        catch (EmbeddedSqlException)
+        {
+            return null;
+        }
     }
 
     private static ColumnAffinity? GetColumnComparisonAffinity(
@@ -40037,6 +40412,20 @@ internal enum ColumnAffinity
     Real,
 }
 
+// The set of storage classes an expression can produce, mirroring Turso's
+// StorageClassMask (core/translate/expr/affinity.rs). Used to compute the combined
+// affinity of a compound SELECT column: a column survives with its arm's affinity only
+// if no other arm can produce a storage class that would force it to BLOB.
+[Flags]
+internal enum StorageClassMask : byte
+{
+    None = 0,
+    Numeric = 1,
+    Text = 2,
+    Blob = 4,
+    All = Numeric | Text | Blob,
+}
+
 internal sealed record ExecutionResult(
     string[] Columns,
     IReadOnlyList<SqlValue[]> Rows,
@@ -40531,4 +40920,5 @@ internal sealed record SourceRow(
 internal sealed record SourceData(
     string[] Columns,
     IReadOnlyList<SourceRow> Rows,
-    IReadOnlyList<string?>? Collations = null);
+    IReadOnlyList<string?>? Collations = null,
+    IReadOnlyList<EmbeddedColumn?>? ColumnDefinitions = null);

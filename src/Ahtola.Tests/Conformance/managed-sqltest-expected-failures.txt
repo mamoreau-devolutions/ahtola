@@ -4,12 +4,6 @@
 #   dotnet test src/Ahtola.Tests/Ahtola.Tests.csproj \
 #     --filter FullyQualifiedName~RegenerateExpectedFailures -- NUnit.Explicit=true
 
-affinity.sqltest::affinity-in-subquery-text-lhs-integer-rhs | expected 3 row(s), got 1 row(s); row 0 expected '01' but was '1'
-affinity.sqltest::affinity-scalar-subquery-text-comparison | expected 1 row(s), got 1 row(s); row 0 expected '0' but was '1'
-affinity.sqltest::affinity-scalar-subquery-text-delete-predicate | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
-affinity.sqltest::affinity-compound-subquery-all-text | expected 2 row(s), got 2 row(s); row 0 expected 'text/1' but was 'text/0'
-affinity.sqltest::affinity-compound-subquery-numeric-col-plus-numeric-literal | expected 2 row(s), got 2 row(s); row 0 expected 'integer/1' but was 'integer/0'
-affinity.sqltest::affinity-compound-subquery-numeric-literal-first-then-col | expected 2 row(s), got 2 row(s); row 0 expected 'real/1' but was 'real/0'
 after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-with-index | expected success but got error: Unsupported PRAGMA cache_size. At SQL offset 18.
 after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-with-index-small | expected success but got error: Unsupported PRAGMA cache_size. At SQL offset 18.
 after-insert-trigger-cache-spill.sqltest::before-insert-trigger-cache-spill-with-index | expected success but got error: Unsupported PRAGMA cache_size. At SQL offset 18.
@@ -353,13 +347,11 @@ snapshot_tests/analyze/stat1_rows.sqltest::analyze-indexed-table-does-not-insert
 snapshot_tests/subqueries/subquery-sort-elision.sqltest::partial-partition-match | expected 7 row(s), got 7 row(s); row 0 expected '1/20/20' but was '1/30/50'
 snapshot_tests/subqueries/subquery-sort-elision.sqltest::window-partial-not-elided | expected 7 row(s), got 7 row(s); row 0 expected '1/20/20' but was '1/30/50'
 snapshot_tests/subqueries/subquery-sort-elision.sqltest::window-no-cte-order-not-elided | expected 7 row(s), got 7 row(s); row 0 expected '1/50' but was '3/100'
-subquery/cte_materialization_adversarial.sqltest::range-scan-text-vs-int-affinity | expected 1 row(s), got 4 row(s); row 0 expected '3/30' but was '1/10'
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-in-subquery | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-function-call | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-oid | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-underscore | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-nested-group-by-subquery | expected an error but the statement succeeded
-subquery/memory.sqltest::subquery-column-affinity-inheritance | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
 subquery/memory.sqltest::subquery-correlated-exists-in-select-with-aggregate-empty-table | expected success but got error: no such column: t6.id
 subquery/memory.sqltest::correlated-exists-in-ungrouped-aggregate-empty-main-table | expected success but got error: no such column: t14.a
 temp_tables.sqltest::temp-table-join-can-distinguish-main-and-temp | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
