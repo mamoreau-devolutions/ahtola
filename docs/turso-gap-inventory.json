@@ -1,0 +1,2483 @@
+{
+  "meta": {
+    "title": "Ahtola <-> Turso gap inventory",
+    "generated": "2026-08-03",
+    "generator": "docs/turso-gap-analysis.md companion; see report appendix for the cross-reference method",
+    "turso_ref": {
+      "repo": "tursodatabase/turso",
+      "tag": "v0.7.2",
+      "commit": "046e9cbf6",
+      "submodule": "turso-src/ (read-only)"
+    },
+    "ahtola_ref": {
+      "branch": "copilot/vdbe-gap-analysis",
+      "commit_at_analysis": "c99157b"
+    },
+    "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
+    "entry_count": 171,
+    "counts": {
+      "by_layer": {
+        "vdbe": 35,
+        "compilation": 38,
+        "parser": 22,
+        "functions": 24,
+        "storage": 20,
+        "mvcc": 14,
+        "sync": 18
+      },
+      "by_kind": {
+        "missing": 98,
+        "partial": 25,
+        "divergent": 39,
+        "extension": 7,
+        "parity": 2
+      },
+      "by_severity": {
+        "s1-correctness": 19,
+        "s2-capability": 86,
+        "s3-perf": 34,
+        "s4-intentional": 32
+      },
+      "by_effort": {
+        "S": 63,
+        "M": 71,
+        "L": 37
+      },
+      "by_status": {
+        "open": 169,
+        "closed": 2
+      }
+    },
+    "schema": {
+      "id": "stable kebab-case, layer-prefixed (vdbe-, compile-, parser-, func-, storage-, mvcc-, sync-)",
+      "layer": "vdbe | compilation | parser | functions | storage | mvcc | sync",
+      "kind": "missing (no Ahtola counterpart) | partial (subset ported) | divergent (both exist, behavior differs) | extension (Ahtola-only) | parity (audited, no gap; status closed)",
+      "turso_ref": "upstream file::symbol citation inside turso-src/ at the pinned tag",
+      "ahtola_ref": "Ahtola source citation, or \"none\"",
+      "severity": "s1-correctness (wrong results) | s2-capability (SQL surface blocked) | s3-perf | s4-intentional (documented product divergence)",
+      "effort": "S | M | L (rough porting cost)",
+      "conformance_links": "failure keys file.sqltest::test-name from the expected-failures file; empty = source-evidence-only gap",
+      "notes": "finding detail and porting guidance",
+      "status": "open | closed (flip to closed when the gap lands; drop resolved keys from the expected-failures file in the same change)"
+    }
+  },
+  "gaps": [
+    {
+      "id": "vdbe-bloom-filter-opcodes",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Filter + Insn::FilterAdd (bloom-filter build/probe pair)",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso builds a bloom filter over a join/IN side and probes it to skip btree seeks. Ahtola has no bloom machinery. NAME COLLISION: Ahtola's VdbeOpcode.Filter (12) is a row-predicate filter (VdbeRowPredicate delegate), NOT the bloom-filter probe — any port must rename. Pure optimization: results stay correct without it.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-hash-join-opcodes",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::HashBuild, HashDistinct, HashBuildFinalize, HashProbe, HashNext, HashClose, HashClear, HashMarkMatched, HashResetMatched, HashScanUnmatched, HashNextUnmatched, HashGraceInit, HashLoadPartition, HashNextProbe, HashAdvancePartition (16 opcodes; turso-src/core/vdbe/hash_table.rs)",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition",
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
+      ],
+      "notes": "Entire hash-join execution family absent, including the grace (disk-partitioned) variant for outsized build sides and the unmatched-scan support for outer joins. Ahtola joins are in-memory nested loops over materialized rows (VdbeJoinPlan/OpenJoinCursor), so large equijoins degrade. The triple-selfjoin conformance timeouts are planner-caused (no cost-based ordering) but hash join is the execution-side fix.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-virtual-table-opcodes",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::VOpen, VFilter, VColumn, VNext, VUpdate, VDestroy, VBegin, VRename (turso-src/core/vtab.rs)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "No virtual-table opcode family at all: modules cannot be opened, filtered with constraint push-down (xBestIndex), column-read, updated, or renamed. Blocks the entire eponymous/module vtab SQL surface. All 5 vtab conformance failures trace here (parser accepts CREATE VIRTUAL TABLE per parser-layer entry, execution cannot run it).",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-index-method-opcodes",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::IndexMethodCreate, IndexMethodDestroy, IndexMethodOptimize, IndexMethodQuery",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's pluggable index-method family (custom index types queried through dedicated cursor machinery; op_column has a CursorType::IndexMethod arm). No Ahtola counterpart; secondary indexes in Ahtola are conventional btree-backed only.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-ddl-executed-by-treewalker",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::CreateBtree, ClearBtree, Destroy, DropTable, DropView, DropIndex, DropTrigger, RenameTable, AddColumn, DropColumn, AlterColumn (DDL compiled to VDBE programs)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (DDL dispatch ~line 1402; ExecuteVacuum ~line 34493); src/Ahtola.Core/Compilation has zero DDL builders",
+      "severity": "s4-intentional",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Ahtola executes every DDL statement in the tree-walking evaluator, never as a VDBE program — the 11 DDL opcodes have no counterpart by design. Consequences (schema-version propagation to in-flight statements, transactional DDL rollback) are tracked in the mvcc layer entries, not here. Recorded so the inventory is complete; porting DDL to compiled programs is optional.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-schema-cookie-opcodes",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::ReadCookie, SetCookie, ParseSchema, PageCount, MaxPgcnt, JournalMode",
+      "ahtola_ref": "none (PRAGMA handling is tree-walking in src/Ahtola.Core/EmbeddedDatabase.cs)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "No cookie opcodes: user_version/application_id read-write and schema-cookie validation (stale-schema detection, 'database schema has changed' errors) are not modeled at the VDBE level. Turso re-parses schema via ParseSchema when the cookie changes; Ahtola snapshots schema differently (see mvcc entries). PageCount/MaxPgcnt/JournalMode pragma surface partially exists tree-walking; journal_mode switching works, page_count/max_page_count unverified.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-fk-enforcement-opcodes",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::FkCounter, FkIfZero, FkCheck (deferred-FK counters and immediate FK validation as opcodes)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (FK checks inside write/delegate paths; defer_foreign_keys works per mvcc audit)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "foreign_keys.sqltest::fk-column-constraint-multi-parent",
+        "foreign_keys.sqltest::fk-self-ipk-text-child-coerces-rowid-ok",
+        "foreign_keys.sqltest::fk-deferred-update-self-ref-rowid-affinity-one-stmt",
+        "foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates",
+        "foreign_keys.sqltest::fk-alter-table-add-column-enforced",
+        "gencol.sqltest::fk-gencol-unique-idx-update-cascade",
+        "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
+      ],
+      "notes": "FK enforcement exists but lives in the write-target delegates, not opcodes. defer_foreign_keys and immediate checking work for common shapes; the divergence is structural. Edge coverage (FK actions through compiled DML, cross-database checks) tracked in compilation entries.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-trigger-subprogram-machinery",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Program, Gosub, Return, BeginSubrtn (trigger/FK sub-program invocation and subroutine call/return)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "No subprogram or subroutine machinery: triggers cannot fire from compiled DML because there is no Program opcode to invoke a sub-program with its own register frame, and no Gosub/Return for shared code blocks. Ahtola programs are straight-line with explicit targets; subroutines are inlined at compile time. Prerequisite for any trigger support.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-halt-error-model",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_halt (err_code + description + on_error + description_reg for RAISE); op_halt_if_null",
+      "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs (case HaltInstruction, ~line 1139: clean stop, cursor cleanup only)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's Halt terminates with a SQLite error code, message, and on_error disposition (abort/ignore/fail), and HaltIfNull raises constraint errors from NULL registers (RAISE, NOT NULL). Ahtola's HaltInstruction only stops cleanly; all errors propagate as .NET exceptions (EmbeddedSqlException/VdbeArithmeticException) and are mapped to SQLite codes at the provider boundary (SqliteException.SqliteErrorCode). Works for top-level errors but cannot express in-program error recovery (ON CONFLICT CONTINUE semantics inside a program) or RAISE().",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-transaction-opcode-model",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_transaction (read/write flag, schema-cookie check, statement-tx sub-state machine); op_autocommit",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeTransaction.cs; ResumableStatement.cs cases BeginTransaction/CommitTransaction/RollbackTransaction (~lines 1017-1028)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Different factoring, verified semantics: Ahtola splits into Begin/Commit/Rollback opcodes over VdbeTransaction (register-snapshot stack) with savepoint trio Savepoint/Release/RollbackTo mapping Turso's single Savepoint opcode with op enum. NAME COLLISION: Ahtola's VdbeOpcode.Commit is a cursor-write flush (returns LastInsertRowId), not a transaction commit. Isolation/atomicity gaps are in the mvcc layer entries, not here.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-open-ephemeral",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::Insn::OpenEphemeral, OpenAutoindex (execute.rs ~line 13467), OpenPseudo, OpenDup",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::OpenWorkTableInstruction (recursive-CTE-only ephemeral store)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "No general-purpose ephemeral btree opcode: Turso materializes IN (...) sets, DISTINCT intermediates, subquery results, and auto-indexes into ephemeral tables with full cursor semantics (seek/scan). Ahtola's only ephemeral store is the recursive-CTE work table; IN-list materialization and subquery materialization fall back to in-memory arrays/delegates, which caps planner options (no ephemeral index over a materialized subquery). OpenPseudo/OpenDup are minor conveniences Ahtola does not need structurally.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-autoindex-for-joins",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::OpenAutoindex + translate/optimizer (automatic transient index over the inner side of a join)",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition",
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
+      ],
+      "notes": "Turso can build a transient auto-index when no usable index exists for a join. Combined with the missing cost-based join order (compilation entry), Ahtola's joins are O(N*M) nested loops with materialized right sides.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-deferred-seek",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_deferred_seek (line 5180) + op_seek_end (line 5739); op_column OpColumnState::Rowid/Seek deferred path (lines 1779-1833)",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "DeferredSeek lets an index scan postpone the table-btree seek until a column outside the index is actually read (covering-index fast path); SeekEnd positions a cursor past the last row for append workloads. Ahtola always materializes the full row on cursor access (CurrentCursorRow), so there is no covering-index read path and no lazy seek.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-index-cursor-opcode-family",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::Insn::IdxGE, IdxGT, IdxLE, IdxLT (execute.rs ~line 5680), IdxRowId, IdxInsert (line 10499), IdxDelete (line 10380), RowData",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SortedScanProgramBuilder.cs; index maintenance inside write-target delegates (no dedicated opcodes)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso has a full index-cursor family: range seeks with eq_only over index records, rowid extraction from index entries, index insert/delete with IdxInsertFlags (no-op dup detection), and raw record access (RowData). Ahtola reaches indexes only through the SortedScan builder and maintains them inside DML delegates. Works for the compiled shapes but blocks index-only scans, IN-driven index seeks, and partial/expression index exploitation (see compilation entries).",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-seek-op-family-partial",
+      "layer": "vdbe",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::Insn::SeekGE, SeekGT, SeekLE, SeekLT with eq_only (lines 5232-5300); Insn::Found, NotFound, NoConflict, NotExists",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::SeekRowidInstruction (FoundTarget/NotFoundTarget), SeekRowidRangeInstruction",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Ahtola consolidates point seeks into SeekRowid (with Found/NotFound targets folded in — a faithful merge of SeekRowid+Found/NotFound) and has SeekRowidRange for rowid ranges, but has no record-key seeks (SeekGE/GT/LE/LT over arbitrary index keys) and no eq_only distinction, and no NoConflict/NotExists probe opcodes (uniqueness is enforced inside write delegates instead). SeekRowidInstruction's own doc comment notes its scaffolding 'is not yet emitted by SelectStatementCompiler' — the opcode exists but the compiler never uses it (dead opcode today).",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-rowset-test",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::RowSetTest (dedup probe: jump if rowid already in set)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::RowSetInsertInstruction, RowSetRewindInstruction, RowSetNextInstruction",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Ahtola's RowSet trio maps Turso's RowSetAdd/RowSetRead (insert + drain) but lacks RowSetTest, the membership probe used to deduplicate rowids from OR'd index scans. Without it, multi-index OR plans cannot dedup — consistent with the compilation-layer finding that OR-index-union plans are absent.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-record-construction-model",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_make_record (line 2746: serial-type encoding into SQLite record format); op_type_check (line 2023)",
+      "ahtola_ref": "src/Ahtola.Core/Execution (registers hold SqlValue[] rows; record encoding happens at the pager write boundary); src/Ahtola.Core/Execution/VdbeProgram.cs::NumericAffinityInstruction, CastInstruction",
+      "severity": "s4-intentional",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "No MakeRecord: Ahtola rows live as materialized SqlValue arrays end-to-end and are only encoded to SQLite record format by the pager when a page is written. Format parity is a storage-layer concern (verified there); the VDBE-level consequence is that affinity-on-write (Turso's TypeCheck applying column affinities + CHECKs to a record before insert) happens in Ahtola's write delegates instead — see vdbe-typecheck-on-write.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-typecheck-on-write",
+      "layer": "vdbe",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_type_check (applies column affinities to a register block and enforces CHECK constraints before MakeRecord/Insert)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (affinity/CHECK enforcement inside write paths)",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "affinity.sqltest::affinity-rowid",
+        "affinity.sqltest::affinity-ascii-whitespace-1_1",
+        "subquery/memory.sqltest::subquery-column-affinity-inheritance",
+        "subquery/cte_materialization_adversarial.sqltest::range-scan-text-vs-int-affinity",
+        "gencol.sqltest::gencol_self_table_affinity_indexed_update_returning",
+        "gencol.sqltest::gencol_self_table_affinity_indexed_delete_returning",
+        "trigger-before-insert-affinity.sqltest::when-rowid-alias-keeps-integer-affinity",
+        "trigger-before-insert-affinity.sqltest::rowid-keeps-integer-affinity",
+        "trigger.sqltest::trigger-when-rowid-alias-string-literal-affinity",
+        "alter_table.sqltest::strict-alter-add-column-default-type-mismatch",
+        "alter_table.sqltest::strict-alter-add-column-default-integer-fractional",
+        "alter_table.sqltest::strict-alter-add-column-default-real-nonnumeric",
+        "alter_table.sqltest::strict-alter-add-column-default-text-blob",
+        "alter_table.sqltest::strict-alter-add-column-default-blob-text",
+        "update.sqltest::update-integer-pk-underflow-error"
+      ],
+      "notes": "Turso centralizes write-time coercion in TypeCheck; Ahtola scatters it across write delegates and the compiler's NumericAffinityInstruction emission. The 148-case wrong-values conformance cluster (affinity.sqltest leads it) shows the current placement misses cases — e.g. affinity through expression shapes the compiler does not annotate. Not an opcode-port job per se: the fix is making the compiler/delegate emission match TypeCheck's coverage matrix.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-newrowid-semantics",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::NewRowid (max+1 allocation with random-retry fallback at i64::MAX; separate from last_insert_rowid tracking)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs (CommitInstruction: LastInsertRowId = target.Commit(), ~line 631); rowid allocation inside write targets",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "autoincr.sqltest::autoinc-create-sequence-table",
+        "autoincr.sqltest::autoinc-alter-column-clears-sequence-row",
+        "temp_tables_mvcc.sqltest::temp-autoincrement-is-allowed-when-main-db-is-mvcc"
+      ],
+      "notes": "Rowid allocation is delegated to the write target's Commit rather than a NewRowid opcode. The autoinc failure (explicit max-rowid insert followed by plain INSERT) suggests the allocation edge (SQLite falls back to random unused rowid when max is reached; AUTOINCREMENT must error instead) is not faithfully reproduced. Verify SQLITE_FULL-vs-random behavior when porting.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-insert-update-flag-semantics",
+      "layer": "vdbe",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_insert (line 9897: InsertFlags::REQUIRE_SEEK, UPDATE_ROWID_CHANGE, PREFER_UPDATE; old-record capture for dependent views); op_delete (line 10274)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs (Insert/Update -> MutateCursorRow ~line 619; Delete -> target.DeleteRow ~line 608; RowsAffected counting)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "update.sqltest::update-set-expression-missing-identifier"
+      ],
+      "notes": "Ahtola models UPDATE as its own opcode plus delegate mutation, with change counting present. Missing flag semantics: REQUIRE_SEEK (position-before-write), UPDATE_ROWID_CHANGE (rowid-changing UPDATE ordering), PREFER_UPDATE (upsert resolution hint). The MVCC-layer finding that statement-level rollback after ON CONFLICT ROLLBACK on UPDATE is broken compounds here: conflict disposition is decided inside delegates with no flag channel.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-comparison-opcode-consolidation",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_comparison (line 888: Eq/Ne/Lt/Le/Gt/Ge as direct conditional jumps with CmpInsFlags {null_eq, jump_if_null, affinity, collation})",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::VdbeValueOperations.Compare (line 504) + ResumableStatement.cs JumpIfNotTrueInstruction (~line 232)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Verified near-parity consolidation: Ahtola evaluates the comparison to a tri-state value (IS/IS NOT handled null-safely; NULL -> NULL; affinities applied per side; collation passed) then branches on IsTrue. jump_if_null maps to NULL->false->FalseTarget; null_eq maps to the IS operator. Residual risks: (1) EmbeddedDatabase.IsTrue throws 'datatype mismatch' for non-numeric text where SQLite treats it as false; (2) JumpIfInstruction (~line 693) silently treats text as not-jumping — inconsistent with IsTrue. Recorded for completeness; fix the two IsTrue edges rather than de-consolidating.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-scalar-control-opcodes",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::Insn::IfPos, IfNeg, DecrJumpZero, MustBeInt (line 10943), ZeroOrNull, SoftNull (line 10961), MemMax (line 2788), AddImm, HaltIfNull (line 3262), Once, Noop",
+      "ahtola_ref": "none (compiler inlines equivalent logic via gates/delegates)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Mostly compiler machinery Ahtola's different program shapes do not need (counter loops, init-once blocks). Two carry user-visible semantics that deserve a check when the surrounding features land: MustBeInt (coerce-or-'datatype mismatch' used on rowid/FK paths) and HaltIfNull (RAISE/NOT NULL violation entry point). MemMax feeds AUTOINCREMENT sequence tracking.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-column-default-short-record",
+      "layer": "vdbe",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_column (lines 1903-1925: record with fewer columns than schema -> column DEFAULT value operand; null_flag -> NULL)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::ColumnInstruction (~line 1329: 'Retrieval of a missing column yields NULL')",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Turso's Column carries the column's DEFAULT as an operand so rows physically written before ALTER TABLE ADD COLUMN read back the default. Ahtola's ColumnInstruction documents NULL for a missing column and has no default operand. alter.sqltest passes except FK cases, so the pager decode likely pads or the shapes tested do not hit short records with defaults — VERIFY: `ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'x'` then SELECT c on pre-existing rows through the pager path. Also no NullRow opcode (LEFT JOIN null-fill is done by join delegates instead — structural, fine).",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-checkpoint-opcode",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_checkpoint (line 563: PASSIVE/FULL/RESTART/TRUNCATE modes)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalWriterCheckpointCoordinator.cs (internal checkpoint machinery; no SQL/opcode entry point)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "temp_tables.sqltest::pragma-temp-wal-checkpoint-without-temp-db-matches-sqlite"
+      ],
+      "notes": "Checkpoint coordination exists internally (storage layer) but there is no Checkpoint opcode, so `PRAGMA wal_checkpoint(...)` has no execution path — directly causes the three wal_checkpoint conformance failures (stacked on the parser-layer pragma catch-all gap).",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-integrity-check-opcode",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::IntegrityCk (btree/record integrity walk driven from VDBE)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "PRAGMA integrity_check/quick_check needs the opcode-driven btree walk; Ahtola has no integrity checker. Pairs with the parser-layer pragma catch-all gap.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-explain-output-parity",
+      "layer": "vdbe",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/vdbe/explain.rs (SQLite-style EXPLAIN rows: addr/opcode/p1-p5/comment) + Insn::Explain (EXPLAIN QUERY PLAN node text)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeExplain.cs (548 lines)",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Ahtola has a real EXPLAIN implementation over its own opcode set, so output necessarily diverges from SQLite/Turso text (different opcode names, no p1-p5 operand columns). Acceptable while EXPLAIN is diagnostic-only, but any conformance case asserting EXPLAIN output shape or EXPLAIN QUERY PLAN rows will fail. Decide policy: SQLite-emulating output vs documented Ahtola dialect.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-coroutine-machinery",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_init_coroutine (9761), op_end_coroutine (9788), op_yield (9808); Insn::Init (init-block jump)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs (JoinCursorState enumerators; work-table/window-buffer runtimes); VdbeProgram.cs::ResultRowInstruction",
+      "severity": "s4-intentional",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso implements co-routines (FROM-clause subqueries, scalar subqueries, CTEs) as register-machine coroutines with Yield; Ahtola uses .NET enumerators and dedicated runtimes — a managed-idiom adaptation per the porting model. NAME COLLISION: Turso's Yield is a coroutine switch; Ahtola's ResultRow is the row-yield. Capability consequences (which subquery shapes materialize) are tracked in compilation entries, not here.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-misc-cursor-opcodes",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::ResetSorter, AggValue, OpenDup, ColumnsUsed, OffsetLimit",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::OffsetGateInstruction, LimitGateInstruction (OffsetLimit split into two gates)",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Micro-opcodes: ResetSorter (re-drain a sorter for correlated subqueries without rebuilding), AggValue (read aggregate mid-iteration), OpenDup (cheap cursor clone), ColumnsUsed (column-usage metadata). OffsetLimit maps faithfully onto Ahtola's OffsetGate/LimitGate pair. None block SQL surface; each is a small perf/completeness item.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-cdc-opcode",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::InitCdcVersion (change-data-capture version bootstrap)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "CDC bootstrap opcode; feeds Turso's CDC capture consumed by sync. No Ahtola counterpart (sync layer lacks CDC too — see sync entries).",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-typed-value-opcode-family",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::ArrayEncode, ArrayExtract, ArrayLength, ArraySlice, ArrayConcat, ArrayPop, ArrayShift, ArrayPush, ArrayIndexAssign, MakeArray, MakeArrayDynamic, StructField, UnionExtract, RegCopyOffset, ColumnHasField, AddType, DropType",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso's typed-values extension (arrays/structs/unions/UDTs) — 17 opcodes, none SQLite. Ahtola has not adopted the extension; no conformance corpus coverage. Record as upstream-extension-not-yet-adopted.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-sequence-opcode-family",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::AddSequence, DropSequence, Sequence, SequenceTest, NextSequenceValue, ResetSequenceValue, CopySequenceValue, SequenceRegisterAllocation",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's CREATE SEQUENCE extension (8 opcodes), not SQLite syntax. Note: distinct from AUTOINCREMENT support (sqlite_sequence), which Ahtola partially has — see vdbe-newrowid-semantics and the autoinc conformance failure.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-materialized-view-opcodes",
+      "layer": "vdbe",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::PopulateMaterializedViews; op_insert old-record capture for dependent views (execute.rs lines 9916-10019); op_column MaterializedView cursor arms",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso's incremental-materialized-view extension: CREATE MATERIALIZED VIEW, dependent-view capture in DML opcodes, MV cursor types. Parser layer confirms no Ahtola grammar. Upstream extension, not adopted.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-ext-window-buffer-family",
+      "layer": "vdbe",
+      "kind": "extension",
+      "turso_ref": "none (Turso evaluates window functions via sorter + aggregate-style accumulation in translate/window.rs)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::OpenWindowBufferInstruction, WindowBufferInsertInstruction, WindowBufferComputeInstruction, WindowBufferDataInstruction, WindowBufferNextInstruction, CloseWindowBufferInstruction",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Ahtola-only buffered-window evaluation: the whole partition is buffered, then computed in one pass, enabling forward-looking and peer-relative frames cleanly. Semantically ahead for the shapes it covers; window *coverage* gaps (frame types) are compilation entries.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-ext-worktable-and-gate-families",
+      "layer": "vdbe",
+      "kind": "extension",
+      "turso_ref": "none direct (Turso uses OpenEphemeral + coroutines for recursive CTEs; LIMIT/OFFSET via OffsetLimit; DISTINCT via ephemeral indexes)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::OpenWorkTableInstruction, SeedWorkTableInstruction, WorkTableStepInstruction, WorkTableExpandInstruction, WorkTableExpandGenerationInstruction, CloseWorkTableInstruction; OffsetGate/LimitGate/DistinctGate/DistinctFilter/DistinctResultRow/CompoundResultRow/GuardedRow/SameGroup/GroupKey/ProjectRegisters/FilterRegisters/FilterRowId/RowCount/SeekRowidRange/OpenJoinCursor/Update/Commit/AggReset instructions",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Ahtola's higher-level opcode families: FIFO recursive work tables (recursive CTE), streaming join cursor, and gate opcodes that fuse what Turso does with primitive jump/compare sequences. These are the consolidation wins of the managed port — documented so the matrix does not misread them as unexplained divergence.",
+      "status": "open"
+    },
+    {
+      "id": "vdbe-aggregate-overflow-semantics",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs op_agg_step (line ~6647): Sum/Avg/Total overflow and large-float accumulation semantics",
+      "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs AggStep/AggFinal arms (lines ~660-700)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "agg-functions/sum-large-float.sqltest::sum-large-float-infinity",
+        "agg-functions/sum-large-float.sqltest::total-large-float-infinity",
+        "agg-functions/sum-large-float.sqltest::avg-large-float-infinity"
+      ],
+      "notes": "SUM/TOTAL/AVG over very large REAL values: Ahtola diverges from SQLite/Turso on infinity/overflow results for float aggregates. Verify Kahan/compensated summation and int->real promotion behavior against op_agg_step.",
+      "status": "open"
+    },
+    {
+      "id": "compile-no-cost-based-join-ordering",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/optimizer/join.rs::optimize_join_order (System R style DP), turso-src/core/translate/optimizer/mod.rs::optimize_plan",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::VdbeJoinPlan/VdbeJoinOperatorPlan (left-deep, literal-order only)",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso's optimizer/join.rs implements a System-R style dynamic-programming join reordering algorithm with pruning, using per-table cost/cardinality estimates (optimizer/cost.rs, cost_params.rs) and ANALYZE stats when present. Ahtola's VdbeJoinPlan always joins tables strictly in FROM/JOIN clause order (VdbeJoinOperatorPlan is a fixed left-deep tree built by the caller, not re-ordered by any cost model). Multi-table queries where writing the FROM clause in join order matters for performance will be correct but slow; there is no code path that reorders joins for a smaller intermediate result.",
+      "status": "open"
+    },
+    {
+      "id": "compile-no-access-method-selection",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/optimizer/access_method.rs::best_access_method, turso-src/core/translate/optimizer/constraints.rs",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ResolveScanTarget (line ~16415)",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso extracts WHERE-clause conjuncts into per-table Constraints and picks the cheapest access method (rowid seek, single/multi-column index seek, or full scan) per table independently of join order, considering multiple candidate indexes and their selectivity. Ahtola's ResolveScanTarget/IndexSemantics resolve at most one usable index per scan target via direct predicate-to-index matching (IndexExpressionSemantics.PredicateImplies/SplitConjuncts); there is no comparison between competing candidate indexes on the same table, no partial-index-aware cost comparison, and no multi-index intersection (Turso's optimizer/multi_index.rs, OR-clause index union) at all.",
+      "status": "open"
+    },
+    {
+      "id": "compile-no-or-clause-index-union",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/optimizer/multi_index.rs",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "SQLite/Turso can satisfy `WHERE a=1 OR b=2` (with separate indexes on a and b) via an index-union/OR-optimization instead of a full scan. Ahtola's compiler has no equivalent: OR predicates in WHERE fall back to sequential scan filtering (FilterRegistersInstruction), never index lookups per OR-branch.",
+      "status": "open"
+    },
+    {
+      "id": "compile-no-order-by-elision-from-index",
+      "layer": "compilation",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/translate/optimizer/order.rs::eliminate_order_by, turso-src/core/translate/order_by.rs",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs::TableAccessPlan descending-scan special case (lines ~121-150), src/Ahtola.Core/Compilation/SortedScanProgramBuilder.cs",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [
+        "snapshot_tests/subqueries/subquery-sort-elision.sqltest::window-partial-not-elided",
+        "snapshot_tests/subqueries/subquery-sort-elision.sqltest::window-no-cte-order-not-elided"
+      ],
+      "notes": "Turso's order.rs decides, per join order and access method, whether the chosen index already produces the required ORDER BY/GROUP BY order and elides the sort step. Ahtola only special-cases a single ORDER BY term matching the primary key/rowid for a single-table backward scan (SelectStatementCompiler ~line 132); any other case -- including index-satisfied ORDER BY on a secondary index, or GROUP BY order elision -- always materializes through a Sorter (SortedScanProgramBuilder). The listed conformance failures show sort-elision expectations not met for window/CTE queries.",
+      "status": "open"
+    },
+    {
+      "id": "compile-nway-join-not-index-driven",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/select.rs (join emission uses per-node OpenRead/Seek via chosen access method)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::VdbeJoinOperatorPlan.Enumerate (lines ~793-845)",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "VdbeJoinOperatorPlan.Enumerate always materializes the right side fully and nested-loops the left side against it in memory (VdbeJoinRow arrays), regardless of whether an index exists on the join key. There is no index-driven nested-loop join (seek into the right table per left row using its index) anywhere in the join plan machinery -- every N-way join is O(preceding-rows * table-size) in the worst case. JoinProgramBuilder.cs (2-table direct builder) is explicitly nested-loop only per its own doc comment.",
+      "status": "open"
+    },
+    {
+      "id": "compile-no-hash-join",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/optimizer/access_method.rs, cost.rs (equi-join cost modeling; Turso does not implement a hash-join operator either, but its cost model reasons about equi-join constraints for index seeks)",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Neither engine implements a true hash-join operator (both fundamentally rely on nested-loop plus index seeks), so this is not a gap versus Turso per se, but flagged because Ahtola's total absence of index-driven joins (see compile-nway-join-not-index-driven) means large equi-joins have no efficient path at all, whereas Turso's cost model at least picks an index seek that approximates hash-join performance for the common case.",
+      "status": "open"
+    },
+    {
+      "id": "compile-recursive-cte-single-term-only",
+      "layer": "compilation",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/translate/subquery.rs (recursive CTE planning, multiple recursive terms via compound UNION legs), turso-src/core/translate/compound_select.rs",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/RecursiveCteProgramBuilder.cs (doc comment lines 49-55)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "cte_expressions.sqltest::cte-multi-union",
+        "cte_expressions.sqltest::cte-union-all-with-duplicates"
+      ],
+      "notes": "RecursiveCteProgramBuilder explicitly documents its scope as \"the well-defined linear recursion (a single recursive transform)\" and states \"Multiple distinct recursive terms ... and mutual recursion are out of scope\". `WITH RECURSIVE cte AS (anchor UNION leg1 UNION leg2 ...)` (3+ compound terms) fails to parse/compile (\"Expected RightParen\"), confirmed by the cte_expressions.sqltest failures.",
+      "status": "open"
+    },
+    {
+      "id": "compile-no-subquery-flattening",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/subquery.rs, planner.rs (FROM-clause subquery flattening / pull-up into the outer query)",
+      "ahtola_ref": "none (subqueries are always compiled as independently executed/materialized nested queries; see EmbeddedDatabase.cs::MaterializeSubqueryResult line ~23552)",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "SQLite/Turso can flatten many `FROM (SELECT ...)` derived-table subqueries into the outer query when safe (no aggregates/DISTINCT/LIMIT conflicts), avoiding a materialization step and letting the outer WHERE clause push predicates into the inner query and use its indexes. Ahtola has no flattening pass: every derived-table/subquery source is executed and materialized independently via MaterializeSubqueryResult/ExecuteQuery before the outer query consumes its rows, so predicates never push down into subquery index selection.",
+      "status": "open"
+    },
+    {
+      "id": "compile-scalar-subquery-not-decorrelated",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/subquery.rs::plan_subqueries_from_where_clause / plan_subqueries_with_outer_query_access (allow_correlated, hoists uncorrelated subqueries to execute once)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (scalar/EXISTS/IN subquery recomputation, e.g. lines ~23504, ~23533)",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's subquery.rs distinguishes correlated from uncorrelated subqueries and hoists uncorrelated ones to evaluate once instead of once per outer row. Ahtola recomputes scalar/EXISTS/IN subqueries per outer row unconditionally (no correlation analysis found in EmbeddedDatabase.cs or the Compilation builders), which is correct but can be significantly slower for uncorrelated subqueries in a WHERE clause evaluated over many outer rows.",
+      "status": "open"
+    },
+    {
+      "id": "compile-select-compiler-single-table-fast-paths-only",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/select.rs, planner.rs (unified plan covers arbitrary joins/subqueries/aggregates through one planner)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs (class doc + TableAccessPlan branches lines 71-330)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "SelectStatementCompiler is architected as a set of narrow, provably-correct single-table fast paths (plain scan, backward/descending scan, indexed seek with bounds) with everything else falling through to more general (and slower) machinery in EmbeddedDatabase.cs/CompiledJoinProgramBuilder. This is a deliberate incremental-porting strategy (per repo convention of many small direct VDBE builders) rather than Turso's single unified planner, and is flagged as intentional/architectural rather than a functional bug.",
+      "status": "open"
+    },
+    {
+      "id": "compile-upsert-values-only-no-insert-select",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/upsert.rs::emit_upsert (upsert target resolution independent of INSERT source shape)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/DmlStatementCompiler.cs (UPSERT handling)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "upsert.sqltest::upsert-select-single"
+      ],
+      "notes": "Ahtola's UPSERT compiler rejects any INSERT...SELECT or CTE-sourced INSERT with an ON CONFLICT clause: \"Managed UPSERT supports VALUES rows only and does not support INSERT ... SELECT or CTE sources.\" Turso's upsert.rs resolves the conflict target and emits the DO UPDATE/DO NOTHING body independently of whether the INSERT source is VALUES or SELECT.",
+      "status": "open"
+    },
+    {
+      "id": "compile-on-conflict-rollback-update-unsupported",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/update.rs, schema.rs (ON CONFLICT ROLLBACK resolution applies uniformly to INSERT/UPDATE)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/DmlStatementCompiler.cs (UPDATE path)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "on_conflict_constraint_def.sqltest::update-pk-rollback",
+        "on_conflict_constraint_def.sqltest::update-rollback-terminates-transaction"
+      ],
+      "notes": "Ahtola throws \"Managed UPDATE cannot apply schema-level ON CONFLICT ROLLBACK until the pending row-update engine supports partial publication, transaction rollback, and replacement\" -- a documented, intentional carve-out, but it means schema-level `ON CONFLICT ROLLBACK` constraint resolution during UPDATE is unimplemented, unlike Turso which applies the same resolution machinery to both INSERT and UPDATE.",
+      "status": "open"
+    },
+    {
+      "id": "compile-trigger-new-not-visible-in-upsert-clause",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/trigger.rs, upsert.rs (NEW/OLD pseudo-tables visible inside a trigger body's own UPSERT statement)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/DmlStatementCompiler.cs (UPSERT), EmbeddedDatabase.Triggers.cs (NEW/OLD row binding)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "trigger_on_conflict.sqltest::trigger-upsert-new-column",
+        "trigger_on_conflict.sqltest::trigger-upsert-new-in-where",
+        "trigger_on_conflict.sqltest::trigger-upsert-new-in-where-no-update"
+      ],
+      "notes": "When a trigger body contains an INSERT ... ON CONFLICT DO UPDATE SET x = NEW.col statement, Ahtola fails with \"no such table: NEW\" -- the trigger's NEW/OLD pseudo-table binding is not threaded into the nested UPSERT statement's compilation scope, though it works for plain INSERT/UPDATE/DELETE bodies.",
+      "status": "open"
+    },
+    {
+      "id": "compile-order-by-aggregate-misuse-not-rejected",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/aggregation.rs (rejects aggregate functions appearing in ORDER BY of a non-aggregate query per SQLite semantics)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs, AggregateProgramBuilder.cs",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "agg-functions/order-by-aggregate-misuse.sqltest::order-by-min-misuse",
+        "agg-functions/order-by-aggregate-misuse.sqltest::order-by-max-misuse",
+        "agg-functions/order-by-aggregate-misuse.sqltest::order-by-sum-misuse",
+        "agg-functions/order-by-aggregate-misuse.sqltest::order-by-count-misuse"
+      ],
+      "notes": "SQLite rejects (or Turso matches SQLite's) certain misuse patterns of aggregate functions in ORDER BY outside of aggregate context; Ahtola's compiler currently lets these statements succeed instead of raising the expected compile-time error, a silent-acceptance divergence (s1: queries that should fail to compile succeed and may return misleading results/ordering).",
+      "status": "open"
+    },
+    {
+      "id": "compile-generated-column-error-message-mismatch",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/schema.rs (generated column validation error text)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (generated column expression validation)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [
+        "gencol.sqltest::gencol_error_aggregate_star",
+        "gencol.sqltest::gencol_error_window_function",
+        "gencol.sqltest::gencol_error_nested_window_function",
+        "gencol.sqltest::gencol_error_nested_aggregate_star"
+      ],
+      "notes": "Ahtola correctly rejects aggregate/window functions in generated column expressions but with a single combined message (\"aggregate and window functions are not allowed in a generated column\") instead of Turso's two distinct messages (aggregate-specific vs window-specific). Behaviorally equivalent (both reject), differs only in error text -- low-severity wording divergence, not a capability gap.",
+      "status": "open"
+    },
+    {
+      "id": "compile-window-function-tie-break-ordering-diverges",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/window.rs (RANK/DENSE_RANK peer-group tie-break uses declared collation and storage-class ordering rules)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/WindowProgramBuilder.cs, BufferedWindowProgramBuilder.cs",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "window/dense_rank.sqltest::dense-rank-collate-nocase-peers",
+        "window/dense_rank.sqltest::dense-rank-cross-type-numeric-peers",
+        "window/dense_rank.sqltest::dense-rank-float-precision-not-peers",
+        "window/dense_rank.sqltest::dense-rank-infinities",
+        "window/dense_rank.sqltest::dense-rank-storage-class-ordering",
+        "nulls-first-last.sqltest::window-two-different-nulls-orderings"
+      ],
+      "notes": "Multiple DENSE_RANK/RANK conformance cases show different peer-grouping outcomes (which rows tie for the same rank) versus SQLite/Turso when collation (NOCASE), cross-type numeric comparison, float precision, or storage-class ordering are involved -- indicating the window ORDER BY comparator used to detect peer groups in WindowProgramBuilder does not fully match SQLite's type/collation-aware comparison semantics used by the rest of the engine.",
+      "status": "open"
+    },
+    {
+      "id": "compile-save-all-cursors-window-selfjoin-timeout",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/window.rs, optimizer/join.rs (bounded-cost self-join + window evaluation)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/WindowProgramBuilder.cs, BufferedWindowProgramBuilder.cs, VdbeJoinPlan (nested-loop self-join)",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition",
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
+        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
+      ],
+      "notes": "Triple self-join plus window function queries time out (exceed the 30s managed execution budget) in Ahtola, consistent with the lack of index-driven joins and cost-based join ordering (see compile-nway-join-not-index-driven, compile-no-cost-based-join-ordering): a triple self-join is O(n^3) without index seeks, whereas Turso's optimizer would choose index-backed access methods per join.",
+      "status": "open"
+    },
+    {
+      "id": "compile-schema-sql-always-quotes-identifiers",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/schema.rs (preserves the original unquoted identifier spelling in stored/reconstructed CREATE TABLE/INDEX SQL when the source SQL was unquoted)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ALTER TABLE rename/add/drop-column schema SQL rewriting; IndexSemantics.cs::IndexSqlFormatter.QuoteIdentifier)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "alter_table.sqltest::alter-table-rename-column",
+        "alter_table.sqltest::alter-table-add-column",
+        "alter_table.sqltest::alter-table-add-column-typed",
+        "alter_table.sqltest::alter-table-add-quoted-column",
+        "alter_table.sqltest::alter-table-drop-column",
+        "alter_rename_column_partial_idx.sqltest::rename-column-updates-partial-index-where-clause-sql",
+        "create_table_as_select.sqltest::ctas_compound_select_column_names"
+      ],
+      "notes": "Roughly a dozen ALTER TABLE conformance failures show Ahtola always emitting double-quoted identifiers (`CREATE TABLE \"t\" (\"a\", \"b\")`) in the rewritten schema SQL text after ALTER TABLE ADD/RENAME/DROP COLUMN, whereas SQLite/Turso preserve the original unquoted spelling from the source DDL when no quoting was needed. This is purely a schema-SQL round-trip/formatting divergence (sqlite_master.sql text), not a query-result correctness issue, but it is systematic across the ALTER TABLE rewrite path.",
+      "status": "open"
+    },
+    {
+      "id": "compile-alter-drop-column-rejects-nondeterministic-expr-index",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/alter.rs (drop-column expression-index revalidation)",
+      "ahtola_ref": "src/Ahtola.Core/IndexSemantics.cs::IndexExpressionSemantics.ValidateExpression / IsDeterministicBuiltin",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "alter_table.sqltest::alter-table-drop-column-expr-index-unreferenced",
+        "alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel"
+      ],
+      "notes": "ALTER TABLE ... DROP COLUMN on a table with an unrelated expression index fails with \"non-deterministic functions are prohibited in index expressions\" in Ahtola where Turso/SQLite succeed -- the drop-column path appears to re-run full expression-index determinism validation against indexes it doesn't need to touch, rejecting otherwise-valid schema mutations.",
+      "status": "open"
+    },
+    {
+      "id": "compile-alter-rename-trigger-body-not-rebound",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/alter.rs (RenameTable/RenameColumn rewrites trigger body table references), trigger.rs",
+      "ahtola_ref": "none (RenameColumnRewriter.cs handles columns; no equivalent trigger-body table-rename rewrite found)",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "alter_table.sqltest::alter-table-rename-trigger-fires-after-rename",
+        "alter_table.sqltest::alter-table-rename-trigger-body-update",
+        "alter_table.sqltest::alter-table-rename-trigger-body-delete",
+        "alter_table.sqltest::alter-table-rename-trigger-body-insert-other-table",
+        "alter_table.sqltest::alter-table-rename-trigger-schema-tbl-name",
+        "alter_table.sqltest::alter-table-rename-trigger-self-insert-sql-rewritten"
+      ],
+      "notes": "After `ALTER TABLE t1 RENAME TO t2`, six conformance cases show existing triggers referencing the old table name inside their body (e.g. `INSERT INTO t1 ...` in a trigger on t1 itself) now fail at fire-time with \"no such table: t1\" -- Turso rewrites trigger-body table references on rename (mirroring RenameColumnRewriter.cs's column-level rewriting, src/Ahtola.Core/RenameColumnRewriter.cs) but Ahtola has no equivalent table-name rewrite for trigger bodies.",
+      "status": "open"
+    },
+    {
+      "id": "compile-attach-same-file-not-supported",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/attach.rs",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ATTACH handling)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [
+        "alter_table.sqltest::alter-table-rename-column-trigger-attached-db-same-db",
+        "alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db"
+      ],
+      "notes": "\"Managed ATTACH requires a file-backed managed primary database so attachments share its file system\" -- attaching the same in-memory/managed primary database to itself (a pattern some conformance tests use to test schema-qualified references) is rejected. This looks like an intentional simplification of ATTACH support (documented error message) rather than an oversight, but it does block schema-qualified (`main.t`, cross-attached) trigger/view scenarios in the compiler's name resolution.",
+      "status": "open"
+    },
+    {
+      "id": "compile-pragma-cache-size-unsupported",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/pragma.rs (PRAGMA cache_size)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-with-index",
+        "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-with-index-small",
+        "after-insert-trigger-cache-spill.sqltest::before-insert-trigger-cache-spill-with-index",
+        "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-no-index",
+        "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-multi-index"
+      ],
+      "notes": "`PRAGMA cache_size = N` is rejected outright (\"Unsupported PRAGMA cache_size\") rather than being accepted and either applied or silently ignored/no-op'd the way Turso/SQLite do; this blocks an entire family of cache-spill conformance tests that otherwise only depend on the PRAGMA being accepted, not its effect.",
+      "status": "open"
+    },
+    {
+      "id": "compile-scalar-function-infinity-literal-not-parsed",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/expr.rs / SQLite dialect grammar (accepts special float literal spellings like 1e400 that overflow to infinity)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs, SqlParser.cs (numeric literal grammar)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "agg-functions/sum-large-float.sqltest::sum-large-float-infinity",
+        "agg-functions/sum-large-float.sqltest::total-large-float-infinity",
+        "agg-functions/sum-large-float.sqltest::avg-large-float-infinity"
+      ],
+      "notes": "Queries using an overflowing float literal to produce +/-Infinity fail to parse (\"Expected RightParen\") rather than being accepted and yielding an IEEE-754 infinity value the way SQLite's tokenizer permits; this is a parser-level gap that surfaces as a compilation-stage rejection of otherwise-valid aggregate queries.",
+      "status": "open"
+    },
+    {
+      "id": "compile-group-by-expression-index-no-covering-optimization",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/group_by.rs, expression_index.rs, optimizer/access_method.rs (expression indexes usable for GROUP BY key resolution)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/AggregateProgramBuilder.cs",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "group-by-expression-index.sqltest::group-by-compound-expr-no-index"
+      ],
+      "notes": "GROUP BY over a compound expression that has a matching expression index fails with \"no such column: m\" in Ahtola -- the aggregate compiler does not resolve GROUP BY expressions against expression-index-backed columns the way it resolves plain column references, so queries relying on an expression index to make a compound GROUP BY expression addressable are rejected outright rather than merely running unoptimized.",
+      "status": "open"
+    },
+    {
+      "id": "compile-affinity-rules-diverge-in-subquery-and-compound-contexts",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/collate.rs, plan.rs (column affinity propagation through subquery results and compound SELECT operands)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs::ExpressionEmitter (numericAffinity/moduloAffinity/integerAffinity delegates), src/Ahtola.Core/Compilation/CompoundProgramBuilder.cs",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "affinity.sqltest::affinity-rowid",
+        "affinity.sqltest::affinity-in-subquery-text-lhs-integer-rhs",
+        "affinity.sqltest::affinity-scalar-subquery-text-comparison",
+        "affinity.sqltest::affinity-scalar-subquery-text-delete-predicate",
+        "affinity.sqltest::affinity-ascii-whitespace-1_1",
+        "affinity.sqltest::affinity-compound-subquery-all-text",
+        "affinity.sqltest::affinity-compound-subquery-numeric-col-plus-numeric-literal",
+        "affinity.sqltest::affinity-compound-subquery-numeric-literal-first-then-col"
+      ],
+      "notes": "A cluster of affinity.sqltest failures shows Ahtola computing a different column affinity than SQLite/Turso specifically when the affinity-bearing column flows through a scalar subquery, an IN (subquery), or a compound (UNION-family) SELECT -- i.e. affinity is correctly applied to direct column references but not consistently propagated through these composed query shapes, producing wrong comparison/coercion results (silently wrong row counts/values, hence s1).",
+      "status": "open"
+    },
+    {
+      "id": "compile-recursive-cte-fifo-only-no-cost-model",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/builder.rs (recursive CTE program via general VDBE program builder, no fixed FIFO-only restriction)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/RecursiveCteProgramBuilder.cs (doc lines 29-33)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "RecursiveCteProgramBuilder documents a fixed breadth-first (FIFO) generation order for the recursive worktable, always surfacing the anchor generation first then children level-by-level. This matches SQLite's actual behavior for a single linear recursive term, so it is flagged as an intentional, correctness-preserving simplification rather than a bug -- listed here for completeness since it constrains what recursive-CTE shapes can be routed through this direct builder (see compile-recursive-cte-single-term-only for the resulting capability gap).",
+      "status": "open"
+    },
+    {
+      "id": "compile-select-compiler-no-multi-table-covering-index",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/optimizer/access_method.rs (covering-index detection: skip the table b-tree entirely when the index carries every needed column)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs (TableAccessPlan seek paths always open the table cursor via seekCursor + ColumnInstruction reads)",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Every indexed-seek fast path in SelectStatementCompiler still opens the base table cursor and reads projected columns from it after seeking by rowid (`ColumnInstruction(seekCursor, columnIndex, ...)`); there is no detection of the case where the index itself carries all referenced columns (a covering index), which would let the compiler avoid opening/reading the table b-tree entirely and use only the (typically much smaller, better cached) index pages.",
+      "status": "open"
+    },
+    {
+      "id": "compile-views-not-updatable",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/view.rs (view.rs handles simple-view UPDATE/DELETE/INSERT pass-through when no INSTEAD OF trigger exists, per SQLite's updatable-view rules)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteInsteadOfInsert (line ~5858) requires an explicit INSTEAD OF trigger",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Ahtola only allows DML against a view when an explicit INSTEAD OF trigger is defined for it (ExecuteInsteadOfInsert throws \"cannot create INSTEAD OF trigger on table\" errors are the only DML-on-view path found). SQLite/Turso additionally support automatically-updatable simple views (a view over a single table with no aggregates/DISTINCT/compound/subqueries) without requiring an INSTEAD OF trigger.",
+      "status": "open"
+    },
+    {
+      "id": "compile-compound-select-result-ordering",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/compound_select.rs (compound result ordering, LIMIT/ORDER BY pushdown across UNION/EXCEPT/INTERSECT)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "select/memory.sqltest::select-intersect-union-with-limit",
+        "select/memory.sqltest::select-except-union",
+        "compound-select-orderby.sqltest::three-way-union-order-by",
+        "compound-select-orderby.sqltest::union-order-by-expr-no-match"
+      ],
+      "notes": "Compound SELECT arms return rows in wrong order when LIMIT/ORDER BY wraps the compound; Ahtola evaluates arms independently without SQLite merge/ordering contract.",
+      "status": "open"
+    },
+    {
+      "id": "compile-select-alias-visibility",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/expr.rs (SELECT-list alias binding visible in GROUP BY/HAVING/ON; ambiguous-column detection)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "groupby/memory.sqltest::having_or",
+        "groupby/memory.sqltest::group_by_nonconflicting_alias",
+        "groupby/memory.sqltest::group_by_column_having_alias",
+        "create_table_as_select.sqltest::ctas_group_by_having",
+        "agg-functions/memory.sqltest::filter-with-having",
+        "where/memory.sqltest::where_alias_precedence_3",
+        "subquery/memory.sqltest::subquery-uncorrelated-in-having",
+        "select/memory.sqltest::ambiguous-self-join",
+        "join/outer_hash_join.sqltest::full-outer-join-with-group-by"
+      ],
+      "notes": "SELECT-list aliases are not visible in GROUP BY/HAVING/JOIN-USING contexts (\"no such column: cnt/total/key\"); ambiguous-column errors also misreport which name is ambiguous. Largest single functional cluster after the parser alias gap.",
+      "status": "open"
+    },
+    {
+      "id": "compile-partial-index-support",
+      "layer": "compilation",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/translate/index.rs (CREATE INDEX ... WHERE partial indexes, planner use, RENAME rewriting of partial WHERE clauses)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [
+        "partial_idx.sqltest::plan-partial-index-and-where-eq-seek",
+        "alter_rename_column_partial_idx.sqltest::rename-column-updates-partial-index-where-clause-sql",
+        "alter_rename_column_partial_idx.sqltest::rename-column-partial-index-complex-where",
+        "alter_rename_column_partial_idx.sqltest::rename-column-partial-index-rename-where-col-only"
+      ],
+      "notes": "Partial indexes (WHERE clause) unsupported or unplanned; ALTER RENAME must also rewrite partial-index predicates.",
+      "status": "open"
+    },
+    {
+      "id": "compile-expression-index-support",
+      "layer": "compilation",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/translate/index.rs (indexes on expressions, determinism validation, covering use)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation (rejects some deterministic expressions, misses no-such-column check)",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [
+        "create_index.sqltest::create-index-string-literal-no-such-column",
+        "create_index.sqltest::create-index-strftime-with-column",
+        "create_index.sqltest::create-index-date-literal",
+        "group-by-expression-index.sqltest::group-by-expr-index-basic",
+        "update_expression_index.sqltest::substr-expression-index"
+      ],
+      "notes": "Expression indexes: Ahtola over-rejects date literals as non-deterministic, accepts string literals referencing no column without error, and does not use expression indexes for GROUP BY/UPDATE paths.",
+      "status": "open"
+    },
+    {
+      "id": "compile-reindex-statement",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate (REINDEX statement planning)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "reindex.sqltest::reindex-table-with-multiple-index-types"
+      ],
+      "notes": "REINDEX statement not implemented.",
+      "status": "open"
+    },
+    {
+      "id": "compile-attach-cross-database-support",
+      "layer": "compilation",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/translate/attach.rs + schema resolution (ATTACH/DETACH, cross-database object references, temp-vs-main resolution)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (Managed ATTACH: file-backed primary only; cross-database statements rejected)",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [
+        "trigger_attach_regression.sqltest::trigger-cross-db-subquery-reject",
+        "trigger_attach_regression.sqltest::trigger-explicit-main-qualification",
+        "trigger_attach_regression.sqltest::trigger-attached-db-same-db",
+        "transactions.sqltest::temp-and-main-table-in-immediate-tx",
+        "temp_tables.sqltest::temp-table-join-can-distinguish-main-and-temp",
+        "update_attached_db_index.sqltest::update-attached-db-non-rowid-column",
+        "detach/transaction.sqltest::detach-fails-with-active-write-transaction",
+        "alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db"
+      ],
+      "notes": "Managed ATTACH requires file-backed primary and forbids cross-database statements entirely; temp/main mixed statements are rejected as cross-database. Blocks the entire 41-case trigger_attach_regression file plus pragma attached-database cases.",
+      "status": "open"
+    },
+    {
+      "id": "compile-cte-dml-and-materialization-restrictions",
+      "layer": "compilation",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/translate/cte.rs (CTEs in UPDATE/DELETE, unused-CTE tolerance, materialization hints)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation (Managed CTE DML requires every CTE to contribute to the statement)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "cte.sqltest::cte-update-direct-ref-keyed",
+        "cte.sqltest::cte-update-direct-ref-nonkeyed",
+        "cte.sqltest::cte-unreferenced-column-mismatch-delete",
+        "cte_expressions.sqltest::cte-limit-inside",
+        "subquery/cte_materialization_adversarial.sqltest::range-scan-text-vs-int-affinity"
+      ],
+      "notes": "CTE use inside DML is artificially restricted (\"every CTE must contribute\"); expression-CTE materialization semantics diverge.",
+      "status": "open"
+    },
+    {
+      "id": "compile-collation-propagation-through-subquery",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/expr.rs + vdbe collation (COLLATE propagation through subquery results, compound arms, outer comparisons)",
+      "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "collate.sqltest::collate_subquery_from_nocase_outer_comparison",
+        "collate.sqltest::collate_union_all_nocase_branch",
+        "collate.sqltest::collate_subquery_preserves_column_collation",
+        "window/memory.sqltest::window-collate-partition-by",
+        "window/dense_rank.sqltest::dense-rank-collate-nocase-peers"
+      ],
+      "notes": "Column collation is lost across subquery boundaries and compound arms, flipping NOCASE comparisons and window peer groups.",
+      "status": "open"
+    },
+    {
+      "id": "compile-analyze-stat-tables",
+      "layer": "compilation",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/translate/analyze.rs (ANALYZE, sqlite_stat1/stat4 planner statistics)",
+      "ahtola_ref": "none (Managed ANALYZE reports planner statistics not implemented)",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [
+        "snapshot_tests/analyze/stat1_rows.sqltest::analyze-indexed-table-does-not-insert-null-stat1-row",
+        "join/memory.sqltest::correlated-subquery-hash-join-reuse"
+      ],
+      "notes": "ANALYZE and sqlite_stat tables absent; prerequisites for cost-based planning.",
+      "status": "open"
+    },
+    {
+      "id": "compile-generated-column-determinism-validation",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate (generated column expression validation: deterministic-function allowlist, datetime-literal rejection)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (generated column validation rejects deterministic substr())",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "gencol.sqltest::gencol_func_substr",
+        "gencol.sqltest::gencol_func_nested_upper_substr",
+        "gencol.sqltest::gencol_alter_add_virtual_random_error",
+        "gencol.sqltest::gencol_create_current_timestamp_rejected",
+        "gencol.sqltest::gencol_create_current_date_rejected",
+        "gencol.sqltest::gencol_alter_add_current_timestamp_rejected"
+      ],
+      "notes": "Determinism validation for generated columns misclassifies deterministic substr() as forbidden while error wording for truly forbidden expressions also diverges.",
+      "status": "open"
+    },
+    {
+      "id": "parser-implicit-column-alias",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/parser.rs::result_column (nm without AS)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseProjection",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "cte.sqltest::cte-alias-scalar-subquery-alias-name",
+        "cte.sqltest::cte-no-alias-scalar-subquery",
+        "cte_expressions.sqltest::cte-limit-inside",
+        "subquery/expressions.sqltest::subquery-join-two-subqueries",
+        "subquery/expressions.sqltest::subquery-group-by-inside",
+        "window/dense_rank.sqltest::dense-rank-over-dense-rank",
+        "agg-functions/sum-large-float.sqltest::sum-large-float-infinity",
+        "gencol.sqltest::gencol_validate_isnull"
+      ],
+      "notes": "SQLite (and turso-parser's result_column grammar) allows a SELECT-list column alias with or without the AS keyword: `SELECT 1 a, 2 b`. Ahtola's ParseProjection (SqlParser.cs:1794-1819) only calls ConsumeKeyword(\"AS\") before ExpectIdentifier for the alias; if AS is omitted the trailing identifier is left unconsumed and the enclosing subquery/CTE/paren context fails with a generic 'Expected RightParen'/'Expected End' error at the alias token's offset. This single omission accounts for the large majority of the ~78 'Expected X. At SQL offset N' expected-failure group: every sqltest that uses the extremely common `expr alias` idiom inside a derived table, CTE, or nested subquery breaks. Verified by hand-computing the failing offset in half a dozen distinct failures (all land exactly on the bare alias identifier).",
+      "status": "open"
+    },
+    {
+      "id": "parser-doubly-qualified-column-reference",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Expr::Column / DoublyQualified qualifier chain",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePrimary (Identifier + Dot branch, line ~2514-2528)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "delete.sqltest::doubly-qualified-delete",
+        "partial_idx.sqltest::partial-index-doubly-qualified-column-in-function",
+        "gencol.sqltest::gencol_error_doubly_qualified",
+        "gencol.sqltest::gencol_error_nested_doubly_qualified",
+        "trigger_attach_regression.sqltest::trigger-cross-db-join",
+        "trigger_attach_regression.sqltest::trigger-doubly-qualified-expr-runtime-error",
+        "trigger_attach_regression.sqltest::trigger-doubly-qualified-when-runtime-error",
+        "alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message"
+      ],
+      "notes": "SQLite/Turso expressions accept a 3-part `schema.table.column` reference anywhere a column can appear (e.g. `main.t1.val`), even though most call sites then reject it semantically (generated columns forbid the '.' operator; triggers forbid cross-db column refs). Ahtola's expression primary parser consumes at most one Dot after the leading identifier (SqlParser.cs 2514-2528: `if (Consume(TokenKind.Dot)) { ... return qualified; }` with no loop for a second dot), so any 3-part reference is a hard parse error (typically surfacing as 'Expected RightParen'/'Expected Semicolon' at the second dot) instead of a semantic error with a specific message. This blocks both the 'valid at parse time, invalid at bind time' cases (gencol_error_doubly_qualified expects a specific runtime message, not a parse failure) and legitimate 3-part refs like `WHERE main.test.col = 2`.",
+      "status": "open"
+    },
+    {
+      "id": "parser-isnull-notnull-postfix",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Expr::IsNull / NotNull (postfix ISNULL/NOTNULL/NOT NULL)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseEquality (NOT-postfix branch, line ~2312-2318) — no ISNULL/NOTNULL handling exists anywhere",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "null/default.sqltest::isnull",
+        "null/default.sqltest::notnull",
+        "null/default.sqltest::not-null",
+        "glob/memory.sqltest::glob-null-other-types",
+        "gencol.sqltest::gencol_validate_isnull",
+        "gencol.sqltest::gencol_validate_notnull",
+        "gencol.sqltest::gencol_validate_nested_isnull_arith",
+        "gencol.sqltest::gencol_validate_nested_notnull_arith"
+      ],
+      "notes": "SQLite's expr grammar has three null-test postfix forms: `expr ISNULL`, `expr NOTNULL`, and `expr NOT NULL` (all equivalent to `expr IS [NOT] NULL`). Ahtola's parser has no ISNULL/NOTNULL keyword handling at all, and its NOT-postfix branch only recognizes BETWEEN/IN/LIKE/GLOB/REGEXP/MATCH after NOT — the literal error thrown is 'Expected BETWEEN, IN, LIKE, GLOB, REGEXP, or MATCH after NOT.' when NULL follows NOT. This rejects extremely common SQL (`x ISNULL`, `x NOT NULL` as an expression) both at the top level and inside generated-column expressions.",
+      "status": "open"
+    },
+    {
+      "id": "parser-pragma-unrecognized-name-hard-rejection",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Stmt::Pragma { name, body } (any identifier is a legal pragma name)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePragma (fixed if/else-if chain ending in `throw Error($\"Unsupported PRAGMA {name}.\")` at line 278)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "pragma/memory.sqltest::pragma-cache-size-default",
+        "pragma/memory.sqltest::pragma-set-cache-size",
+        "pragma/memory.sqltest::pragma-cache-spill-off",
+        "pragma/memory.sqltest::pragma-max-page-count-default",
+        "temp_tables.sqltest::temp-store-memory-still-supports-temp-tables",
+        "delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows",
+        "check_constraint.sqltest::check_constraint_pragma_ignore",
+        "last_insert_rowid.sqltest::last-insert-rowid-unchanged-by-cdc-internal-inserts",
+        "pragma-unknown-no-op.sqltest::unknown-pragma-reverse-unordered-selects",
+        "pragma-unknown-no-op.sqltest::unknown-pragma-legacy-alter-table",
+        "pragma/require_where.sqltest::pragma-require-where-alias",
+        "pragma/require_where.sqltest::pragma-require-where-delete-with-where-ok",
+        "pragma_vdbe_trace.sqltest::pragma-vdbe-trace",
+        "savepoint.sqltest::savepoint-rollback-overflow-issue-6352"
+      ],
+      "notes": "The turso-parser grammar's `Stmt::Pragma` accepts *any* identifier as `name`, with an arbitrary optional body (`= value`, `(value)`, or none); SQLite's own behavior for a genuinely unrecognized pragma name is a silent no-op, not a parse or runtime error (this is exactly what pragma-unknown-no-op.sqltest asserts: `PRAGMA reverse_unordered_selects=1`/`PRAGMA legacy_alter_table=1` succeed as no-ops). Ahtola's ParsePragma is a closed if/else-if ladder over ~23 hard-coded names (table_info, index_list, journal_mode, page_size, integrity_check, etc.) and throws for anything else, so it can never even produce an AST node for cache_size, cache_spill, temp_store, wal_checkpoint, max_page_count, ignore_check_constraints, capture_data_changes_conn (Turso CDC), require_where/i_am_a_dummy (Turso extension), or vdbe_trace (Turso debug pragma) — 41 distinct conformance cases fail this way. This is the single highest-leverage parser fix: add a generic/catch-all PragmaStatement(name, rawBody) AST node so unrecognized-but-syntactically-valid PRAGMAs parse (letting the compiler layer decide no-op vs. real effect) instead of being rejected at the grammar level.",
+      "status": "open"
+    },
+    {
+      "id": "parser-pragma-argument-syntax-equals-form",
+      "layer": "parser",
+      "kind": "partial",
+      "turso_ref": "turso-src/sqlite/parser/src/parser.rs::pragma_value (`= value` and `(value)` both legal for a single-arg pragma)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePragmaObjectName / ParseOptionalPragmaObjectName (lines 315-343)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "pragma/foreign_key_list.sqltest::pragma-foreign-key-list-equals-syntax",
+        "pragma/index_info.sqltest::pragma-index-info-equals-syntax",
+        "pragma/index_list.sqltest::pragma-index-list-equals-syntax",
+        "pragma/index_xinfo.sqltest::pragma-index-xinfo-equals-syntax",
+        "pragma/table_list.sqltest::pragma-table-list-single-table",
+        "pragma/table_list.sqltest::pragma-table-list-equals-syntax",
+        "pragma/table_list.sqltest::pragma-table-list-attached-database"
+      ],
+      "notes": "Even for the PRAGMAs Ahtola *does* recognize, the object-name argument grammar is incomplete in two ways. (1) `ParsePragmaObjectName` (line 317) unconditionally does `Expect(TokenKind.LeftParen)`, so it only accepts `PRAGMA foreign_key_list(t1)` style and rejects the equally-legal `PRAGMA foreign_key_list = t1` equals-form that real SQLite's pragma grammar allows for any single-value pragma. (2) `PRAGMA table_list` is coded via `RequireReadOnlyPragma` to reject *any* argument at all ('PRAGMA table_list does not accept a value'), but SQLite's actual table_list pragma accepts an optional table-name filter argument (`PRAGMA table_list('t1')` / `PRAGMA table_list=t1`) — Ahtola's grammar for this pragma is simply wrong, not just stricter.",
+      "status": "open"
+    },
+    {
+      "id": "parser-create-virtual-table-not-parsed",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::CreateVirtualTable { if_not_exists, tbl_name, module_name, args }",
+      "ahtola_ref": "none — src/Ahtola.Core/Parsing/SqlParser.cs line 512 detects the VIRTUAL keyword only to immediately throw",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso's Stmt::CreateVirtualTable(CreateVirtualTable) is a first-class AST node capturing module name and raw argument strings. Ahtola's SqlAst.cs has no corresponding statement type at all; SqlParser.cs recognizes `CREATE VIRTUAL TABLE` only far enough to throw 'Managed CREATE VIRTUAL TABLE modules are not supported.' No conformance-suite hits were found (the corpus does not exercise virtual tables), but this is a structural grammar gap: the statement cannot be represented in the AST even for introspection/round-tripping purposes, unlike every other DDL form.",
+      "status": "open"
+    },
+    {
+      "id": "parser-begin-concurrent-mode",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::TransactionType (includes Concurrent, a Turso MVCC extension) / Stmt::Begin",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::TransactionMode (Deferred/Immediate/Exclusive only); src/Ahtola.Core/Parsing/SqlParser.cs line 110-124",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors",
+        "mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors",
+        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors",
+        "temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc"
+      ],
+      "notes": "Turso's MVCC engine adds `BEGIN CONCURRENT` as a fourth transaction-mode keyword alongside DEFERRED/IMMEDIATE/EXCLUSIVE. Ahtola's TransactionMode enum and BEGIN parsing (SqlParser.cs 110-124) only recognize the three stock SQLite keywords, so `BEGIN CONCURRENT` leaves CONCURRENT unconsumed and the statement fails with a generic 'Expected End' instead of the specific semantic error the conformance tests expect (e.g. 'cannot start a transaction within a transaction').",
+      "status": "open"
+    },
+    {
+      "id": "parser-begin-commit-transaction-name",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Stmt::Begin { name: Option<Name> } / Stmt::Commit { name: Option<Name> }",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::BeginStatement/CommitStatement (no Name field); src/Ahtola.Core/Parsing/SqlParser.cs lines 110-129",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "bracket-quoting.sqltest::bracket-transaction-name"
+      ],
+      "notes": "SQLite's grammar for BEGIN/COMMIT/END admits an optional transaction name after the TRANSACTION keyword (`trans_opt ::= | TRANSACTION | TRANSACTION nm`), which is accepted and ignored. Ahtola's parser calls `ConsumeKeyword(\"TRANSACTION\")` for BEGIN and COMMIT/END but never attempts to consume a trailing name, so `BEGIN TRANSACTION [txn];` fails with 'Expected End' instead of parsing (and discarding) the name like SQLite does. BeginStatement/CommitStatement also have no Name property to carry it even if parsed.",
+      "status": "open"
+    },
+    {
+      "id": "parser-upsert-chained-conflict-clauses",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Upsert { next: Option<Box<Upsert>> } (chained ON CONFLICT clauses)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::UpsertClause (single instance, no chaining); src/Ahtola.Core/Parsing/SqlAst.cs::InsertStatement.Upsert : UpsertClause?",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "upsert.sqltest::upsert-multilple-conflict-targets",
+        "upsert.sqltest::upsert-targets-chain"
+      ],
+      "notes": "SQLite 3.35+ (and turso-parser's Upsert.next linked-list field) allow chaining multiple ON CONFLICT clauses on one INSERT: `INSERT ... ON CONFLICT(x) DO NOTHING ON CONFLICT(y) DO UPDATE SET ...`, evaluated in order until one matches. Ahtola's InsertStatement carries at most one `UpsertClause?`, so the parser can only ever recognize a single ON CONFLICT clause; a second chained clause is left dangling and fails with 'Expected End'.",
+      "status": "open"
+    },
+    {
+      "id": "parser-raise-message-expression",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Expr::Raise(ResolveType, Option<Box<Expr>>) (message is an arbitrary expression)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseRaiseExpression (lines 2626-2651)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "trigger.sqltest::trigger-raise-shorthand",
+        "trigger.sqltest::trigger-raise-expr-concat",
+        "trigger.sqltest::trigger-raise-expr-concat-pass",
+        "trigger.sqltest::trigger-raise-fail-expr",
+        "trigger.sqltest::trigger-raise-rollback-expr"
+      ],
+      "notes": "turso-parser's `Expr::Raise` stores the message as `Option<Box<Expr>>` — any expression, e.g. `RAISE(ABORT, 'bad: ' || NEW.a)`. Ahtola's ParseRaiseExpression hard-requires `Expect(TokenKind.Comma)` then `_lexer.Current.Kind != TokenKind.String` throws 'RAISE() error messages must be string literals.' — string concatenation or any non-literal message expression is rejected. Additionally Ahtola has no shorthand `RAISE('message')` single-argument form (implicit ABORT) that some of the corpus's trigger tests use; only `IGNORE`, or `{ROLLBACK|ABORT|FAIL}, message` are accepted (lines 2630-2642).",
+      "status": "open"
+    },
+    {
+      "id": "parser-alter-table-alter-column",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::AlterTableBody (Turso extension variant for ALTER COLUMN, beyond stock SQLite's Add/Rename/RenameColumn/DropColumn)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::AlterTableAddColumnStatement / AlterTableRenameStatement / AlterTableRenameColumnStatement / AlterTableDropColumnStatement (no AlterColumn form); src/Ahtola.Core/Parsing/SqlParser.cs 'Expected ADD, DROP, or RENAME after ALTER TABLE.'",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "autoincr.sqltest::autoinc-alter-column-clears-sequence-row"
+      ],
+      "notes": "`ALTER TABLE t ALTER COLUMN a TO a2 TEXT` (rename + retype a column in one statement) is a Turso extension beyond stock SQLite's ADD COLUMN / RENAME [TO] / RENAME COLUMN / DROP COLUMN. Ahtola's ALTER TABLE dispatch only recognizes those four stock forms and throws 'Expected ADD, DROP, or RENAME after ALTER TABLE.' for ALTER COLUMN. Flagged s2 (capability gap vs. Turso) rather than s4 because the conformance corpus (derived from Turso's own test suite) exercises it, but note it is not part of SQLite's own grammar.",
+      "status": "open"
+    },
+    {
+      "id": "parser-numeric-literal-digit-separators",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/lexer.rs (numeric literal scanning permits `_` digit-group separators, e.g. `9_223_372_036_854_775_807`)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs::ReadNumber (lines 342-383) — only char.IsAsciiDigit is consumed, no '_' handling",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "literal.sqltest::numberic-literal-5",
+        "literal.sqltest::numberic-literal-6",
+        "literal.sqltest::numberic-literal-7",
+        "literal.sqltest::numberic-literal-8",
+        "literal.sqltest::numberic-literal-13",
+        "literal.sqltest::numberic-literal-14",
+        "literal.sqltest::numberic-literal-exceed-max-i64",
+        "literal.sqltest::numberic-literal-exceed-min-i64",
+        "select/memory.sqltest::limit-underscore-literal"
+      ],
+      "notes": "SQLite 3.46+ / Turso's lexer accepts `_` as a digit-group separator anywhere inside an integer or real literal (`9_223_372_036_854_775_807`, `1_2_3`), which is stripped before parsing the numeric value. Ahtola's ReadNumber only loops over `char.IsAsciiDigit(_sql[_offset])` for the integer part, fractional part, and exponent, with no `_` handling in any of the three loops, so any underscore in a numeric literal terminates the token early and the remaining digits are re-lexed as a separate (invalid) token, producing 'Expected End'.",
+      "status": "open"
+    },
+    {
+      "id": "parser-trailing-named-constraint-without-body",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/sqlite/parser/src/parser.rs (grammar quirk: a trailing `CONSTRAINT name` with no following constraint keyword is accepted as a no-op)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (column/table constraint dispatch) — throws 'Expected a constraint after CONSTRAINT {name}.'",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [
+        "alter_table.sqltest::alter-table-add-column-trailing-named-constraint",
+        "create_table.sqltest::create_table_trailing_named_column_constraint",
+        "create_table.sqltest::create_table_trailing_named_column_constraint_primary_key_enforced"
+      ],
+      "notes": "SQLite's own LALR grammar happens to accept a dangling `CONSTRAINT c` at the very end of a column/ADD COLUMN definition with no constraint keyword following it (an accepted quirk, not documented behavior worth relying on, but real SQLite does not error). Ahtola's constraint-name dispatch always requires a recognized constraint keyword (PRIMARY KEY/UNIQUE/CHECK/DEFAULT/COLLATE/REFERENCES/NOT NULL/GENERATED) after `CONSTRAINT name` and throws otherwise. Low-priority SQLite-compat quirk, not a capability most real schemas rely on.",
+      "status": "open"
+    },
+    {
+      "id": "parser-nulls-clause-rejection-error-message",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::SortedColumn { nulls: Option<NullsOrder> } (NULLS FIRST/LAST parsed everywhere sort expressions appear, then semantically rejected for CREATE INDEX / table-level PRIMARY KEY / UNIQUE / upsert conflict targets with an error naming 'NULLS')",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (indexed-column / upsert-target-column parsing paths — do not recognize NULLS keyword at all in these contexts)",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [
+        "create_index.sqltest::create-index-nulls-first-rejected",
+        "create_index.sqltest::create-index-nulls-last-rejected",
+        "create_index.sqltest::create-index-nulls-first-with-desc-rejected",
+        "create_table.sqltest::create_table_primary_key_nulls_last_rejected",
+        "create_table.sqltest::create_table_unique_nulls_first_rejected",
+        "create_table.sqltest::create_table_unique_desc_nulls_first_rejected",
+        "upsert.sqltest::upsert-conflict-target-nulls-first-rejected"
+      ],
+      "notes": "Both engines reject NULLS FIRST/LAST inside CREATE INDEX column lists, table-level PRIMARY KEY(...)/UNIQUE(...) column lists, and upsert conflict targets — but SQLite's error message specifically mentions 'NULLS' because its grammar parses the clause first and rejects it semantically, whereas Ahtola's grammar for these indexed-column contexts never recognizes the NULLS keyword at all, so it fails earlier with a generic 'Unexpected token in index expression'/'Expected RightParen'. Net behavior (rejection) matches; only the diagnostic text differs, which is why every conformance-suite expectation here is an 'error text doesn't match pattern NULLS' mismatch rather than a false-success.",
+      "status": "open"
+    },
+    {
+      "id": "parser-turso-only-ddl-extensions-absent",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Stmt::CreateMaterializedView / CreateType / DropType / CreateDomain / DropDomain (Turso-only, non-SQLite DDL extensions)",
+      "ahtola_ref": "none — no corresponding statement types exist in src/Ahtola.Core/Parsing/SqlAst.cs",
+      "severity": "s4-intentional",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso's ast.rs Stmt enum includes several experimental statement kinds that are not part of SQLite's own grammar: CREATE MATERIALIZED VIEW, CREATE/DROP TYPE (custom scalar types), CREATE/DROP DOMAIN (constrained type aliases with CHECK/NOT NULL/DEFAULT). None of these have any representation in Ahtola's grammar or AST. Given Ahtola's stated goal is a SQLite-compatible engine (not a 1:1 Turso clone), and none of these appear in the vendored SQLite conformance corpus, this is flagged s4-intentional pending an explicit product decision rather than a bug — but is worth tracking so the divergence is a conscious choice, not an oversight.",
+      "status": "open"
+    },
+    {
+      "id": "parser-turso-only-sequence-and-optimize-statements",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Stmt::CreateSequence / DropSequence / Stmt::Optimize { idx_name } (Turso-only, non-SQLite extensions)",
+      "ahtola_ref": "none — no corresponding statement types exist in src/Ahtola.Core/Parsing/SqlAst.cs",
+      "severity": "s4-intentional",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "CREATE/DROP SEQUENCE (standalone integer sequences, distinct from AUTOINCREMENT) and OPTIMIZE INDEX are Turso-only statement kinds with no SQLite equivalent and no hits in the vendored SQLite conformance corpus. Same rationale as parser-turso-only-ddl-extensions-absent: flagged s4-intentional as a tracked, deliberate divergence rather than a defect, pending a product decision on Turso-extension parity.",
+      "status": "open"
+    },
+    {
+      "id": "parser-pragma-family-coverage-gap",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/dialect/ (pragma table covers ~60 names: synchronous, mmap_size, busy_timeout, auto_vacuum, secure_delete, threads, soft_heap_limit, wal_autocheckpoint, compile_options, collation_list, function_list, module_list, pragma_list, data_version, journal_size_limit, writable_schema, case_sensitive_like, trusted_schema, stats, lock_status, shrink_memory, optimize, hard_heap_limit, ...)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePragma (23 names total: table_info, table_xinfo, index_list, index_info, index_xinfo, foreign_key_list, foreign_key_check, table_list, database_list, encoding, query_only, foreign_keys, defer_foreign_keys, recursive_triggers, schema_version, user_version, application_id, journal_mode, page_size, page_count, freelist_count, integrity_check, quick_check)",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [
+        "pragma/memory.sqltest::pragma-cache-size-default",
+        "temp_tables.sqltest::temp-store-memory-still-supports-temp-tables",
+        "check_constraint.sqltest::check_constraint_pragma_ignore",
+        "pragma-unknown-no-op.sqltest::unknown-pragma-legacy-alter-table"
+      ],
+      "notes": "Beyond the generic-catch-all fix in parser-pragma-unrecognized-name-hard-rejection, this entry tracks the raw enumeration gap for readers doing a family-by-family audit: of SQLite's roughly 60 recognized pragma names, Ahtola's grammar recognizes 23 (all schema-introspection/read-only or transaction-control pragmas). The largest missing families are cache/memory tuning (cache_size, cache_spill, mmap_size, soft_heap_limit, shrink_memory), storage/durability tuning (synchronous, secure_delete, temp_store, auto_vacuum, wal_autocheckpoint, journal_size_limit, max_page_count), and metadata/introspection (compile_options, collation_list, function_list, module_list, pragma_list, data_version, stats). Whether each should be a real setting or an accepted no-op is a compiler-layer decision; the parser-layer requirement is simply that the grammar accept the name+value syntax at all (see parser-pragma-unrecognized-name-hard-rejection for the concrete fix).",
+      "status": "open"
+    },
+    {
+      "id": "parser-indexed-by-hint",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser (INDEXED BY / NOT INDEXED clauses on table refs and DML)",
+      "ahtola_ref": "none (Managed UPDATE/DELETE do not support INDEXED BY)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "indexed_by.sqltest::indexed-by-delete",
+        "update-from.sqltest::update-from-indexed-by-target-hint-is-preserved",
+        "gencol.sqltest::gencol_self_table_affinity_indexed_update_returning",
+        "gencol.sqltest::gencol_self_table_affinity_indexed_delete_returning"
+      ],
+      "notes": "INDEXED BY/NOT INDEXED hint syntax unsupported across SELECT/UPDATE/DELETE.",
+      "status": "open"
+    },
+    {
+      "id": "parser-join-subquery-form",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser (parenthesized subquery as JOIN operand, joins between subqueries)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing (Expected RightParen at JOIN of subqueries)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "subquery/expressions.sqltest::subquery-join-two-subqueries",
+        "subquery/expressions.sqltest::subquery-left-join-two-subqueries",
+        "subquery/expressions.sqltest::subquery-cross-join-subqueries",
+        "subquery/expressions.sqltest::subquery-natural-join-subqueries",
+        "subquery/expressions.sqltest::subquery-from-union",
+        "subquery/expressions.sqltest::subquery-from-union-all"
+      ],
+      "notes": "Parser rejects JOIN operands that are parenthesized subqueries/unions (Expected RightParen). Blocks the 11-case subquery/expressions file.",
+      "status": "open"
+    },
+    {
+      "id": "parser-error-message-parity",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/sqlite/parser + core error strings (NATURAL join message, RAISE shorthand, circular view, aggregate ORDER BY message)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing + Compilation messages",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "join/memory.sqltest::join-3-1",
+        "join/memory.sqltest::join-3-2",
+        "trigger.sqltest::trigger-raise-shorthand",
+        "views.sqltest::view-rejects-aggregate-order-by",
+        "views.sqltest::view-mutual-circle-detection",
+        "window/memory.sqltest::window-row-number-in-check-constraint",
+        "default_value.sqltest::default-value-column-name",
+        "select/memory.sqltest::ambiguous-column-error-message-format"
+      ],
+      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages.",
+      "status": "open"
+    },
+    {
+      "id": "parser-not-operator-operand-forms",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite/parser (NOT BETWEEN / NOT GLOB / NOT LIKE operand grammar incl. parenthesized and subquery bounds)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "glob/memory.sqltest::glob-null-other-types",
+        "not_between.sqltest::not-between-subquery-bound-orderby-offset"
+      ],
+      "notes": "NOT-prefixed operators reject some operand forms (parenthesized subquery bounds, typed operands).",
+      "status": "open"
+    },
+    {
+      "id": "parser-bracket-quoted-identifiers",
+      "layer": "parser",
+      "kind": "missing",
+      "turso_ref": "turso-src/sqlite parser lexer (MS-style [identifier] quoting accepted for compatibility)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing lexer",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "bracket-quoting.sqltest::bracket-default-identifier"
+      ],
+      "notes": "Square-bracket quoted identifiers not lexed.",
+      "status": "open"
+    },
+    {
+      "id": "func-jsonb-scalar-family",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::JsonFunc (Jsonb, JsonbArray, JsonbExtract, JsonbObject, JsonbPatch, JsonbRemove, JsonbReplace, JsonbInsert, JsonbSet); turso-src/core/json/jsonb.rs",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [
+        "json/json-insert-replace-odd-args.sqltest::jsonb-insert-path-only-errors",
+        "json/json-insert-replace-odd-args.sqltest::jsonb-replace-path-only-errors"
+      ],
+      "notes": "Ahtola's SqliteBuiltinFunctions.Names has no JSONB, JSONB_ARRAY, JSONB_EXTRACT, JSONB_OBJECT, JSONB_PATCH, JSONB_REMOVE, JSONB_REPLACE, JSONB_INSERT, or JSONB_SET; grepping src/Ahtola.Core for 'Jsonb'/'JSONB' returns zero hits. Only the JSON (text) family exists. This is the entire binary-JSON encoding family from turso-src/core/json/jsonb.rs, not just the two aggregates called out separately. Every call raises 'no such function: JSONB_*'.",
+      "status": "open"
+    },
+    {
+      "id": "func-jsonb-aggregates",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::AggFunc::JsonbGroupArray, AggFunc::JsonbGroupObject",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "SqliteBuiltinFunctions.Names lists JSON_GROUP_ARRAY/JSON_GROUP_OBJECT but not JSONB_GROUP_ARRAY/JSONB_GROUP_OBJECT. Expected-failures file confirms 'no such function: JSONB_GROUP_OBJECT' and 'no such function: JSONB_ARRAY' (the latter used inside a jsonb_group_object test). Depends on func-jsonb-scalar-family (same underlying Jsonb value representation) being ported first.",
+      "status": "open"
+    },
+    {
+      "id": "func-array-agg-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::AggFunc::ArrayAgg (\"array_agg\")",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Turso registers array_agg as a built-in aggregate (turso-src/core/function.rs line ~1611). Not present in SqliteBuiltinFunctions.Names or EmbeddedDatabase.AggregateFunctions.cs. Not stock SQLite (Postgres-style), so low urgency for SQLite-compat conformance, but is a real capability gap vs. Turso's registry. No conformance corpus hits found, so effort/impact is small; grouped separately from JSONB because it does not depend on the Jsonb value type.",
+      "status": "open"
+    },
+    {
+      "id": "func-array-postgres-family",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Array, ArrayElement, ArraySetElement, ArrayAppend, ArrayPrepend, ArrayCat, ArrayRemove, ArrayContains, ArrayContainsAll, ArrayPosition, ArraySlice, StringToArray, ArrayToString",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Postgres-style ARRAY(...)/array_element/array_append/etc. scalar family, always compiled (not behind a cargo feature flag) but not part of stock SQLite semantics and not present anywhere in Ahtola.Core. No sqltest corpus coverage found (grep for array_agg/struct_pack/etc. only matched agg-functions/default.sqltest and gencol.sqltest, neither of which uses this family). Downgraded to s3 because it is a Turso-specific extension beyond SQLite compatibility, not a correctness regression against the conformance suite.",
+      "status": "open"
+    },
+    {
+      "id": "func-struct-union-experimental",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::StructPack, StructExtractFunc, UnionValueFunc, UnionTagFunc, UnionExtractFunc",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Experimental typed STRUCT/UNION column support in Turso (struct_pack/struct_extract/union_value/union_tag/union_extract), unrelated to SQLite's dynamic typing model. No conformance coverage. Treat as an intentional non-goal unless Ahtola later adopts Turso's typed-column extensions.",
+      "status": "open"
+    },
+    {
+      "id": "func-sequence-nextval-family",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::NextVal, CurrVal, SetVal",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Postgres-style sequence functions (nextval/currval/setval) tied to Turso's experimental SEQUENCE object and ScalarFunc::SequenceWatermark/ConnTxnId connection state. No SQLite equivalent, no conformance coverage. Not a gap against SQLite-compat goals.",
+      "status": "open"
+    },
+    {
+      "id": "func-vector-family",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vector/mod.rs, turso-src/core/vector/operations/{distance_cos,distance_l2,distance_dot,jaccard,concat,slice,serialize,convert}.rs; turso-src/core/function.rs::VectorFunc (Vector, Vector32, Vector32Sparse, Vector64, Vector8, Vector1Bit, VectorExtract, VectorDistanceCos, VectorDistanceL2, VectorDistanceJaccard, VectorDistanceDot, VectorConcat, VectorSlice)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Entire vector/embedding scalar function family (vector(), vector32(), vector_distance_cos/l2/jaccard/dot, vector_concat, vector_slice, vector_extract) has no counterpart anywhere in src/Ahtola.Core; grep for VectorFunc/vector_distance/vector32 across the engine returns nothing. No conformance corpus tests reference these (not part of the vendored SQLite-derived sqltest suite), but the task's scope explicitly names core/vector/ as in-layer, so flagged as a capability gap rather than out of scope.",
+      "status": "open"
+    },
+    {
+      "id": "func-fts-scalar-family",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::FtsFunc::Score (\"fts_score\"), FtsFunc::Match (\"fts_match\"), FtsFunc::Highlight (\"fts_highlight\")",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "FTS-related scalar helpers used with Turso's fts5-style virtual tables; no equivalent in Ahtola.Core (no FTS virtual table support at all in this layer). Out of primary scope unless/until FTS virtual tables are ported; noting the scalar-function surface only.",
+      "status": "open"
+    },
+    {
+      "id": "func-octet-length-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::OctetLength (\"octet_length\")",
+      "ahtola_ref": "none",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "octet_length is absent from SqliteBuiltinFunctions.Names and from EmbeddedDatabase.StringFunctions.cs / EmbeddedDatabase.cs (no case-insensitive hit for 'octet' anywhere except unrelated byte-iteration variables named 'octet'). SQLite/Turso's octet_length returns UTF-8 byte length (distinct from LENGTH's codepoint count for multi-byte text, e.g. 'ąłóżźć' is 6 codepoints but 12 UTF-8 bytes). These cases are exercised in scalar-functions.sqltest but are NOT listed in managed-sqltest-expected-failures.txt, suggesting either the corpus file/test isn't wired into the managed run or the gap is silently mis-reported as unexpected-pass/fail elsewhere -- worth a dedicated look when closing this gap.",
+      "status": "open"
+    },
+    {
+      "id": "func-unistr-family-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Unistr (\"unistr\"), ScalarFunc::UnistrQuote (\"unistr_quote\")",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "unistr()/unistr_quote() (Postgres-style Unicode escape decoding/encoding) are absent from SqliteBuiltinFunctions.Names and EmbeddedDatabase.StringFunctions.cs; the only 'unistr' hit in EmbeddedDatabase.cs is an unrelated string literal used when quoting schema text for round-tripping, not an implementation. All corpus tests for these are tagged '@skip-if sqlite ...' (real SQLite doesn't ship them either) so they run only against the managed engine; ~20 unistr* tests + unistr-quote* tests are candidates. Not present in the current expected-failures file, meaning either these tests are excluded from the managed corpus run or silently failing outside the tracked gap list -- verify wiring when addressing.",
+      "status": "open"
+    },
+    {
+      "id": "func-soundex-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Soundex (\"soundex\")",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "soundex() is registered in Turso but is optional in stock SQLite too (needs SQLITE_SOUNDEX); the corpus test itself is commented out. Low priority: not required for SQLite conformance, but a real capability gap vs. Turso's always-on registry. No hit for 'soundex'/'Soundex' anywhere in src/Ahtola.Core.",
+      "status": "open"
+    },
+    {
+      "id": "func-gcd-lcm-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Gcd (\"gcd\"), ScalarFunc::Lcm (\"lcm\")",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "gcd()/lcm() (Turso/SQLite-3.41+-style math helpers) have no hits anywhere in src/Ahtola.Core or Ahtola.Core/EmbeddedDatabase.MathFunctions.cs. Not covered by the vendored sqltest corpus (no gcd(/lcm( occurrences found).",
+      "status": "open"
+    },
+    {
+      "id": "func-repeat-lpad-rpad-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Repeat (\"repeat\"), Lpad (\"lpad\"), Rpad (\"rpad\")",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "repeat()/lpad()/rpad() string-padding helpers are absent from SqliteBuiltinFunctions.Names and EmbeddedDatabase.StringFunctions.cs. Not part of stock SQLite but present in Turso's registry (and common in other SQL dialects); no corpus coverage found in the vendored sqltest suite, so this is a pure registry gap rather than a conformance failure today.",
+      "status": "open"
+    },
+    {
+      "id": "func-string-reverse-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::StringReverse (\"string_reverse\")",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "string_reverse() is registered in Turso but has no counterpart in Ahtola.Core and no corpus coverage. Extension-level gap, not SQLite-standard.",
+      "status": "open"
+    },
+    {
+      "id": "func-numeric-boolean-ip-helpers-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::BooleanToInt, IntToBoolean, ValidateIpAddr, NumericEncode, NumericDecode, NumericAdd, NumericSub, NumericMul, NumericDiv, NumericLt, NumericEq",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Internal-flavored helper functions supporting Turso's typed BOOLEAN/NUMERIC column extensions and validated IP address type; no SQLite equivalent and no corpus coverage. Treated as intentional non-goal alongside func-struct-union-experimental unless Ahtola adopts the same typed-column extensions.",
+      "status": "open"
+    },
+    {
+      "id": "func-substr-utf16-vs-codepoint-divergence",
+      "layer": "functions",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Substr/Substring (dispatches to Rust functions/string.rs, which index by Unicode scalar value / char, i.e. codepoints)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::EvaluateSubstring",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "EvaluateSubstring computes `length` via .NET string.Length and slices with string.Substring using UTF-16 code-unit offsets, not Unicode codepoints. For text containing supplementary-plane characters (e.g. emoji, U+10000+), a single SQLite/Turso 'character' occupies one UTF-16 surrogate pair in .NET, so length/start/end all overcount and substr() can split a surrogate pair, producing corrupted (unpaired-surrogate) output or wrong offsets. Contrast with LENGTH (EmbeddedDatabase.cs::EvaluateLength, uses `EnumerateRunes().Count()`) and INSTR (EvaluateInstr, converts to a Rune-counted index) which are already correctly codepoint-aware in this same file/area -- SUBSTR/SUBSTRING is the outlier that was not ported to Rune-based indexing. No dedicated conformance case was found exercising astral-plane substr(), which is likely why this has not surfaced as a corpus failure yet.",
+      "status": "open"
+    },
+    {
+      "id": "func-real-text-formatting-intentional-divergence",
+      "layer": "functions",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/types.rs (or equivalent) -- sqlite3FpDecode-derived formatting via Dekker double-double arithmetic used for REAL->TEXT conversion",
+      "ahtola_ref": "src/Ahtola.Core/SqliteRealText.cs::Format, Decompose",
+      "severity": "s4-intentional",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "SqliteRealText.cs documents (in its own XML doc comment) a deliberate divergence: SQLite's sqlite3FpDecode is cheap-but-not-correctly-rounded and can emit a spurious/incorrect 17th significant digit for extreme magnitudes (its own example: 3.1079236656039855e-160 vs the correctly rounded 3.1079236656039854e-160), whereas Ahtola always emits the shortest round-trippable representation via .NET's 'R' formatting. Every value still round-trips to the same double; only the digit count/last-digit value can differ from real SQLite for those rare extreme-precision cases. Already well-documented and intentional, but flagged here since it is a genuine textual output divergence a byte-for-byte compatibility check would catch.",
+      "status": "open"
+    },
+    {
+      "id": "func-test-nondet-counter-missing",
+      "layer": "functions",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::TestNondetCounter (\"test_nondet_counter\"), behind #[cfg(feature = \"test_helper\")]",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [
+        "window/filter-over.sqltest::filter-over-repeated-nondeterministic-call",
+        "window/filter-over.sqltest::filter-over-mixed-deterministic-and-nondeterministic-dedup"
+      ],
+      "notes": "test_nondet_counter() is a Turso test-only helper (feature-gated) used by the vendored sqltest corpus to probe nondeterministic-function dedup/caching behavior in window FILTER clauses. Ahtola has no equivalent test-helper function, so these two corpus cases fail with 'no such function: TEST_NONDET_COUNTER'. Low-effort to add as a test-only builtin, but it's test-infrastructure rather than a real user-facing function gap.",
+      "status": "open"
+    },
+    {
+      "id": "func-json-group-object-numeric-label-affinity",
+      "layer": "functions",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/json/ops.rs (json_group_object key-stringification path)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs (JSON_GROUP_OBJECT key handling)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_text_numeric_label_unchanged",
+        "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_numeric_column_labels"
+      ],
+      "notes": "The numeric-label test file targets JSONB_GROUP_OBJECT (missing, see func-jsonb-aggregates), but its title implies numeric object-key stringification/affinity semantics (does a REAL/INTEGER label get its SqliteRealText/canonical-integer text form, or a re-parsed/re-rounded form?) that should be spot-checked against the existing JSON_GROUP_OBJECT implementation once JSONB support lands, since the same key-stringification code path is likely shared between the JSON and JSONB group-object aggregates.",
+      "status": "open"
+    },
+    {
+      "id": "func-extension-uuid-family",
+      "layer": "functions",
+      "kind": "extension",
+      "turso_ref": "none (no uuid()/uuid4()/uuid7() family in turso-src/core/function.rs)",
+      "ahtola_ref": "src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names (UUID4_STR, GEN_RANDOM_UUID, UUID4, UUID7_STR, UUID7, UUID7_TIMESTAMP_MS, UUID_STR, UUID_BLOB)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Ahtola registers a full UUID v4/v7 generation family (text and blob forms, plus gen_random_uuid() for Postgres compatibility) that has no counterpart anywhere in turso-src/core/function.rs's Func::from_str table. Genuine Ahtola-only extension; also listed correctly in the NonDeterministic set.",
+      "status": "open"
+    },
+    {
+      "id": "func-extension-format-btrim",
+      "layer": "functions",
+      "kind": "extension",
+      "turso_ref": "none (Turso's function.rs has no \"format\" or \"btrim\" entries in its from_str table)",
+      "ahtola_ref": "src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names (FORMAT, BTRIM); EmbeddedDatabase.cs::EvaluatePrintf (FORMAT aliases PRINTF), EmbeddedDatabase.StringFunctions.cs::EvaluateTrim (BTRIM aliases TRIM)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "FORMAT (an alias for PRINTF, matching real SQLite's built-in but not present as a distinct entry in Turso's from_str dispatch table) and BTRIM (Postgres-style alias for TRIM) are Ahtola additions/aliases beyond Turso's registry. Low-risk convenience extensions, not correctness gaps.",
+      "status": "open"
+    },
+    {
+      "id": "func-agg-arg-collation-typeof-spotcheck",
+      "layer": "functions",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Typeof; turso-src/core/types.rs affinity rules used by SUM/TOTAL/AVG",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs; src/Ahtola.Core/SqlValue.cs",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Requested spot-check area: typeof() results and numeric affinity coercion inside SUM/TOTAL/AVG when mixing TEXT-that-looks-numeric, REAL, and INTEGER inputs. No concrete conformance-file citation was found pinpointing a live divergence in the current expected-failures list (the two 'no such function' JSONB entries and the TEST_NONDET_COUNTER entries are the only agg/scalar related lines), so this entry records the spot-check as inconclusive/needs-follow-up rather than a confirmed bug; keep open for a follow-up pass once JSONB and octet_length gaps are closed and the corpus can be re-run to look for newly-surfaced numeric-affinity failures.",
+      "status": "open"
+    },
+    {
+      "id": "func-math-result-type-divergence",
+      "layer": "functions",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/functions/math (ceil/ceiling/floor/trunc result-type contract: integer-preserving for integer input)",
+      "ahtola_ref": "src/Ahtola.Core/SqliteBuiltinFunctions.cs",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "math/memory.sqltest::ceil-int",
+        "math/memory.sqltest::ceiling-int",
+        "math/memory.sqltest::floor-int",
+        "math/memory.sqltest::trunc-int",
+        "numeric-text-overflow.sqltest::ceil-text-i64-max-stays-integer"
+      ],
+      "notes": "Math rounding functions return REAL (1.0) where SQLite returns integer text (1); ceil over text i64-max also loses integer affinity and precision.",
+      "status": "open"
+    },
+    {
+      "id": "func-char-coercion",
+      "layer": "functions",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/functions (char() of non-integer yields empty string per SQLite)",
+      "ahtola_ref": "src/Ahtola.Core/SqliteBuiltinFunctions.cs",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "char.sqltest::char-non-integer"
+      ],
+      "notes": "char() with non-integer argument returns a space instead of empty string.",
+      "status": "open"
+    },
+    {
+      "id": "storage-no-btree-balancing",
+      "layer": "storage",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/storage/btree.rs::balance, balance_non_root, balance_quick, balance_root",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteBtreeSplitWriter.cs::SqliteBtreeSplitMutation",
+      "severity": "s1-correctness",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "SqliteBtreeSplitMutation's own doc comment states it 'can replace existing pages or append new pages, but never shrinks, rebalances, or reclaims pages.' Turso implements full B-tree balancing (redistribute cells across up to 3 siblings, merge underfull pages, promote/collapse the root). Ahtola only ever grows pages via leaf split; there is no sibling rebalancing or interior-page merge path. Over time this produces ever-growing, increasingly unbalanced trees and pages that never shrink back after bulk deletes, and is the root cause of several other gaps in this list (freelist reuse, defragmentation, incremental vacuum).",
+      "status": "open"
+    },
+    {
+      "id": "storage-append-only-page-allocator",
+      "layer": "storage",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/storage/pager.rs::Pager::allocate_page (ReuseFreelistLeaf state machine)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqlitePageAllocator.cs::SqliteAppendOnlyPageAllocator",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Ahtola's only page allocator is SqliteAppendOnlyPageAllocator, whose doc comment says it 'does not inspect or reclaim the SQLite freelist' and always assigns new page numbers past the current end of file. Turso's Pager::allocate_page consults the freelist trunk chain first (ReuseFreelistLeaf state) before growing the file. Practical effect: every DELETE/DROP in Ahtola leaves file space that is never reused by subsequent INSERTs outside of a full VACUUM rewrite, so the main database file only ever grows (bloat), unlike stock SQLite/Turso.",
+      "status": "open"
+    },
+    {
+      "id": "storage-freelist-write-path-vacuum-only",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/pager.rs::Pager::free_page, ReuseFreelistLeaf, NEW_FREELIST_TRUNK",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteFreelist.cs::SqliteFreelist.Create/CreateFromFreePages/Read",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "SqliteFreelist.cs correctly parses and can construct trunk/leaf freelist pages, but per its own doc comment it is used only by 'managed file rewrites' (i.e. VACUUM-style full reconstruction), not by the normal DML write path. There is no free_page()-equivalent invoked when a b-tree page becomes empty during ordinary DELETE/DROP TABLE transactions, so the freelist is only ever populated/consumed as a side effect of a full rewrite, not incrementally as SQLite/Turso do.",
+      "status": "open"
+    },
+    {
+      "id": "storage-no-incremental-vacuum",
+      "layer": "storage",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/storage/pager.rs::AutoVacuumMode::Incremental, ptrmap_get/ptrmap_put; turso-src/core/vdbe/vacuum.rs::reject_unsupported_vacuum_auto_vacuum_mode",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "No AutoVacuumMode/ptrmap concept exists anywhere in Ahtola.Core (grep for 'autovacuum'/'ptrmap' finds nothing outside SQL parsing/authorization text). Turso itself only partially supports this (Full auto-vacuum has ptrmap plumbing, but vacuum.rs explicitly rejects AutoVacuumMode::Incremental as unsupported), so full parity is not required, but Ahtola is missing even the header-level auto_vacuum flag storage and the ptrmap page format entirely. PRAGMA incremental_vacuum / auto_vacuum are effectively no-ops storage-side, independent of the PRAGMA-parsing gap owned by another layer.",
+      "status": "open"
+    },
+    {
+      "id": "storage-no-page-cache-spill",
+      "layer": "storage",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/storage/page_cache.rs::PageCache::needs_spill, SpillResult, DEFAULT_SPILL_THRESHOLD_PERCENT",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqlitePagerReadCache.cs::SqlitePagerReadCache",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "pragma/memory.sqltest::pragma-cache-size-default",
+        "pragma/memory.sqltest::pragma-set-cache-size",
+        "pragma/memory.sqltest::pragma-cache-size",
+        "pragma/memory.sqltest::pragma-cache-spill-off",
+        "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-with-index",
+        "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-with-index-small",
+        "after-insert-trigger-cache-spill.sqltest::before-insert-trigger-cache-spill-with-index",
+        "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-no-index",
+        "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-multi-index",
+        "savepoint.sqltest::savepoint-rollback-cache-spill-issue-6351"
+      ],
+      "notes": "SqlitePagerReadCache is a plain bounded LRU cache for clean committed pages only (no dirty-page tracking, no spill-threshold, no PagesToSpill/CacheFull semantics). Turso's PageCache tracks dirty vs. evictable pages, computes a spill threshold (90% of capacity by default) and can proactively spill dirty pages mid-transaction so large transactions do not exceed cache_size. Ahtola has no equivalent dirty-page spilling at all -- this is the concrete storage-side cause of the ~10 'Unsupported PRAGMA cache_size/cache_spill' conformance failures another agent's PRAGMA-parsing fix cannot resolve alone.",
+      "status": "open"
+    },
+    {
+      "id": "storage-no-defragmentation",
+      "layer": "storage",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/storage/btree.rs::defragment_page, defragment_page_fast, defragment_page_full, defragment_page_for_insert",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteCellPointerArray.cs, SqliteBtreePageIo.cs",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "No defragment_page equivalent exists in Ahtola's b-tree page writers. Repeated insert/delete of variable-length cells on the same page will fragment free space within the page (gaps between cells) with no in-page compaction pass, forcing premature splits/allocations sooner than stock SQLite/Turso would. Not a format violation (page remains a valid, if fragmented, SQLite page) but a capacity/perf regression.",
+      "status": "open"
+    },
+    {
+      "id": "storage-checkpoint-modes-implemented",
+      "layer": "storage",
+      "kind": "parity",
+      "turso_ref": "turso-src/core/storage/wal.rs::CheckpointMode (Passive, Full, Restart, Truncate)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalWriterCheckpointCoordinator.cs::SqliteWalCheckpointMode",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Not a gap -- included for completeness of the checkpoint-mode audit. Ahtola's SqliteWalCheckpointMode enum (Passive/Full/Restart/Truncate) mirrors Turso's CheckpointMode variants, and SqliteWalWriterCheckpointCoordinator implements busy-handler-style backfill accounting (SafeFrame/BackfilledFrameCount) analogous to Turso's CheckpointResult. Marked as parity, not a discovered defect.",
+      "status": "closed"
+    },
+    {
+      "id": "storage-byte-range-shm-locks-partial-scope",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/wal.rs::TursoRwLock, WalConnectionState, ShmWalCoordination locking (READ_LOCK(n)/WRITE_LOCK/CHECKPOINT_LOCK byte ranges)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalByteRangeLock.cs, SqliteWalSharedMemoryLocks.cs, PhysicalSqliteWalSharedMemoryMapping.cs",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "temp_tables.sqltest::pragma-temp-wal-checkpoint-without-temp-db-matches-sqlite"
+      ],
+      "notes": "SqliteWalByteRangeLock/SqliteWalSharedMemoryLocks implement the -shm byte-range lock offsets for the primary main-database WAL (read marks, write lock, checkpoint lock), giving good format-level parity for the common case. However, the coordinator itself documents (SqliteWalWriterCheckpointCoordinator remarks) that it 'neither acquires nor relaxes the managed pager's Stage 0 main-file ownership lock,' i.e. these primitives are a detached/offline protocol layer, not the live in-process pager's own concurrent-access lock manager, and multi-attached/temp-database WAL locking is called out as a known conformance gap. This is a scope gap versus Turso's unified Wal trait locking across every attached database, not a byte-offset format bug.",
+      "status": "open"
+    },
+    {
+      "id": "storage-hot-journal-recovery-minimal",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/pager.rs (rollback/journal recovery on open), turso-src/core/storage/sqlite3_ondisk.rs",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteRollbackJournal.cs::IsHot, Recover",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "SqliteRollbackJournal.IsHot detects a stale/hot rollback journal from a crashed writer, but the recovery path is a narrow helper (journal-mode enum + hot-detection + apply) rather than the full pager-integrated hot-journal replay Turso performs on every database open (validating journal header magic/page count/checksums, replaying each journal page, then deleting/truncating the journal, all before any reader is allowed access). Needs verification that partial/corrupt journals, super-journals (master journal for multi-file transactions), and journal_mode=PERSIST/TRUNCATE variants are all covered; multi-database (ATTACH) super-journal recovery does not appear to be implemented.",
+      "status": "open"
+    },
+    {
+      "id": "storage-no-super-journal-multidb",
+      "layer": "storage",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/storage/pager.rs (master/super-journal path for multi-file atomic commit)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "No super-journal (a.k.a. master journal) file handling was found in SqliteRollbackJournal.cs or elsewhere in Storage/. Stock SQLite/Turso use a super-journal to atomically commit rollback-journal-mode transactions spanning multiple ATTACHed databases. Ahtola's rollback-journal support appears scoped to a single main database file only.",
+      "status": "open"
+    },
+    {
+      "id": "storage-no-buffer-pool-arena",
+      "layer": "storage",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/storage/buffer_pool.rs::BufferPool, ArenaBuffer, Arena (slab/arena page-buffer allocator with try_alloc/free)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqlitePageStore.cs",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso maintains a dedicated arena-based BufferPool that recycles fixed-size page/WAL-frame buffers to avoid per-page heap allocation churn under concurrent I/O. Ahtola has no equivalent pooling abstraction in Storage/ -- page images appear to be plain managed byte[] arrays allocated per read/write (see SqlitePagerReadCache.Entry(byte[] Page, ...) and SqliteFreelist's `new byte[pageSize]`). This is a GC-pressure/perf gap, not a correctness gap, given .NET's managed heap.",
+      "status": "open"
+    },
+    {
+      "id": "storage-encryption-extension",
+      "layer": "storage",
+      "kind": "extension",
+      "turso_ref": "turso-src/core/storage/encryption.rs::EncryptionKey, CipherMode (AES-128/256-GCM, AEGIS family)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/AhtolaPageEncryption.cs, AhtolaEncryptionFileSystem.cs",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Intentional Ahtola extension per task context (kind=extension, s4-intentional). Turso's encryption.rs supports the same class of AEAD ciphers (AES-GCM, AEGIS-*) with a 'Turso Encrypted Header' page-1 marker; Ahtola's AhtolaPageEncryption/AhtolaEncryptionFileSystem implement page-level encryption through the IFileSystem abstraction with an Ahtola-specific header rather than reusing the on-disk 'Turso' cipher-id marker. Ahtola is ahead in that its encryption is layered transparently under any IFileSystem implementation (works for both PhysicalFileSystem and InMemoryFileSystem) rather than being wired only into the native pager. Confirm cipher-suite coverage (AEGIS-128X2/X4, AEGIS-256X2/X4) is intentionally out of scope if not implemented, since these are less common.",
+      "status": "open"
+    },
+    {
+      "id": "storage-overflow-write-path-scope",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/btree.rs (overflow chain allocate/write on insert/update of large payloads)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteOverflowChainReader.cs, SqliteOverflowPageView.cs",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "index-cursor-record-after-overflow-update.sqltest::rowid-after-overflow-update",
+        "savepoint.sqltest::savepoint-rollback-overflow-issue-6352",
+        "savepoint.sqltest::savepoint-rollback-overflow-nested-issue-6352",
+        "savepoint.sqltest::savepoint-rollback-overflow-repeated-issue-6352",
+        "savepoint.sqltest::savepoint-rollback-overflow-grow-issue-6352"
+      ],
+      "notes": "SqliteOverflowChainReader/SqliteOverflowPageView are read-side only (constructed from a page store, pager, or ISqliteBtreePageIo to *read* an existing chain); no SqliteOverflowChainWriter-equivalent type was found under Storage/ for allocating and writing new overflow pages during INSERT/UPDATE of over-threshold payloads, and it is unclear whether new overflow pages are allocated through the append-only allocator (see storage-append-only-page-allocator) or freed/reused correctly on UPDATE-shrink. The linked conformance failures around overflow + savepoint rollback and overflow + cursor-after-update reinforce that overflow chain mutation under transactional rollback is not yet solid.",
+      "status": "open"
+    },
+    {
+      "id": "storage-wal-index-shm-mapping-parity",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/wal.rs::WalFileShared, WalSharedMetadata, OpenSharedWal (in-process shared WAL-index state across connections)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalIndex.cs, PhysicalSqliteWalSharedMemoryMapping.cs",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "PhysicalSqliteWalSharedMemoryMapping.cs implements the on-disk -shm mapping (needed for cross-process/interop parity), which is good format-level coverage, but it is unclear from file inventory whether Ahtola shares a single WalFileShared-equivalent in-process object across multiple AhtolaConnection instances on the same file the way Turso's WalFileShared/OpenSharedWal do (avoiding redundant -shm remapping and enabling true multi-connection read-mark coordination in a single process). Needs a targeted test asserting two in-process connections to the same file observe consistent read marks without redundant OS-level mmap churn.",
+      "status": "open"
+    },
+    {
+      "id": "storage-no-mvcc-checkpoint-lock-guard",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/wal.rs::VacuumLockGuard, CheckpointLocks (guards preventing VACUUM/checkpoint races)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalWriterCheckpointCoordinator.cs",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's WalFileShared carries an explicit VacuumLockGuard (Drop-based release) coordinated with CheckpointLocks so a concurrent VACUUM cannot run while a checkpoint holds the relevant locks (and vice versa). Ahtola's coordinator manages Write/Checkpoint/Recovery/FirstReadMark lock offsets but, given the append-only allocator and lack of an incremental-vacuum/full-rewrite integration point in Storage/, there is no equivalent explicit vacuum-vs-checkpoint mutual exclusion guard visible. Worth a targeted concurrency test once/if a non-append-only allocator or incremental vacuum is added, since the two subsystems (checkpoint backfill positions and any future page-relocating vacuum) would otherwise race on the same PageStore.",
+      "status": "open"
+    },
+    {
+      "id": "storage-pager-lock-manager-scope",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/pager.rs (PAGER_* lock states: UNLOCKED/SHARED/RESERVED/PENDING/EXCLUSIVE)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqlitePagerLockManager.cs",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "SqlitePagerLockManager.cs exists and presumably models the classic SQLite file-lock state machine, but combined with storage-byte-range-shm-locks-partial-scope this should be re-verified specifically for the ATTACH/multiple-file case and for whether PENDING-lock starvation prevention (a documented SQLite correctness subtlety) is implemented identically. Flagged for follow-up rather than asserting a concrete defect, since a full read of this file was out of scope for this pass.",
+      "status": "open"
+    },
+    {
+      "id": "storage-varint-and-record-codec-parity",
+      "layer": "storage",
+      "kind": "parity",
+      "turso_ref": "turso-src/core/storage/sqlite3_ondisk.rs (varint encode/decode, record header/serial-type codec)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteVarint.cs, SqliteRecordCodec.cs",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Included for completeness of the audit: varint and record-codec files exist on the Ahtola side with names that map 1:1 to sqlite3_ondisk.rs responsibilities and no symptom in the expected-failures file points at record/varint decoding. Treated as parity pending a dedicated codec-level fuzz comparison, not flagged as an open defect.",
+      "status": "closed"
+    },
+    {
+      "id": "storage-page-size-change-midlife",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/pager.rs, sqlite3_ondisk.rs (page_size PRAGMA changing an empty database's page size; VACUUM-driven page-size change)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqlitePageSize.cs, SqliteDatabaseHeader.cs",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "pragma/memory.sqltest::pragma-cache-size-default"
+      ],
+      "notes": "SqlitePageSize.cs validates min/max page size constants but, combined with the vacuum-rewrite-only nature of SqliteFreelist/allocator, it's unclear whether Ahtola supports changing page_size via VACUUM on a non-empty database (stock SQLite allows PRAGMA page_size then VACUUM to rewrite the whole file at the new page size). Given the SqliteBtreeSplitMutation and SqliteFreelist 'rewrite' machinery already exists, this may be close to supported, but needs an explicit end-to-end test; flagged rather than asserted missing.",
+      "status": "open"
+    },
+    {
+      "id": "storage-shared-wal-coordination-mod-parity",
+      "layer": "storage",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/storage/shared_wal_coordination.rs, journal_mode.rs",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalIndex.cs, SqliteRollbackJournal.cs::SqliteJournalMode",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Turso factors journal-mode selection (journal_mode.rs) and multi-connection WAL coordination (shared_wal_coordination.rs) into dedicated modules distinct from wal.rs itself. Ahtola's SqliteJournalMode enum in SqliteRollbackJournal.cs is present but narrower in file scope; verify all six SQLite journal modes (DELETE, TRUNCATE, PERSIST, MEMORY, WAL, OFF) are represented and that mode transitions (e.g. WAL -> DELETE requiring an exclusive checkpoint first) are enforced at the storage layer, not just accepted as PRAGMA text elsewhere.",
+      "status": "open"
+    },
+    {
+      "id": "storage-database-rs-no-direct-analog",
+      "layer": "storage",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/storage/database.rs (Database-level open/create orchestration incl. header validation, page-1 bootstrap)",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteDatabaseHeader.cs, SqlitePageStore.cs",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Turso's database.rs centralizes database-open orchestration (header validation, encoding checks, initial page-1 bootstrap for new files) as its own module; Ahtola spreads the equivalent responsibility across SqliteDatabaseHeader.cs (header parse/validate) and SqlitePageStore.cs/EmbeddedDatabase.cs (bootstrap), an architectural rather than behavioral divergence. No functional gap identified from the files opened, but noted since a 1:1 module mapping does not exist and future audits should not assume database.rs has no Ahtola counterpart.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-layer-absent",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/mvcc/mod.rs, turso-src/core/mvcc/database/mod.rs::MvStore, RowVersion, Transaction, TransactionState, turso-src/core/mvcc/clock.rs::MvccClock, turso-src/core/mvcc/cursor.rs, turso-src/core/mvcc/persistent_storage/logical_log.rs",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [
+        "mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors",
+        "mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors",
+        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors",
+        "temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc"
+      ],
+      "notes": "Turso implements a full main-memory MVCC engine (Larson et al., VLDB 2011) alongside its classic SQLite-compatible pager/b-tree path, selected per-transaction via `BEGIN CONCURRENT` (see execute.rs::begin_mvcc_tx, TransactionMode::Concurrent) rather than a global PRAGMA. Core pieces: (1) MvStore (database/mod.rs, ~10k lines) owns an in-memory multi-version row store keyed by RowID, with RowVersion carrying begin_ts/end_ts (TxTimestampOrID) and a RowVersionState (Committed/Uncommitted/Aborted-like states); (2) MvccClock (clock.rs) is a mutex-guarded logical clock generating monotonically increasing begin/commit timestamps, with a documented 'speculative reads' protocol so an active tx can observe another tx's writes once it enters the Preparing state even before it fully commits (atomicity between get_timestamp and publishing the Preparing state closes a TOCTOU snapshot-isolation hole the maintainers hit once already); (3) first-committer-wins conflict detection returns LimboError::WriteWriteConflict on commit when a concurrent writer touched the same row, so the caller must retry/rollback (see the busy-retry loops in mvcc/mod.rs tests); (4) a dual cursor (cursor.rs, MvccCursorType::Table/Index) that transparently overlays the MVCC version store on top of the classic b-tree cursor, promoting a plain btree cursor into an MVCC-aware one lazily (execute.rs::maybe_promote_to_mvcc_cursor); (5) a logical_log persistent_storage layer (persistent_storage/logical_log.rs, ~8k lines) that durably logs the version store's operations rather than paging rows through the WAL directly, plus a checkpoint_state_machine (database/checkpoint_state_machine.rs) that periodically folds the logical log into the b-tree/WAL so a restart can rebuild the MVCC store; (6) garbage collection via drop_unused_row_versions[/_and_slots] which prunes row versions no longer visible to any active transaction, invoked opportunistically from the commit path. Isolation level is snapshot isolation with read-your-writes and dirty-write/dirty-read prevention by construction (version visibility check before update), but the module's own doc header states phantom reads, cursor lost updates, read skew, and write skew are explicit unresolved TODOs upstream, and optimistic reads/writes plus GC are still marked incomplete even in the reference implementation. Two data paths coexist per-connection: ordinary BEGIN/BEGIN IMMEDIATE/BEGIN DEFERRED still go through the pager/WAL/b-tree exactly as classic SQLite; only BEGIN CONCURRENT engages MvStore, and mixing the two on the same table within one process requires the promotion/cursor-overlay machinery so a concurrent reader on a b-tree cursor does NOT see an uncommitted MVCC writer's row (test_mvcc_dual_cursor_transaction_isolation demonstrates this explicitly: a second BEGIN CONCURRENT connection sees the pre-MVCC-commit b-tree value, not the in-flight MVCC value). Ahtola has zero equivalent: no `*Mvcc*.cs` file exists anywhere in src/, `BEGIN CONCURRENT` is not a recognized parser production (fails with a generic 'Expected End' parse error per the conformance corpus), and every transaction — read or write — goes through the single pager-lock/WAL/rollback-journal path described in EmbeddedTransactionLock.cs, SqliteWalReadSnapshotCoordinator.cs, SqliteWalWriterCheckpointCoordinator.cs, and SqliteRollbackJournal.cs. Ahtola's model is therefore SQLite's classic single-writer/multiple-reader locking discipline exclusively: a single write reservation gate (EmbeddedTransactionLock, process-local, modeling SQLite's RESERVED/EXCLUSIVE locks with FIFO fairness for explicit transactions and barging for autocommit statements) and per-reader WAL snapshots (SqliteWalReadSnapshot pinning a committed WAL frame boundary) rather than a true multi-writer optimistic-concurrency layer. Adopting Turso's MVCC design would require: a new in-memory versioned row store keyed by (table, rowid) with begin/commit timestamps; a logical clock with the same atomicity guarantee as MvccClock; a write-write conflict detector integrated into VDBE Insert/Update/Delete opcode execution; a dual-cursor overlay so classic-path and MVCC-path connections observe correct visibility against each other; a durable logical-log + checkpoint-into-WAL story so MVCC state survives restart; row-version garbage collection; and new parser/VDBE support for `BEGIN CONCURRENT` as a per-transaction mode alongside the existing DEFERRED/IMMEDIATE/EXCLUSIVE. This is a multi-week/-month undertaking (L effort, likely several L-sized sub-projects) and is reasonably deferrable relative to correctness gaps elsewhere, since Ahtola's classic-path transactions already give SQLite-compatible single-writer serializable-enough semantics for the vast majority of consumer workloads; it is filed s2-capability (a real missing capability, not yet proven to be an intentional non-goal) pending an explicit product decision to scope it out.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-begin-concurrent-not-parsed",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::TransactionMode::Concurrent, begin_mvcc_tx, line ~3819 'Concurrent transaction mode is only supported when MVCC is enabled'",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (no CONCURRENT keyword production)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors",
+        "mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors",
+        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors",
+        "temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc"
+      ],
+      "notes": "Turso recognizes BEGIN CONCURRENT as a transaction-mode keyword and, even when MVCC is disabled, produces the specific error 'Concurrent transaction mode is only supported when MVCC is enabled' (execute.rs ~3819-3822) rather than a parse failure. Ahtola's parser has no CONCURRENT production at all, so the same SQL text fails earlier and differently ('Expected End. At SQL offset 6'), which is itself a conformance divergence independent of whether MVCC is ever implemented: four expected-failure lines exist purely because the error message/shape differs, not because of missing MVCC semantics. A cheap partial fix (M effort) is to at least parse BEGIN CONCURRENT and raise the same not-supported message Turso gives when MVCC is off, improving message-compatibility without implementing the feature.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-clock-and-timestamp-ordering",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/mvcc/clock.rs::MvccClock, LogicalClock::get_timestamp/get_commit_timestamp",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's MvccClock is a mutex-guarded monotonic counter where the commit-timestamp generation and publication of the transaction's Preparing(ts) state happen atomically under one lock (documented at length in clock.rs to close a proven snapshot-isolation TOCTOU bug from an earlier lock-free attempt, turso#5198). Ahtola has no logical clock concept in its transaction model; its WAL snapshot coordinator (SqliteWalReadSnapshotCoordinator.cs) pins a *frame* boundary rather than a logical timestamp, which is adequate for the classic pager path but has no analogue for a future MVCC begin_ts/commit_ts scheme. Any MVCC implementation must budget for this atomicity requirement explicitly, not bolt a naive counter on afterward.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-write-write-conflict-detection",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/mvcc/database/mod.rs::LimboError::WriteWriteConflict (raised at multiple sites, e.g. lines ~1843, ~1865-1976, ~2798, ~5191-5227)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedTransactionLock.cs (EmbeddedBusyException only)",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso's MVCC path detects first-committer-wins write-write conflicts and surfaces LimboError::WriteWriteConflict distinctly from Busy, so callers can decide whether to retry (Busy, lock contention) or must restart the transaction with new reads (WriteWriteConflict, logical conflict). Ahtola's whole-database EmbeddedTransactionLock model makes write-write conflicts structurally impossible to observe as a distinct error: only one writer can ever hold the reservation at a time, so overlapping writers serialize via EmbeddedBusyException (SQLITE_BUSY) rather than racing and one aborting after the fact. This is consistent with the classic single-writer model and not a bug, but it means Ahtola cannot express Turso's MVCC concurrent-write semantics (multiple writers proceeding optimistically) without introducing this conflict-detection concept.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-row-version-gc",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/mvcc/database/mod.rs::drop_unused_row_versions, drop_unused_row_versions_and_slots, drop_unused_row_versions_inner (lines ~6995-7275)",
+      "ahtola_ref": "none",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's MVCC store accumulates multiple row versions per key and periodically garbage-collects versions no longer visible to any active transaction (three-rule pruning, driven opportunistically from the commit path and test loops). This has no Ahtola analogue because there is no version store to garbage-collect; filed separately from mvcc-layer-absent because it is a distinct sub-component (memory-management policy) that any future MVCC port must budget for independently — a naive port that skips GC will leak memory under sustained concurrent write load.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-dual-cursor-cross-mode-isolation",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/mvcc/cursor.rs::MvccCursorType, turso-src/core/vdbe/execute.rs::maybe_promote_to_mvcc_cursor, turso-src/core/mvcc/mod.rs::test_mvcc_dual_cursor_transaction_isolation",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso guarantees that a classic-path (b-tree cursor) reader inside a BEGIN CONCURRENT connection's peer transaction does not see an in-flight MVCC writer's uncommitted row — verified explicitly by test_mvcc_dual_cursor_transaction_isolation, where conn2's BEGIN CONCURRENT read sees the pre-existing b-tree value (100) while conn1's BEGIN CONCURRENT update (999) is still pending. This cross-mode isolation guarantee has no Ahtola equivalent since only one transaction mode exists; it is called out separately because it is the trickiest part of layering MVCC onto an existing pager/b-tree engine (exactly Ahtola's situation) and is easy to get wrong (data leaking across modes) if a future port jumps straight to 'add a version store' without this cursor-promotion discipline.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-persistent-logical-log-and-checkpoint",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/mvcc/persistent_storage/logical_log.rs, turso-src/core/mvcc/persistent_storage/mod.rs, turso-src/core/mvcc/database/checkpoint_state_machine.rs::CheckpointStateMachine, BootstrapState",
+      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalWriterCheckpointCoordinator.cs (classic WAL checkpoint only)",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso durably logs MVCC operations to a separate logical log (distinct from the WAL used by the classic path) and periodically checkpoints that log into the b-tree via a dedicated CheckpointStateMachine with an explicit BootstrapState for reconstructing the in-memory version store on restart. Ahtola's SqliteWalWriterCheckpointCoordinator.cs only implements classic SQLite WAL checkpointing (folding WAL frames back into the main database file) and has no concept of a logical operation log or MVCC bootstrap/replay. A port would need an entirely new durability mechanism parallel to, not reusing, the existing WAL coordinator.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-phantom-write-skew-read-skew-unresolved-upstream",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/mvcc/mod.rs lines 27-32 (module doc: 'TODO: phantom reads, cursor lost updates, read skew, write skew', 'Optimistic reads and writes', 'Garbage collection')",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Turso's own MVCC module documentation lists phantom reads, cursor lost updates, read skew, and write skew as explicitly unresolved anomaly classes, and optimistic reads/writes plus GC as unfinished TODOs even upstream at v0.7.2. This is not a gap Ahtola needs to close to match Turso — matching Turso here would mean deliberately reproducing known-incomplete isolation guarantees. Filed as s4-intentional/no-action so a future MVCC port does not over-invest in anomaly classes the reference implementation itself does not yet solve; any port should track the upstream fix rather than inventing its own solution independently.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-classic-path-model-undocumented",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/execute.rs (Transaction/AutoCommit opcode arms, TransactionMode::None/Read/Write/Concurrent)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedTransactionLock.cs, src/Ahtola.Core/Storage/SqliteWalReadSnapshotCoordinator.cs, src/Ahtola.Core/Storage/SqliteWalWriterCheckpointCoordinator.cs, src/Ahtola.Data/SqlTransactionControl.cs",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Ahtola's actual (non-MVCC) transaction model is itself undocumented at a design level: it is a single process-local write reservation (EmbeddedTransactionLock, one lock per file-backed database keyed by canonicalized path via EmbeddedTransactionLockRegistry, or one per in-memory database instance) that models SQLite's RESERVED/EXCLUSIVE locks, with FIFO fairness for explicit-transaction writers (Enter) but barging for autocommit statements (EnterAutocommit) to avoid a documented starvation bug (ENGINE #17, EF migrations-lock convoy). Readers pin a WAL frame/page-count snapshot via SqliteWalReadSnapshotCoordinator/SqliteWalReadSnapshot rather than a logical timestamp. SqlTransactionControl.cs is a lightweight lexical scanner (not a parser integration) that Ahtola.Data uses to detect COMMIT/END/ROLLBACK[ TO] keywords in raw SQL text for ADO.NET-level transaction bookkeeping. None of this is written down anywhere as a coherent isolation-level statement (e.g. 'Ahtola provides snapshot-isolated reads against a single active writer, equivalent to SQLite's default WAL-mode semantics'); this entry exists to flag that documentation gap alongside the code gaps, since accurately characterizing the current model was itself part of this audit's scope.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-vdbetransaction-is-not-a-db-transaction",
+      "layer": "mvcc",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs (Transaction/Savepoint opcode arms operate on real pager/MVCC state)",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeTransaction.cs::VdbeTransactionContext",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "VdbeTransactionContext's own doc comment states it is 'deliberately not a database transaction': it is a stack of register-file snapshots used by the resumable interpreter's own BEGIN/SAVEPOINT/COMMIT/ROLLBACK/RELEASE/ROLLBACK TO opcodes to give the interpreter's *scalar registers* nested transactional semantics, with no interaction with the pager, WAL, or any durable store. This is intentional and correctly documented, but a gap-analysis reader could easily mistake this file for Ahtola's real transaction manager since its name and API (Begin/Commit/Rollback/Savepoint/Release/RollbackTo) mirror SQL transaction control precisely. Filed as s4-intentional/no-action purely to record that the real transaction/lock/snapshot logic lives in EmbeddedTransactionLock.cs + the WAL coordinators + EmbeddedDatabase.cs's statement execution, not here.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-savepoint-cache-size-pragma-gap",
+      "layer": "mvcc",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/vdbe/execute.rs (Savepoint opcode arm, load_insn!(Savepoint { op, name }, insn))",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (SAVEPOINT keyword parsing), src/Ahtola.Core/Execution/VdbeTransaction.cs::Savepoint/Release/RollbackTo",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "savepoint.sqltest::savepoint-rollback-overflow-issue-6352",
+        "savepoint.sqltest::savepoint-rollback-overflow-nested-issue-6352",
+        "savepoint.sqltest::savepoint-rollback-overflow-repeated-issue-6352",
+        "savepoint.sqltest::savepoint-rollback-overflow-grow-issue-6352",
+        "savepoint.sqltest::savepoint-rollback-cache-spill-issue-6351"
+      ],
+      "notes": "Ahtola's core SAVEPOINT/RELEASE/ROLLBACK TO grammar and nested-frame semantics are implemented and unit-tested (VdbeTransactionContextSavepointNameMatchingTests.cs, TransactionOpcodeExecutionTests.cs) and match SQLite's case-insensitive topmost-match rule. However, five conformance cases that exercise savepoint rollback under overflow/cache-spill conditions (upstream issues #6351/#6352) all fail for an unrelated reason: `PRAGMA cache_size` is unsupported ('Unsupported PRAGMA cache_size. At SQL offset 18'), so the test setup itself cannot run, masking whether the underlying savepoint-rollback-under-cache-pressure behavior is even correct. This is filed under mvcc/transactions rather than the pragma layer because the observable symptom is 'savepoint tests fail', but the root cause is a PRAGMA gap; closing PRAGMA cache_size support would unblock verifying real savepoint behavior here.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-deferred-fk-across-statement-boundaries",
+      "layer": "mvcc",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/vdbe/execute.rs (FkCounter/foreign-key deferred-check handling at COMMIT), turso-src/core/transaction.rs",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (DeferForeignKeys field, ExecutePragmaDeferForeignKeys, lines ~5496, ~9900, ~11228)",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Ahtola does implement PRAGMA defer_foreign_keys and honors ForeignKeyDeferral.InitiallyDeferred, deferring FK violation checks until COMMIT rather than the offending statement, per the DeferForeignKeys flag threaded through EmbeddedDatabase's execution context. This capability exists and is not a gap by itself; it is listed here (partial, low severity) because the audit could not confirm from source alone that ALL deferred-FK edge cases (e.g. a mid-transaction ROLLBACK TO a savepoint taken before a deferred violation was introduced, correctly re-arming or clearing the pending-violation set) are covered — ManagedForeignKeyFullSemanticsTests.cs and ManagedForeignKeyRuntimeSliceTests.cs should be audited by the constraints/foreign-keys layer owner for savepoint-interaction coverage specifically, since that intersection is this layer's concern.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-cross-connection-schema-cookie-visibility",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/execute.rs (schema cookie check in Transaction opcode arm, conn.mvcc_schema_requires_reprepare_before_tx, conn.mvcc_begin_schema_generation)",
+      "ahtola_ref": "not located; see src/Ahtola.Core/EmbeddedDatabase.cs schema-versioning code",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [
+        "rollback.sqltest::schema-change-rollback-2-2",
+        "rollback.sqltest::schema-alter-rollback",
+        "rollback.sqltest::schema-alter-rollback-and-repeat",
+        "rollback.sqltest::schema-create-index-rollback",
+        "rollback.sqltest::schema-drop-table-rollback"
+      ],
+      "notes": "Turso's Transaction opcode checks a schema cookie on every BEGIN (and separately manages an MVCC schema generation counter, conn.mvcc_begin_schema_generation, so concurrent-mode connections re-prepare statements when the schema changed underneath them). Five rollback.sqltest expected-failure entries show Ahtola's schema-DDL rollback either restoring a schema whose canonical text differs cosmetically from SQLite's (quoting: 'CREATE TABLE t (x)' vs 'CREATE TABLE \"t\" (\"x\")' — likely a pretty-printer divergence, not a transaction bug) or, in schema-change-rollback-2-2, an actual before/after mismatch suggesting a DDL rollback does not fully restore prior schema state. This needs joint triage with the schema/DDL layer, but is flagged here because it is a transaction-rollback-boundary symptom.",
+      "status": "open"
+    },
+    {
+      "id": "mvcc-statement-level-rollback-on-constraint-violation",
+      "layer": "mvcc",
+      "kind": "missing",
+      "turso_ref": "turso-src/core/vdbe/execute.rs (OP_Halt / statement abort handling that unwinds only the current statement's writes, not the whole transaction, for ON CONFLICT ROLLBACK vs default ABORT)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ON CONFLICT ROLLBACK not implemented for UPDATE)",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [
+        "on_conflict_constraint_def.sqltest::update-pk-rollback",
+        "on_conflict_constraint_def.sqltest::update-rollback-terminates-transaction"
+      ],
+      "notes": "SQLite's schema-level ON CONFLICT ROLLBACK resolution aborts and rolls back the *entire enclosing transaction*, not just the statement, distinguishing it from the default ABORT behavior (statement-only undo) — this is a transaction-boundary semantic squarely in this layer's scope. Ahtola's own error message confirms the gap directly: 'Managed UPDATE cannot apply schema-level ON CONFLICT ROLLBACK until the pending row-update engine supports partial publication, transaction rollback, and replacement.' This means Ahtola's UPDATE path cannot currently terminate an entire transaction as a side effect of a single row's constraint violation, a capability gap distinct from (and layered on top of) the SAVEPOINT/BEGIN/COMMIT mechanics that do work.",
+      "status": "open"
+    },
+    {
+      "id": "sync-no-embedded-sync-engine-port",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_engine.rs::DatabaseSyncEngine (bootstrap_db, open_db, create_db, checkpoint, apply_changes_from_remote, push_changes_to_remote, pull_changes_from_remote, wait_changes_from_remote)",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaReplicaProvider.cs::AhtolaReplicaProvider.TryRegisterCompanion / AhtolaReplicaProviderFactory",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso's ~5,300-line sync engine (bootstrap, CDC capture/replay, WAL push/pull, checkpoint-with-revert-DB, MVCC logical-log replay) has no managed C# implementation anywhere in the repo. AhtolaReplicaProvider only defines an abstract contract (AhtolaReplicaProviderFactory/AhtolaReplicaDatabase) and dynamically loads an external 'Turso.Data.Sync' assembly that does not exist in this tree; if absent, replica connections throw NotSupportedException. This is distinct from the deliberate no-native-companion decision (that covers turso/sdk-kit's native surface): here the entire *logic* of sync (which could be pure managed) is unimplemented, not merely delegated to native code.",
+      "status": "open"
+    },
+    {
+      "id": "sync-sdk-kit-native-companion-intentional",
+      "layer": "sync",
+      "kind": "extension",
+      "turso_ref": "turso-src/sync/sdk-kit/src/lib.rs, capi.rs, rsapi.rs, bindings.rs",
+      "ahtola_ref": "none",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "sdk-kit is Turso's native C-ABI/FFI surface for embedding the sync engine into other languages (capi.rs, bindings.rs). Ahtola deliberately has no native companion and no P/Invoke SDK per project invariant; this is an intentional scope exclusion, not a gap. Do not port.",
+      "status": "open"
+    },
+    {
+      "id": "sync-no-cdc-capture-pragma",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_engine.rs::CDC_PRAGMA_NAME, acknowledge_existing_cdc_for_client, max_local_change_id, count_local_changes",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso captures local writes into a `turso_cdc` change-data-capture table (via a CDC pragma) so they can be diffed and pushed to the remote and replayed against a revert/shadow DB during checkpoint. Ahtola.Core has no CDC table, pragma, or change_id tracking; AhtolaSyncStatistics.CdcOperations exists as a DTO field on the C# surface but nothing in Ahtola.Core/Storage populates it, since there is no local engine that produces CDC records.",
+      "status": "open"
+    },
+    {
+      "id": "sync-no-revert-db-checkpoint-safety",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_engine.rs::open_revert_db_conn, checkpoint_passive, checkpoint (revert_db_wal_path, create_revert_db_wal_path)",
+      "ahtola_ref": "none",
+      "severity": "s1-correctness",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Turso's checkpoint keeps a shadow 'revert' WAL (`<db>-wal-revert`) so a passive checkpoint of synced frames can be rolled back if the corresponding push to remote later reports a conflict, preserving durability/consistency guarantees across sync failures. Ahtola has no equivalent revert-DB or watermark-tracked passive checkpoint; a managed replica implementation would need this to avoid silently corrupting local state on push failure after a local checkpoint.",
+      "status": "open"
+    },
+    {
+      "id": "sync-no-mvcc-logical-log-replay",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/client_proto.rs::LogicalOp/LogicalTxnData/LogicalOpType, turso-src/sync/engine/src/database_replay_generator.rs (INSERT ... ON CONFLICT replay), turso-src/sync/engine/src/server_proto.rs::MvccLogicalLogRangeProto/MvccLogicalLogMetadataProto",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "The MVCC-mode pull path decodes a portable protobuf logical log (row upsert/delete, schema create/drop/alter/refresh, header updates keyed by stable_table_id) and replays it as generated SQL (INSERT ... ON CONFLICT) rather than raw pages. This logical replication mode (an alternative to physical page-based sync) has no managed counterpart; Ahtola has neither the protobuf decode nor the replay-statement generator.",
+      "status": "open"
+    },
+    {
+      "id": "sync-no-page-protocol-pull-decode",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/server_proto.rs::PullUpdatesReqProtoBody/PullUpdatesRespProtoBody/PageData/PageUpdatesEncodingReq/PageSetZstdEncodingProto",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "The legacy/physical pull protocol streams raw or zstd-compressed page images (PageData, PageSetZstdEncodingProto) keyed by a pull-updates request/response envelope. Nothing in Ahtola.Data decodes this wire format; it is entirely absent, consistent with there being no working sync engine.",
+      "status": "open"
+    },
+    {
+      "id": "sync-conflict-error-surfaced-not-handled",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/errors.rs::Error::DatabaseSyncEngineConflict, turso-src/sync/engine/src/database_sync_operations.rs (status==\"conflict\" -> DatabaseSyncEngineConflict, wal_push conflict handling)",
+      "ahtola_ref": "none",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's push path distinguishes a specific 'conflict' HTTP status from the remote wal_push endpoint and surfaces a typed DatabaseSyncEngineConflict error that callers can catch to trigger revert/retry logic. Ahtola's AhtolaConnection.Sync/SyncAsync API has no conflict-specific exception type or documented retry contract; AhtolaSyncResult only models UpToDate/RemoteChangesApplied outcomes, with no 'conflict, needs revert' outcome.",
+      "status": "open"
+    },
+    {
+      "id": "sync-partial-encryption-mutual-exclusion-unenforced",
+      "layer": "sync",
+      "kind": "divergent",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_engine.rs::ensure_logical_mvcc_pull_supported (MVCC logical sync incompatible with partial sync and encrypted remotes), turso-src/sync/engine/src/database_sync_lazy_storage.rs (encryption or checksum not supported with partial sync)",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaReplicaProvider.cs::AhtolaReplicaOptions.Validate",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Turso hard-errors when partial-sync + remote-encryption + MVCC-logical-pull are combined incompatibly. Ahtola's AhtolaReplicaOptions.Validate() checks PartialBootstrap/BootstrapIfEmpty and PullBytesThreshold/Query combinations, but never validates PartialBootstrap against RemoteEncryption together; since the real sync engine is unimplemented this can't be exercised today, but the managed contract should mirror the same mutual-exclusion invariant once an engine exists, to avoid silently accepting an unsupported combination.",
+      "status": "open"
+    },
+    {
+      "id": "sync-remote-hrana-batch-cond-unsupported",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/server_proto.rs::BatchStep.condition/BatchCond (Ok/Error/Not/And/Or/IsAutocommit)",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaRemoteClient.cs::ExecuteBatchAsync, RemoteBatchStep",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "The Hrana-style batch wire format supports per-step conditions (BatchCond: run step N only if step M ok/errored, boolean combinators, IsAutocommit) enabling server-side conditional multi-statement batches without an extra round trip. Ahtola's RemoteBatchStep only carries a Statement with no `condition` field, and AhtolaBatchCommand/AhtolaBatchCommandCollection expose no API to express conditional execution; every batch step is sent unconditionally.",
+      "status": "open"
+    },
+    {
+      "id": "sync-remote-no-replication-index-tracking",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/server_proto.rs::Batch.replication_index / BatchResult.replication_index (option_u64_as_str)",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaRemoteClient.cs::RemoteBatch, RemoteBatchResult",
+      "severity": "s3-perf",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "The wire batch request/result carries an optional replication_index (string-encoded u64) letting a client pin reads to a minimum server replication position for read-your-writes consistency across a replicated/multi-node remote. Ahtola's RemoteBatch/RemoteBatchResult DTOs omit this field entirely, so the managed remote client cannot request or observe a replication watermark.",
+      "status": "open"
+    },
+    {
+      "id": "sync-remote-execute-stream-only-two-request-kinds",
+      "layer": "sync",
+      "kind": "divergent",
+      "turso_ref": "turso-src/sync/engine/src/server_proto.rs::StreamRequest (Execute, Batch only), StreamResponse (Execute, Batch only)",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaRemoteClient.cs::RemoteStreamRequest (Type=\"execute\"/\"batch\")",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Turso's own vendored server_proto.rs already restricts the Hrana-like pipeline to Execute and Batch stream kinds (no cursor/describe/sequence/store_sql variants seen in full libsql Hrana v3). Ahtola's remote client matches this reduced surface (execute + batch over /v2/pipeline with baton-based session continuation) reasonably closely; classified as intentional/aligned rather than a gap, but noted here since it bounds what 'Hrana support' means for this port.",
+      "status": "open"
+    },
+    {
+      "id": "sync-http-pipeline-v2-only-no-v3-websocket",
+      "layer": "sync",
+      "kind": "partial",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_operations.rs (ENCRYPTION_KEY_HEADER, wal_push HTTP calls), turso-src/sync/engine/src/database_sync_engine.rs (bootstrap_db HTTP round trips)",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaRemoteClient.cs::CreatePipelineUri (\"/v2/pipeline\")",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Ahtola's remote client is hard-coded to the '/v2/pipeline' HTTP endpoint with a JSON baton-session pipeline; there is no WebSocket transport and no wal_push/pull_updates endpoints used by the sync engine (those are consumed only by the unported sync engine, not the ADO.NET remote client). This is a reasonable, deliberate scope split (remote-only Hrana vs. embedded-replica sync protocol) but the pipeline client itself has no fallback or version negotiation if a server only exposes v3 or WS.",
+      "status": "open"
+    },
+    {
+      "id": "sync-remote-encryption-header-not-wired-for-remote-client",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_operations.rs::ENCRYPTION_KEY_HEADER (\"x-turso-encryption-key\")",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaRemoteClient.cs (no encryption header), src/Ahtola.Data/AhtolaSyncOptions.cs::AhtolaRemoteEncryptionOptions",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "AhtolaRemoteEncryptionOptions models the cipher/base64 key surface used to compute reserved-bytes for encrypted Turso Cloud databases (consumed by the not-yet-existing replica sync engine), but the plain remote/Hrana AhtolaRemoteClient never sends the 'x-turso-encryption-key' HTTP header that Turso's sync engine attaches to every sync HTTP request against an encrypted remote. A pure remote (non-replica) connection to an encrypted database has no way to authenticate today.",
+      "status": "open"
+    },
+    {
+      "id": "sync-no-partial-sync-lazy-page-storage",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_lazy_storage.rs::DatabaseSyncLazyStorage (segment-based lazy page fetch, prefetch)",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaSyncOptions.cs::AhtolaPartialBootstrapOptions (Prefix/Query, SegmentSize, Prefetch)",
+      "severity": "s2-capability",
+      "effort": "L",
+      "conformance_links": [],
+      "notes": "Ahtola already defines a rich C# surface for partial bootstrap (prefix-length or server-side-query page selection, lazy segment size, prefetch flag), matching the shape of Turso's DatabaseSyncLazyStorage. However this is pure configuration DTO with no backing implementation in Ahtola.Core/Ahtola.Data: lazy on-demand page fetch-on-fault, segment caching, and prefetch scheduling do not exist anywhere in the managed storage layer.",
+      "status": "open"
+    },
+    {
+      "id": "sync-connection-pooling-no-replica-awareness",
+      "layer": "sync",
+      "kind": "partial",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_engine.rs::wait_changes_from_remote/DbChangesStatus (long-poll driven change notification loop)",
+      "ahtola_ref": "src/Ahtola.Data/ManagedConnectionPool.cs, src/Ahtola.Data/AhtolaConnection.cs::Sync/SyncAsync",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's engine has a wait_changes_from_remote long-poll loop that lets a replica connection block until the server reports new changes, enabling push-driven refresh instead of polling. Ahtola's ManagedConnectionPool pools plain local connections with no concept of a shared replica/sync lifecycle, and AhtolaConnection.Sync/SyncAsync is purely explicit/pull-based (matching LongPollTimeout as configuration on AhtolaReplicaOptions, but with no engine to act on it).",
+      "status": "open"
+    },
+    {
+      "id": "sync-ef-core-provider-no-sync-surface",
+      "layer": "sync",
+      "kind": "missing",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_engine.rs (whole module, as consumed conceptually by any embedding SDK)",
+      "ahtola_ref": "src/Ahtola.EntityFrameworkCore.Sqlite (UseAhtola extension surface)",
+      "severity": "s3-perf",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "The EF Core provider's UseAhtola surface has no options overload for embedded-replica/sync configuration (no way to pass AhtolaReplicaOptions or trigger DbContext-level Sync()); applications wanting replica+EF Core must drop to ADO.NET AhtolaConnection.CreateReplica manually. This mirrors the missing engine rather than an EF-specific gap, but is worth tracking since Turso's SDKs generally expose sync configuration at the connection-builder level consumed by higher-level ORMs.",
+      "status": "open"
+    },
+    {
+      "id": "sync-native-provider-companion-intentional",
+      "layer": "sync",
+      "kind": "extension",
+      "turso_ref": "turso-src/sync/sdk-kit/src/capi.rs, bindings.rs (native C ABI surface backing SDK embedding, incl. non-sync native engine access)",
+      "ahtola_ref": "src/Ahtola.Data/AhtolaNativeProvider.cs::AhtolaNativeProvider (loads optional \"Turso.Data.Native\" assembly, fails closed)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "AhtolaNativeProvider's dynamic-load-by-name pattern for an optional 'Turso.Data.Native' companion (used for Local Provider=Native) exists purely as an extension point for a native SDK that is out of scope for Ahtola per project policy (no P/Invoke, no Rust toolchain in this repo). Confirmed intentional per repo instructions; not a gap to close, just documented here for completeness of the sync/provider-dispatch review.",
+      "status": "open"
+    },
+    {
+      "id": "sync-checkpoint-mode-mismatch-vs-managed-storage",
+      "layer": "sync",
+      "kind": "divergent",
+      "turso_ref": "turso-src/sync/engine/src/database_sync_engine.rs::checkpoint (turso_core::CheckpointMode::Truncate / CheckpointMode::Passive)",
+      "ahtola_ref": "none (no CheckpointMode consumer in Ahtola.Data sync path; Ahtola.Core WAL checkpoint is out of this layer's scope)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [],
+      "notes": "Turso's sync checkpoint explicitly composes Passive (checkpoint only the already-synced WAL prefix, tracked by a watermark) followed by Truncate (once fully synced) to keep the revert-DB's WAL valid relative to the main DB file. Since Ahtola has no sync engine consuming Ahtola.Core's checkpoint modes for this purpose, there is no equivalent watermark-aware checkpoint orchestration layered on top of Ahtola.Core's WAL/pager; flagged here as the sync-layer half of a gap whose storage-layer half belongs to the storage-format-port skill.",
+      "status": "open"
+    }
+  ]
+}
