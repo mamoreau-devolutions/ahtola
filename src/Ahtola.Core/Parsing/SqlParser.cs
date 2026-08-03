@@ -1748,6 +1748,15 @@ internal sealed class SqlParser
                 expression = expression.Trim();
         }
 
+        if (expression.IndexOf('_') >= 0)
+        {
+            var normalized = NormalizeOrdinalDigitSeparators(expression);
+            if (normalized is null)
+                return null;
+
+            expression = normalized.AsSpan();
+        }
+
         if (expression.IsEmpty || expression.IndexOfAnyExceptInRange('0', '9') >= 0)
             return null;
 
@@ -1757,6 +1766,39 @@ internal sealed class SqlParser
         return long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ordinal)
             ? ordinal
             : null;
+    }
+
+    /// <summary>
+    /// Strips SQLite 3.47 digit separators from an ORDER BY ordinal candidate
+    /// (<c>ORDER BY 1_0</c> names the tenth output column), returning null when an
+    /// underscore is not placed between two digits.
+    /// </summary>
+    private static string? NormalizeOrdinalDigitSeparators(ReadOnlySpan<char> expression)
+    {
+        var builder = new System.Text.StringBuilder(expression.Length);
+        var lastWasDigit = false;
+        for (var index = 0; index < expression.Length; index++)
+        {
+            var current = expression[index];
+            if (char.IsAsciiDigit(current))
+            {
+                builder.Append(current);
+                lastWasDigit = true;
+                continue;
+            }
+
+            if (current != '_'
+                || !lastWasDigit
+                || index + 1 >= expression.Length
+                || !char.IsAsciiDigit(expression[index + 1]))
+            {
+                return null;
+            }
+
+            lastWasDigit = false;
+        }
+
+        return builder.ToString();
     }
 
     private static bool TryStripOuterParentheses(ref ReadOnlySpan<char> expression)

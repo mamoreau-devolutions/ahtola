@@ -275,14 +275,6 @@ json/json-insert-replace-odd-args.sqltest::jsonb-insert-path-only-errors | error
 json/json-insert-replace-odd-args.sqltest::jsonb-replace-path-only-errors | error 'no such function: JSONB_REPLACE' does not match pattern 'json_replace\(\) needs an odd number of arguments'
 last_insert_rowid.sqltest::last-insert-rowid-after-insert-returning | expected 5 row(s), got 5 row(s); row 1 expected '20' but was '10'
 last_insert_rowid.sqltest::last-insert-rowid-unchanged-by-cdc-internal-inserts | expected success but got error: Unsupported PRAGMA capture_data_changes_conn. At SQL offset 33.
-literal.sqltest::numberic-literal-5 | expected success but got error: Expected End. At SQL offset 8.
-literal.sqltest::numberic-literal-6 | expected success but got error: Expected End. At SQL offset 9.
-literal.sqltest::numberic-literal-7 | expected success but got error: Expected End. At SQL offset 8.
-literal.sqltest::numberic-literal-8 | expected success but got error: Expected End. At SQL offset 10.
-literal.sqltest::numberic-literal-13 | expected success but got error: Expected End. At SQL offset 10.
-literal.sqltest::numberic-literal-14 | expected success but got error: Expected End. At SQL offset 9.
-literal.sqltest::numberic-literal-exceed-max-i64 | expected success but got error: Expected End. At SQL offset 8.
-literal.sqltest::numberic-literal-exceed-min-i64 | expected success but got error: Expected End. At SQL offset 9.
 math/memory.sqltest::ceil-int | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '1.0'
 math/memory.sqltest::ceiling-int | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '1.0'
 math/memory.sqltest::floor-int | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '1.0'
@@ -389,7 +381,6 @@ savepoint.sqltest::savepoint-rollback-overflow-grow-issue-6352 | expected succes
 savepoint.sqltest::savepoint-rollback-cache-spill-issue-6351 | expected success but got error: Unsupported PRAGMA cache_size. At SQL offset 18.
 select/memory.sqltest::select-intersect-union-with-limit | expected 3 row(s), got 3 row(s); row 0 expected 'a/a' but was 'z/z'
 select/memory.sqltest::select-except-union | expected 3 row(s), got 3 row(s); row 0 expected 'x/x' but was 'y/y'
-select/memory.sqltest::limit-underscore-literal | expected success but got error: Expected End. At SQL offset 16.
 select/memory.sqltest::rowid-select-from-clause-subquery | expected an error but the statement succeeded
 select/memory.sqltest::ambiguous-self-join | expected an error but the statement succeeded
 select/memory.sqltest::ambiguous-column-error-message-format | error 'ambiguous column name: f2' does not match pattern 'ambiguous column name: f1'

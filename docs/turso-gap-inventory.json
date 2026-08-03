@@ -44,8 +44,8 @@
         "L": 37
       },
       "by_status": {
-        "open": 169,
-        "closed": 2
+        "open": 165,
+        "closed": 6
       }
     },
     "schema": {
@@ -1331,7 +1331,7 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser/src/lexer.rs (numeric literal scanning permits `_` digit-group separators, e.g. `9_223_372_036_854_775_807`)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs::ReadNumber (lines 342-383) — only char.IsAsciiDigit is consumed, no '_' handling",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs (ReadNumber/ConsumeDigitRun/NumericLiteralText), src/Ahtola.Core/Parsing/SqlParser.cs (TryParseOrderByOrdinal/NormalizeOrdinalDigitSeparators)",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
@@ -1345,8 +1345,8 @@
         "literal.sqltest::numberic-literal-exceed-min-i64",
         "select/memory.sqltest::limit-underscore-literal"
       ],
-      "notes": "SQLite 3.46+ / Turso's lexer accepts `_` as a digit-group separator anywhere inside an integer or real literal (`9_223_372_036_854_775_807`, `1_2_3`), which is stripped before parsing the numeric value. Ahtola's ReadNumber only loops over `char.IsAsciiDigit(_sql[_offset])` for the integer part, fractional part, and exponent, with no `_` handling in any of the three loops, so any underscore in a numeric literal terminates the token early and the remaining digits are re-lexed as a separate (invalid) token, producing 'Expected End'.",
-      "status": "open"
+      "notes": "SQLite 3.46+ / Turso's lexer accepts `_` as a digit-group separator anywhere inside an integer or real literal (`9_223_372_036_854_775_807`, `1_2_3`), which is stripped before parsing the numeric value. Ahtola's ReadNumber only loops over `char.IsAsciiDigit(_sql[_offset])` for the integer part, fractional part, and exponent, with no `_` handling in any of the three loops, so any underscore in a numeric literal terminates the token early and the remaining digits are re-lexed as a separate (invalid) token, producing 'Expected End'. Closed 2026-08-03: ReadNumber now consumes `_` between digits via ConsumeDigitRun (hex, integer, fraction, and exponent runs) and strips separators from the token text via NumericLiteralText so downstream value parsing sees the canonical digits; a separator lacking a digit before or after throws at lex time, matching Turso's BadNumber. SqlParser.TryParseOrderByOrdinal normalizes separators so `ORDER BY 1_0` resolves as ordinal 10. Expected-failures net: exactly the 9 mapped keys removed, 0 added; full lane 3765/3765 green.",
+      "status": "closed"
     },
     {
       "id": "parser-trailing-named-constraint-without-body",
