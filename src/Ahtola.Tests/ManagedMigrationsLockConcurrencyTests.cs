@@ -3,6 +3,15 @@ using System.Diagnostics;
 using AwesomeAssertions;
 using Ahtola.Data.Sqlite;
 
+// These are EF/SQLite concurrency hang-repros: [Timeout] is the watchdog that
+// force-aborts a genuine stall so it surfaces as a test failure instead of an
+// indefinite runner hang. The CS0618 obsoletion points at CancelAfterAttribute,
+// but that only cooperatively cancels a token the test must observe — a true
+// deadlock is a blocked thread that never reaches a token check, so CancelAfter
+// cannot break it. Thread-abort is the intended forceful stop for a hang
+// watchdog, so suppress the obsoletion here.
+#pragma warning disable CS0618
+
 namespace Ahtola.Tests;
 
 /// <summary>
