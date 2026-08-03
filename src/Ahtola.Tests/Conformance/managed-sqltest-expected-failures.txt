@@ -23,10 +23,6 @@ agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_text
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_numeric_column_labels | expected success but got error: no such function: JSONB_GROUP_OBJECT
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_does_not_stringify_value | expected success but got error: no such function: JSONB_ARRAY
 agg-functions/memory.sqltest::filter-with-having | expected success but got error: no such column: cnt
-agg-functions/order-by-aggregate-misuse.sqltest::order-by-min-misuse | expected an error but the statement succeeded
-agg-functions/order-by-aggregate-misuse.sqltest::order-by-max-misuse | expected an error but the statement succeeded
-agg-functions/order-by-aggregate-misuse.sqltest::order-by-sum-misuse | expected an error but the statement succeeded
-agg-functions/order-by-aggregate-misuse.sqltest::order-by-count-misuse | expected an error but the statement succeeded
 alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message | error 'Expected keyword BEGIN. At SQL offset 48.' does not match pattern 'no such column: main\.t\.b'
 alter-table-quoted-trigger-target.sqltest::drop-column-with-unrelated-quoted-trigger-target | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t2 (id INTEGER PRIMARY KEY, keep_col TEXT)' but was 'CREATE TABLE "t2" ("id" INTEGER PRIMARY KEY, "keep_col" TEXT)'
 alter-table-quoted-trigger-target.sqltest::rename-column-with-unrelated-quoted-trigger-target | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t2 (id INTEGER PRIMARY KEY, d TEXT)' but was 'CREATE TABLE "t2" ("id" INTEGER PRIMARY KEY, "d" TEXT)'
@@ -199,8 +195,6 @@ gencol.sqltest::rename_then_drop_keeps_renamed_column | expected 1 row(s), got 1
 gencol.sqltest::gencol_error_subquery | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
 gencol.sqltest::gencol_error_in_select | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
 gencol.sqltest::gencol_error_exists | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
-gencol.sqltest::gencol_error_aggregate | error 'function sum() is not allowed in a generated column' does not match pattern '(aggregate functions prohibited/misuse of aggregate function)'
-gencol.sqltest::gencol_error_aggregate_star | error 'aggregate and window functions are not allowed in a generated column' does not match pattern '(aggregate functions prohibited/misuse of aggregate function)'
 gencol.sqltest::gencol_error_nondeterministic_virtual | error 'function random() is not allowed in a generated column' does not match pattern 'non-deterministic functions prohibited in generated columns'
 gencol.sqltest::gencol_deterministic_date_function | expected success but got error: function date() is not allowed in a generated column
 gencol.sqltest::gencol_error_nondeterministic_datetime | error 'function datetime() is not allowed in a generated column' does not match pattern 'non-deterministic'
@@ -208,20 +202,16 @@ gencol.sqltest::gencol_error_nondeterministic_strftime | error 'function strftim
 gencol.sqltest::gencol_error_nondeterministic_unixepoch | error 'function unixepoch() is not allowed in a generated column' does not match pattern 'non-deterministic'
 gencol.sqltest::gencol_error_dot_operator | error 'no such column: t1.b' does not match pattern 'the "." operator prohibited in generated columns'
 gencol.sqltest::gencol_error_doubly_qualified | error 'Expected RightParen. At SQL offset 40.' does not match pattern 'the "." operator prohibited in generated columns'
-gencol.sqltest::gencol_error_window_function | error 'aggregate and window functions are not allowed in a generated column' does not match pattern '(window functions prohibited/misuse of window function)'
-gencol.sqltest::gencol_error_nested_window_function | error 'aggregate and window functions are not allowed in a generated column' does not match pattern '(window functions prohibited/misuse of window function)'
 gencol.sqltest::gencol_error_bind_parameter | error 'Missing value for parameter ?1.' does not match pattern '(bind parameters prohibited/parameters prohibited in generated columns)'
 gencol.sqltest::gencol_error_bind_parameter_unnamed | error 'Missing value for parameter at position 1.' does not match pattern '(bind parameters prohibited/parameters prohibited in generated columns)'
 gencol.sqltest::gencol_stored_rejected | expected an error but the statement succeeded
 gencol.sqltest::gencol_stored_generated_always_rejected | expected an error but the statement succeeded
 gencol.sqltest::gencol_error_nested_subquery_in_func | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
-gencol.sqltest::gencol_error_nested_aggregate | error 'function sum() is not allowed in a generated column' does not match pattern '(aggregate functions prohibited/misuse of aggregate function)'
 gencol.sqltest::gencol_error_nested_nondeterministic | error 'function random() is not allowed in a generated column' does not match pattern 'non-deterministic functions prohibited in generated columns'
 gencol.sqltest::gencol_error_nested_dot_in_case | error 'no such column: t1.a' does not match pattern 'the "." operator prohibited in generated columns'
 gencol.sqltest::gencol_error_nested_subquery_in_case | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
 gencol.sqltest::gencol_error_nested_in_select | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
 gencol.sqltest::gencol_error_nested_exists_in_arith | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
-gencol.sqltest::gencol_error_nested_aggregate_star | error 'aggregate and window functions are not allowed in a generated column' does not match pattern '(aggregate functions prohibited/misuse of aggregate function)'
 gencol.sqltest::gencol_error_nested_doubly_qualified | error 'Expected RightParen. At SQL offset 44.' does not match pattern 'the "." operator prohibited in generated columns'
 gencol.sqltest::gencol_validate_nested_isnull_arith | expected success but got error: Expected RightParen. At SQL offset 51.
 gencol.sqltest::gencol_validate_nested_notnull_arith | expected success but got error: Expected RightParen. At SQL offset 51.
@@ -568,7 +558,6 @@ window/memory.sqltest::window-collate-partition-by | expected 3 row(s), got 3 ro
 window/memory.sqltest::window-collate-order-by | expected 3 row(s), got 3 row(s); row 0 expected 'Apple/2' but was 'Apple/1'
 window/memory.sqltest::window-row-number-nulls-in-order-by | expected 5 row(s), got 5 row(s); row 1 expected '3//2' but was '2/10/3'
 window/memory.sqltest::window-row-number-nulls-in-partition-by | expected 5 row(s), got 5 row(s); row 0 expected '5//1' but was '1/x/1'
-window/memory.sqltest::window-row-number-in-check-constraint | error 'aggregate and window functions are prohibited in CHECK constraints' does not match pattern 'misuse of window function ROW_NUMBER()'
 window/multi-window-ordering.sqltest::empty-over-first-then-ordered-then-partitioned | expected 5 row(s), got 5 row(s); row 0 expected 'c/50/1/1/1' but was 'a/10/1/5/1'
 window/nth_value.sqltest::nth-value-limit-stops-before-late-invalid-n | expected success but got error: second argument to nth_value must be a positive integer
 window/nth_value.sqltest::nth-value-unicode-whitespace-n-errors | expected an error but the statement succeeded

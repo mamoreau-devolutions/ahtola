@@ -11612,6 +11612,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         context.CheckInterrupt();
         ValidateSelectIndexDirectives(select, context);
         ValidateGroupByCollations(select.GroupBy);
+        ValidateOrderByAggregateMisuse(select);
         var canUseCompiledRoute = CanUseCompiledSelectRoute(select, context, outerRow);
         CompiledSelect? compiled = null;
         if (canUseCompiledRoute)
@@ -18561,6 +18562,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (statement.Having is not null && ContainsWindowFunction(statement.Having))
             throw new EmbeddedSqlException("misuse of window function in HAVING clause");
 
+        ValidateOrderByAggregateMisuse(statement);
+
         // The window pass runs after aggregation, so a window call handed to an aggregate has no
         // pass left to be evaluated in.
         var windowInsideAggregate = statement.Projections
@@ -24959,6 +24962,83 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 || ContainsAggregate(between.Upper),
             _ => false,
         };
+    }
+
+    // An aggregate that appears only in ORDER BY has no aggregate pass to evaluate it: the query
+    // is not grouped and neither the SELECT list nor HAVING aggregates. SQLite rejects the
+    // statement; a FROM-less statement is exempt (SELECT 1 ORDER BY sum(1) is legal). Windowed
+    // calls are exempt too - ORDER BY sum(x) OVER () is a per-row window expression. Runs before
+    // the compiled-route branch so both execution paths observe the same diagnostic.
+    private void ValidateOrderByAggregateMisuse(SelectStatement statement)
+    {
+        if (statement.Source is not null
+            && statement.GroupBy.Count == 0
+            && !statement.Projections.Any(projection => ContainsAggregate(projection.Expression))
+            && (statement.Having is null || !ContainsAggregate(statement.Having))
+            && statement.OrderBy.FirstOrDefault(term => ContainsAggregate(term.Expression)) is { } orderByAggregateMisuse)
+        {
+            var misusedAggregate = FindAggregateFunction(orderByAggregateMisuse.Expression)!;
+            throw new EmbeddedSqlException($"misuse of aggregate: {misusedAggregate.Name}()");
+        }
+    }
+
+    // Returns the first non-window aggregate call inside <paramref name="expression"/>, walking
+    // in the same order as ContainsAggregate, so a misuse diagnostic can name the offending call.
+    private FunctionExpression? FindAggregateFunction(Expression? expression)
+    {
+        switch (expression)
+        {
+            case null:
+                return null;
+            case FunctionExpression { Window: not null }:
+                return null;
+            case FunctionExpression function when IsBuiltInAggregate(function)
+                || IsManagedPercentileAggregate(function.Name)
+                || TryGetAggregateFunction(function.Name, function.Arguments.Count, out _):
+                return function;
+            case FunctionExpression function:
+                return function.Arguments
+                    .Select(FindAggregateFunction)
+                    .FirstOrDefault(candidate => candidate is not null);
+            case RowValueExpression rowValue:
+                return rowValue.Values
+                    .Select(FindAggregateFunction)
+                    .FirstOrDefault(candidate => candidate is not null);
+            case UnaryExpression unary:
+                return FindAggregateFunction(unary.Operand);
+            case BinaryExpression binary:
+                return FindAggregateFunction(binary.Left)
+                    ?? FindAggregateFunction(binary.Right);
+            case CollationExpression collation:
+                return FindAggregateFunction(collation.Expression);
+            case CastExpression cast:
+                return FindAggregateFunction(cast.Expression);
+            case CaseExpression @case:
+                return (@case.Operand is not null ? FindAggregateFunction(@case.Operand) : null)
+                    ?? @case.Clauses
+                        .Select(clause => FindAggregateFunction(clause.When) ?? FindAggregateFunction(clause.Then))
+                        .FirstOrDefault(candidate => candidate is not null)
+                    ?? (@case.Else is not null ? FindAggregateFunction(@case.Else) : null);
+            case LikeExpression like:
+                return FindAggregateFunction(like.Value)
+                    ?? FindAggregateFunction(like.Pattern)
+                    ?? (like.Escape is not null ? FindAggregateFunction(like.Escape) : null);
+            case GlobExpression glob:
+                return FindAggregateFunction(glob.Value) ?? FindAggregateFunction(glob.Pattern);
+            case InExpression @in:
+                return FindAggregateFunction(@in.Value)
+                    ?? @in.Values
+                        .Select(FindAggregateFunction)
+                        .FirstOrDefault(candidate => candidate is not null);
+            case InSubqueryExpression @in:
+                return FindAggregateFunction(@in.Value);
+            case BetweenExpression between:
+                return FindAggregateFunction(between.Value)
+                    ?? FindAggregateFunction(between.Lower)
+                    ?? FindAggregateFunction(between.Upper);
+            default:
+                return null;
+        }
     }
 
     private bool IsAggregateExpression(Expression expression)
@@ -38392,13 +38472,16 @@ internal sealed class EmbeddedTable
                 // materialized for a row.
                 if (allowColumns)
                 {
-                    if (function.Window is not null || function.Filter is not null || function.CountStar || function.Distinct
+                    // SQLite names the offending call in its CHECK diagnostic: window calls are a
+                    // window misuse, aggregate calls an aggregate misuse.
+                    if (function.Window is not null || SqliteBuiltinFunctions.IsWindowOnly(function.Name))
+                        throw new EmbeddedSqlException($"misuse of window function {function.Name}()");
+                    if (function.CountStar || function.Distinct || function.Filter is not null
                         || EmbeddedDatabase.IsBuiltInAggregate(function)
                         || EmbeddedDatabase.IsManagedPercentileAggregate(function.Name))
                     {
-                        throw new EmbeddedSqlException($"aggregate and window functions are prohibited in {context}s");
+                        throw new EmbeddedSqlException($"misuse of aggregate function {function.Name}()");
                     }
-
                 }
 
                 foreach (var argument in function.Arguments)
@@ -38863,8 +38946,18 @@ internal sealed class EmbeddedTable
             case StarExpression or QualifiedStarExpression:
                 throw new EmbeddedSqlException("cannot use '*' in a generated column");
             case FunctionExpression function:
-                if (function.Window is not null || function.Filter is not null || function.CountStar || function.Distinct)
-                    throw new EmbeddedSqlException("aggregate and window functions are not allowed in a generated column");
+                // SQLite's generated-column validation reports window and aggregate calls with
+                // its prohibition diagnostics before it ever reaches the determinism allow-list.
+                if (function.Window is not null)
+                    throw new EmbeddedSqlException("window functions prohibited in generated columns");
+                if (function.CountStar || function.Distinct || function.Filter is not null
+                    || EmbeddedDatabase.IsBuiltInAggregate(function)
+                    || EmbeddedDatabase.IsManagedPercentileAggregate(function.Name))
+                {
+                    throw new EmbeddedSqlException("aggregate functions prohibited in generated columns");
+                }
+                if (SqliteBuiltinFunctions.IsWindowOnly(function.Name))
+                    throw new EmbeddedSqlException($"misuse of window function {function.Name}()");
                 if (!IsAllowedGeneratedFunction(function.Name))
                     throw new EmbeddedSqlException($"function {function.Name.ToLowerInvariant()}() is not allowed in a generated column");
                 foreach (var argument in function.Arguments)

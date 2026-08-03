@@ -709,10 +709,17 @@
         "agg-functions/order-by-aggregate-misuse.sqltest::order-by-min-misuse",
         "agg-functions/order-by-aggregate-misuse.sqltest::order-by-max-misuse",
         "agg-functions/order-by-aggregate-misuse.sqltest::order-by-sum-misuse",
-        "agg-functions/order-by-aggregate-misuse.sqltest::order-by-count-misuse"
+        "agg-functions/order-by-aggregate-misuse.sqltest::order-by-count-misuse",
+        "gencol.sqltest::gencol_error_aggregate",
+        "gencol.sqltest::gencol_error_aggregate_star",
+        "gencol.sqltest::gencol_error_window_function",
+        "gencol.sqltest::gencol_error_nested_window_function",
+        "gencol.sqltest::gencol_error_nested_aggregate",
+        "gencol.sqltest::gencol_error_nested_aggregate_star",
+        "window/memory.sqltest::window-row-number-in-check-constraint"
       ],
-      "notes": "SQLite rejects (or Turso matches SQLite's) certain misuse patterns of aggregate functions in ORDER BY outside of aggregate context; Ahtola's compiler currently lets these statements succeed instead of raising the expected compile-time error, a silent-acceptance divergence (s1: queries that should fail to compile succeed and may return misleading results/ordering).",
-      "status": "open"
+      "notes": "SQLite rejects (or Turso matches SQLite's) certain misuse patterns of aggregate functions in ORDER BY outside of aggregate context; Ahtola's compiler currently lets these statements succeed instead of raising the expected compile-time error, a silent-acceptance divergence (s1: queries that should fail to compile succeed and may return misleading results/ordering). Closed 2026-08-03: EmbeddedDatabase now enforces SQLite's misuse semantics in three places. (1) ValidateOrderByAggregateMisuse (called from both ExecuteSelectStatement before the compiled route and ExecuteSelect for direct subquery callers) raises 'misuse of aggregate: {name}()' when an aggregate appears in ORDER BY of a non-aggregate query (no GROUP BY, no aggregate in projections/HAVING; FROM-less selects exempt; window OVER in ORDER BY stays legal), mirroring turso-src/core/translate/select.rs:614-690. (2) CHECK constraint validation now reports 'misuse of window function {name}()' for window/windonly functions and 'misuse of aggregate function {name}()' for aggregates (COUNT(*)/DISTINCT/FILTER included). (3) Generated-column validation reports 'window functions prohibited in generated columns' / 'aggregate functions prohibited in generated columns' with function names, matching turso-src/core/schema.rs:4170-4240. Expected-failures net: exactly the 11 mapped keys removed (4 order-by misuse, 6 gencol, 1 window/memory), 0 added; full lane 3765/3765 green.",
+      "status": "closed"
     },
     {
       "id": "compile-generated-column-error-message-mismatch",

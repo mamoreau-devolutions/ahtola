@@ -259,7 +259,7 @@ public sealed class ManagedConstraintSemanticsTests
         using var connection = database.Connect();
         Action managedCheck = () => Execute(connection, "CREATE TABLE t(x INTEGER CHECK (sum(x) > 0));");
         managedCheck.Should().Throw<EmbeddedSqlException>()
-            .WithMessage("aggregate and window functions are prohibited in CHECK constraints");
+            .WithMessage("misuse of aggregate function SUM()");
 
         Execute(connection, "CREATE TABLE d(x INTEGER DEFAULT (count(*)));");
         Action managedDefault = () => Execute(connection, "INSERT INTO d DEFAULT VALUES;");
