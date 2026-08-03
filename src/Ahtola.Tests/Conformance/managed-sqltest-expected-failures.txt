@@ -1,7 +1,7 @@
 # Cases in sqlite/conformance/sqlite-sqltests that the managed engine does not yet satisfy.
 # Format: <relative path>::<test name> | <summary of the observed difference>
 # Regenerate with:
-#   dotnet test src/Turso.Tests/Turso.Tests.csproj \
+#   dotnet test src/Ahtola.Tests/Ahtola.Tests.csproj \
 #     --filter FullyQualifiedName~RegenerateExpectedFailures -- NUnit.Explicit=true
 
 affinity.sqltest::affinity-rowid | expected 2 row(s), got 1 row(s)
@@ -27,9 +27,6 @@ agg-functions/order-by-aggregate-misuse.sqltest::order-by-min-misuse | expected 
 agg-functions/order-by-aggregate-misuse.sqltest::order-by-max-misuse | expected an error but the statement succeeded
 agg-functions/order-by-aggregate-misuse.sqltest::order-by-sum-misuse | expected an error but the statement succeeded
 agg-functions/order-by-aggregate-misuse.sqltest::order-by-count-misuse | expected an error but the statement succeeded
-agg-functions/sum-large-float.sqltest::sum-large-float-infinity | expected success but got error: Expected RightParen. At SQL offset 33.
-agg-functions/sum-large-float.sqltest::total-large-float-infinity | expected success but got error: Expected RightParen. At SQL offset 35.
-agg-functions/sum-large-float.sqltest::avg-large-float-infinity | expected success but got error: Expected RightParen. At SQL offset 33.
 alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message | error 'Expected keyword BEGIN. At SQL offset 48.' does not match pattern 'no such column: main\.t\.b'
 alter-table-quoted-trigger-target.sqltest::drop-column-with-unrelated-quoted-trigger-target | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t2 (id INTEGER PRIMARY KEY, keep_col TEXT)' but was 'CREATE TABLE "t2" ("id" INTEGER PRIMARY KEY, "keep_col" TEXT)'
 alter-table-quoted-trigger-target.sqltest::rename-column-with-unrelated-quoted-trigger-target | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t2 (id INTEGER PRIMARY KEY, d TEXT)' but was 'CREATE TABLE "t2" ("id" INTEGER PRIMARY KEY, "d" TEXT)'
@@ -143,7 +140,7 @@ create_table_as_select.sqltest::ctas_group_by_having | expected success but got 
 create_table_as_select.sqltest::ctas_schema_sql | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(id INT,name TEXT)' but was 'CREATE TABLE "dst" ("id" INT, "name" TEXT)'
 create_table_as_select.sqltest::ctas_schema_sql_expression_columns | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst("a + 1","count(*)")' but was 'CREATE TABLE "dst" ("BinaryExpression { Left = ColumnExpression { Name = a, Qualifier = , UnqualifiedNam
 create_table_as_select.sqltest::ctas_schema_sql_mixed_alias_expr | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(id INT,"b // c","length(b)")' but was 'CREATE TABLE "dst" ("id" INT, "BinaryExpression { Left = ColumnExpression { Name = b, Qualifier
-create_table_as_select.sqltest::ctas_schema_sql_literals | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst("1","'text'","3.14","NULL")' but was 'CREATE TABLE "dst" ("LiteralExpression { Value = Turso.Core.SqlValue }", "LiteralExpression { Va
+create_table_as_select.sqltest::ctas_schema_sql_literals | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst("1","'text'","3.14","NULL")' but was 'CREATE TABLE "dst" ("LiteralExpression { Value = Ahtola.Core.SqlValue }", "LiteralExpression { V
 create_table_as_select.sqltest::ctas_schema_sql_quoted_source_col | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst("weird col" TEXT)' but was 'CREATE TABLE "dst" ("weird col" TEXT)'
 create_table_as_select.sqltest::ctas_schema_expr_reparseable | expected success but got error: no such column: a + 1
 create_table_as_select.sqltest::ctas_duplicate_column_names | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(id INT,"id:1" INT,name TEXT,value TEXT)' but was 'CREATE TABLE "dst" ("id" INT, "id:1" INT, "name" TEXT, "value" TEXT)'
@@ -155,20 +152,7 @@ cte.sqltest::cte-unreferenced-column-mismatch-delete | expected success but got 
 cte.sqltest::cte-unreferenced-column-mismatch-update | expected success but got error: Managed CTE DML requires every CTE to contribute to the DML statement; cte is unused.
 cte.sqltest::cte-unreferenced-column-mismatch-select | expected success but got error: table cte has 3 values for 1 columns
 cte.sqltest::cte-unreferenced-column-mismatch-multi-cte | expected success but got error: table cte_bad has 3 values for 1 columns
-cte.sqltest::cte-dual-ref-indexed-subquery-empty | expected success but got error: Expected RightParen. At SQL offset 20.
-cte.sqltest::cte-dual-ref-indexed-subquery | expected success but got error: Expected RightParen. At SQL offset 20.
-cte.sqltest::cte-unreferenced-qualified-column-orderby-exists | error 'Expected RightParen. At SQL offset 22.' does not match pattern 'no such column: cte\.y'
-cte.sqltest::cte-alias-scalar-subquery-alias-name | expected success but got error: Expected RightParen. At SQL offset 20.
-cte.sqltest::cte-no-alias-scalar-subquery | expected success but got error: Expected RightParen. At SQL offset 20.
-cte.sqltest::cte-alias-scalar-subquery-multiple-columns | expected success but got error: Expected RightParen. At SQL offset 20.
-cte.sqltest::cte-alias-scalar-subquery-multiple-ctes | expected success but got error: Expected RightParen. At SQL offset 20.
-cte_expressions.sqltest::cte-limit-inside | expected success but got error: Expected RightParen. At SQL offset 20.
-cte_expressions.sqltest::cte-offset-inside | expected success but got error: Expected RightParen. At SQL offset 20.
-cte_expressions.sqltest::cte-limit-zero-inside | expected success but got error: Expected RightParen. At SQL offset 20.
-cte_expressions.sqltest::cte-multi-union | expected success but got error: Expected RightParen. At SQL offset 29.
-cte_expressions.sqltest::cte-union-all-with-duplicates | expected success but got error: Expected RightParen. At SQL offset 20.
-cte_expressions.sqltest::cte-empty-result | expected success but got error: Expected RightParen. At SQL offset 20.
-cte_expressions.sqltest::cte-empty-with-aggregate | expected success but got error: Expected RightParen. At SQL offset 20.
+cte.sqltest::cte-unreferenced-qualified-column-orderby-exists | expected an error but the statement succeeded
 cte_expressions.sqltest::cte-schema-qualified-table-reference | expected success but got error: circular reference: t
 default_value.sqltest::default-value-identifier | expected success but got error: default value of column is not constant: asdf
 default_value.sqltest::default-value-ident-to-str | expected success but got error: default value of column is not constant: x
@@ -444,17 +428,6 @@ snapshot_tests/subqueries/subquery-sort-elision.sqltest::partial-partition-match
 snapshot_tests/subqueries/subquery-sort-elision.sqltest::window-partial-not-elided | expected 7 row(s), got 7 row(s); row 0 expected '1/20/20' but was '1/30/50'
 snapshot_tests/subqueries/subquery-sort-elision.sqltest::window-no-cte-order-not-elided | expected 7 row(s), got 7 row(s); row 0 expected '1/50' but was '3/100'
 subquery/cte_materialization_adversarial.sqltest::range-scan-text-vs-int-affinity | expected 1 row(s), got 4 row(s); row 0 expected '3/30' but was '1/10'
-subquery/expressions.sqltest::subquery-join-two-subqueries | expected success but got error: Expected RightParen. At SQL offset 24.
-subquery/expressions.sqltest::subquery-left-join-two-subqueries | expected success but got error: Expected RightParen. At SQL offset 24.
-subquery/expressions.sqltest::subquery-cross-join-subqueries | expected success but got error: Expected RightParen. At SQL offset 24.
-subquery/expressions.sqltest::subquery-natural-join-subqueries | expected success but got error: Expected RightParen. At SQL offset 24.
-subquery/expressions.sqltest::subquery-from-union | expected success but got error: Expected RightParen. At SQL offset 24.
-subquery/expressions.sqltest::subquery-from-union-all | expected success but got error: Expected RightParen. At SQL offset 24.
-subquery/expressions.sqltest::subquery-from-intersect | expected success but got error: Expected RightParen. At SQL offset 24.
-subquery/expressions.sqltest::subquery-from-except | expected success but got error: Expected RightParen. At SQL offset 24.
-subquery/expressions.sqltest::subquery-nested-compound-in-scalar | expected success but got error: Expected RightParen. At SQL offset 37.
-subquery/expressions.sqltest::subquery-group-by-inside | expected success but got error: Expected RightParen. At SQL offset 39.
-subquery/expressions.sqltest::subquery-having-inside | expected success but got error: Expected RightParen. At SQL offset 39.
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-in-subquery | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-function-call | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-oid | expected an error but the statement succeeded
@@ -562,7 +535,7 @@ upsert.sqltest::upsert-unresolved-table-in-where | error 'no such table: other' 
 upsert.sqltest::upsert-conflict-target-nulls-first-rejected | error 'Unexpected token in index expression. At SQL offset 52.' does not match pattern 'NULLS'
 view-rowid.sqltest::view-rowid-order-by-index | expected an error but the statement succeeded
 view-rowid.sqltest::view-rowid-select | expected an error but the statement succeeded
-views.sqltest::view-rejects-aggregate-order-by | error 'ORDER BY within aggregate functions is not supported by the managed engine. At SQL offset 32.' does not match pattern 'ORDER BY clause is not supported yet in aggregate functions'
+views.sqltest::view-rejects-aggregate-order-by | expected an error but the statement succeeded
 views.sqltest::view-mutual-circle-detection | error 'no such table: vv' does not match pattern 'view v is circularly defined'
 views.sqltest::view-reserved-prefix-sqlite | expected an error but the statement succeeded
 where/memory.sqltest::where_alias_precedence_3 | expected success but got error: no such column: lmao
@@ -573,12 +546,10 @@ window/dense_rank.sqltest::dense-rank-infinities | expected 5 row(s), got 5 row(
 window/dense_rank.sqltest::dense-rank-storage-class-ordering | expected 6 row(s), got 6 row(s); row 2 expected 'empty/3' but was 'text/4'
 window/dense_rank.sqltest::dense-rank-nocase-folds-ascii-only | expected 5 row(s), got 5 row(s); row 2 expected '5/3' but was '3/5'
 window/dense_rank.sqltest::dense-rank-column-declared-collation | expected 3 row(s), got 3 row(s); row 0 expected '2/1/1' but was '1/2/2'
-window/dense_rank.sqltest::dense-rank-over-dense-rank | expected success but got error: Expected RightParen. At SQL offset 92.
+window/dense_rank.sqltest::dense-rank-over-dense-rank | expected 4 row(s), got 4 row(s); row 1 expected '2' but was '3'
 window/dense_rank.sqltest::dense-rank-inside-expressions | expected 4 row(s), got 4 row(s); row 0 expected '105/first' but was '305/rest'
 window/dense_rank.sqltest::dense-rank-union-all-branches | expected 8 row(s), got 8 row(s); row 0 expected '1' but was '3'
 window/dense_rank.sqltest::dense-rank-multikey-mixed-directions | expected 5 row(s), got 5 row(s); row 0 expected '2/1/1' but was '1/1/2'
-window/dense_rank.sqltest::dense-rank-partitioned-volume-checksum | expected success but got error: Expected RightParen. At SQL offset 115.
-window/distinct.sqltest::distinct-with-order-by | expected success but got error: Expected End. At SQL offset 41.
 window/filter-over.sqltest::filter-over-scalar-function-rejected | error 'ABS is not a supported window function' does not match pattern 'may not be used as a window function'
 window/filter-over.sqltest::filter-over-repeated-nondeterministic-call | expected success but got error: no such function: TEST_NONDET_COUNTER
 window/filter-over.sqltest::filter-over-mixed-deterministic-and-nondeterministic-dedup | expected success but got error: no such function: TEST_NONDET_COUNTER
@@ -587,10 +558,9 @@ window/first_last_value.sqltest::first-last-value-null-keys-nulls-last | expecte
 window/first_last_value.sqltest::first-last-value-column-declared-collation | expected 3 row(s), got 3 row(s); row 0 expected '1/1/1' but was '1/2/1'
 window/first_last_value.sqltest::first-last-value-case-expression-argument | expected 4 row(s), got 4 row(s); row 1 expected '30/20' but was '30/-1'
 window/first_last_value.sqltest::first-last-value-arg-is-key | expected 4 row(s), got 4 row(s); row 0 expected '1/1' but was '3/3'
-window/first_last_value.sqltest::first-last-value-over-row-number | expected success but got error: Expected RightParen. At SQL offset 146.
+window/first_last_value.sqltest::first-last-value-over-row-number | expected 4 row(s), got 4 row(s); row 1 expected '4/3' but was '4/1'
 window/first_last_value.sqltest::first-last-value-union-all-branches | expected 8 row(s), got 8 row(s); row 4 expected '1' but was '3'
 window/first_last_value.sqltest::first-last-value-generate-series-source | expected 7 row(s), got 7 row(s); row 0 expected '3/3' but was '3/1'
-window/first_last_value.sqltest::first-last-value-fat-values-checksum | expected success but got error: Expected RightParen. At SQL offset 90.
 window/lag_lead.sqltest::lag-lead-negative-offset-multi | expected 5 row(s), got 5 row(s); row 0 expected '1//' but was '1/4/'
 window/lag_lead.sqltest::lag-with-null-partition | expected 5 row(s), got 5 row(s); row 0 expected '/3/' but was 'a/1/'
 window/lag_lead.sqltest::lag-lead-per-row-mixed-sign-offset | expected 5 row(s), got 5 row(s); row 2 expected '3/-2//1' but was '3/-2/5/1'
@@ -606,7 +576,6 @@ window/nth_value.sqltest::nth-value-large-peer-group-uses-temp-storage | setup '
 window/nth_value.sqltest::nth-value-return-cursor-survives-growing-buffer | setup 'nth_large_peer' failed: Unsupported PRAGMA temp_store. At SQL offset 17.
 window/ntile.sqltest::ntile-order-by-desc | expected 10 row(s), got 10 row(s); row 0 expected '10/1' but was '1/3'
 window/ntile.sqltest::ntile-n-text-prefix-coerces | expected success but got error: argument of ntile must be a positive integer
-window/ntile.sqltest::ntile-remainder-front-loaded | expected success but got error: Expected RightParen. At SQL offset 59.
 window/ntile.sqltest::ntile-n-scientific-text-is-integer-prefix | expected 4 row(s), got 4 row(s); row 1 expected '2/1' but was '2/2'
 window/ntile.sqltest::ntile-n-blob-read-as-text | expected success but got error: argument of ntile must be a positive integer
 window/rank.sqltest::rank-collate-nocase-peers | expected 4 row(s), got 4 row(s); row 1 expected 'apple/1' but was 'apple/3'

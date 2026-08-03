@@ -1813,9 +1813,105 @@ internal sealed class SqlParser
         var expression = ParseExpression();
         string? alias = null;
         if (ConsumeKeyword("AS"))
-            alias = ExpectIdentifier();
+            alias = ParseAliasName();
+        else
+            alias = TryParseElidedAlias();
 
         return new Projection(expression, alias);
+    }
+
+    /// <summary>
+    /// Unquoted keywords SQLite refuses to demote into an elided result-column alias,
+    /// verified empirically against SQLite 3.45 (<c>SELECT 1 &lt;word&gt;</c> for each).
+    /// <c>ISNULL</c>/<c>NOTNULL</c> are postfix operators after an expression, and the
+    /// structural keywords end the projection list. Every other keyword — including
+    /// <c>END</c>, <c>OVER</c>, <c>WINDOW</c>, and <c>WITH</c> — aliases in SQLite.
+    /// </summary>
+    private static readonly HashSet<string> ReservedProjectionKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ADD", "ALL", "ALTER", "AND", "AS", "AUTOINCREMENT", "BETWEEN", "CHECK", "COLLATE",
+        "COMMIT", "CONSTRAINT", "CREATE", "CROSS", "DEFAULT", "DEFERRABLE", "DELETE",
+        "DISTINCT", "DROP", "ELSE", "ESCAPE", "EXCEPT", "EXISTS", "FOREIGN", "FROM", "FULL",
+        "GLOB", "GROUP", "HAVING", "IN", "INDEX", "INDEXED", "INNER", "INSERT", "INTERSECT",
+        "INTO", "IS", "ISNULL", "JOIN", "LEFT", "LIKE", "LIMIT", "MATCH", "NATURAL", "NOT",
+        "NOTNULL", "NOTHING", "NULL", "ON", "OR", "ORDER", "OUTER", "PRIMARY", "REFERENCES",
+        "REGEXP", "RETURNING", "RIGHT", "SELECT", "SET", "TABLE", "THEN", "TO",
+        "TRANSACTION", "UNION", "UNIQUE", "UPDATE", "USING", "VALUES", "WHEN", "WHERE",
+    };
+
+    // SQLite accepts `expr AS name` and the elided `expr name`; in both spellings the
+    // name may also be a string literal. Quoted identifiers are always names.
+    private string ParseAliasName()
+    {
+        if (_lexer.Current.Kind == TokenKind.String)
+        {
+            var value = _lexer.Current.Text;
+            _lexer.Next();
+            return value;
+        }
+
+        return ExpectIdentifier();
+    }
+
+    private string? TryParseElidedAlias()
+    {
+        var token = _lexer.Current;
+        if (token.Kind == TokenKind.String)
+        {
+            _lexer.Next();
+            return token.Text;
+        }
+
+        if (token.Kind != TokenKind.Identifier)
+            return null;
+
+        if (!token.IsQuoted)
+        {
+            // SQLite's tokenizer rejects a numeric literal glued to identifier text
+            // (`SELECT 12a3`, `SELECT 0xFF__FF` are "unrecognized token"), so such
+            // spellings must surface a syntax error instead of aliasing. Unquoted
+            // identifiers cannot glue to each other, quotes end in quote characters,
+            // and parentheses end in themselves, so a glued unquoted alias can only
+            // follow a numeric literal (`1.` forms included).
+            if (token.Offset > 0)
+            {
+                var previous = _sql[token.Offset - 1];
+                if (char.IsAsciiLetterOrDigit(previous) || previous is '_' or '$')
+                    return null;
+                if (previous == '.' && token.Offset > 1 && char.IsAsciiDigit(_sql[token.Offset - 2]))
+                    return null;
+            }
+
+            if (ReservedProjectionKeywords.Contains(token.Text))
+                return null;
+
+            // SQLite keeps `WINDOW` as the window-clause keyword when a window
+            // definition follows (`SELECT row_number() OVER w WINDOW w AS (...)`),
+            // but treats it as a plain alias otherwise (`SELECT 1 window`).
+            if (string.Equals(token.Text, "WINDOW", StringComparison.OrdinalIgnoreCase)
+                && LookaheadIsWindowDefinition())
+            {
+                return null;
+            }
+        }
+
+        _lexer.Next();
+        return token.Text;
+    }
+
+    private bool LookaheadIsWindowDefinition()
+    {
+        var snapshot = _lexer.Snapshot();
+        _lexer.Next(); // WINDOW
+        var isDefinition = _lexer.Current.Kind == TokenKind.Identifier;
+        if (isDefinition)
+        {
+            _lexer.Next();
+            isDefinition = CurrentIsKeyword("AS");
+        }
+
+        _lexer.Restore(snapshot);
+        return isDefinition;
     }
 
     private Expression? ParseFilter()
