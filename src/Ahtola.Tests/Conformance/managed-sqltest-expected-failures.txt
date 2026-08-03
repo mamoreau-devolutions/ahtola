@@ -59,7 +59,6 @@ alter_table.sqltest::strict-alter-add-column-default-real-nonnumeric | error 'ca
 alter_table.sqltest::strict-alter-add-column-default-text-blob | error 'cannot store BLOB value in TEXT column t.b' does not match pattern 'type mismatch on DEFAULT'
 alter_table.sqltest::strict-alter-add-column-default-blob-text | error 'cannot store TEXT value in BLOB column t.b' does not match pattern 'type mismatch on DEFAULT'
 alter_table.sqltest::alter-add-column-invalid-collation | expected an error but the statement succeeded
-alter_table.sqltest::alter-table-drop-column-expr-index-unreferenced | expected success but got error: non-deterministic functions are prohibited in index expressions
 alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel | expected success but got error: non-deterministic functions are prohibited in index expressions
 alter_table.sqltest::alter-table-rename-column-updates-unique-sets | output does not match pattern 'CREATE TABLE t\s*\(a INTEGER, c TEXT, d INTEGER, UNIQUE\s*\(c\)\)'
 alter_table.sqltest::alter-table-rename-trigger-fires-after-rename | expected success but got error: error in trigger trig1 after rename table: no such table: t1
@@ -344,12 +343,7 @@ pragma/table_list.sqltest::pragma-table-list-unqualified-includes-main-and-temp-
 pragma/table_list.sqltest::pragma-table-list-attached-database | expected success but got error: PRAGMA table_list does not accept a value. At SQL offset 21.
 pragma/table_list.sqltest::pragma-table-list-explicit-main-vs-temp | expected success but got error: PRAGMA table_list does not accept a value. At SQL offset 22.
 pragma_vdbe_trace.sqltest::pragma-vdbe-trace | expected success but got error: Unsupported PRAGMA vdbe_trace. At SQL offset 18.
-reindex.sqltest::reindex-table-with-multiple-index-types | expected success but got error: non-deterministic functions are prohibited in index expressions
 reindex.sqltest::reindex-attached-qualified-targets | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-reindex.sqltest::reindex-view-is-noop | expected success but got error: unable to identify the object to be reindexed
-reindex.sqltest::reindex-expression-index-outer-collate-target | expected 2 row(s), got 2 row(s); row 0 expected '0/0/a/0/RTRIM/1' but was '0/-2//0/RTRIM/1'
-reindex.sqltest::reindex-non-ascii-identifiers-use-ascii-case-folding | error 'Unexpected SQL character 'é' at offset 16.' does not match pattern 'unable to identify the object to be reindexed'
-reindex.sqltest::reindex-unquoted-compound-keyword-target-rejected | expected an error but the statement succeeded
 returning.sqltest::update-returning-target-selfread-reruns-per-row | expected 2 row(s), got 2 row(s); row 1 expected '2/2' but was '2/1'
 returning.sqltest::update-returning-target-selfread-correlated-updated-group | expected 2 row(s), got 2 row(s); row 0 expected '1/11/1' but was '1/11/0'
 returning.sqltest::update-returning-after-trigger-same-row-direct | expected 2 row(s), got 2 row(s); row 0 expected '120' but was '20'
@@ -484,7 +478,6 @@ update_attached_db_index.sqltest::update-attached-db-rowid-change-with-unique-in
 update_attached_db_index.sqltest::update-attached-db-rowid-with-where-subquery | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update_attached_db_index.sqltest::update-attached-db-integrity-after-rowid-change | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update_attached_db_index.sqltest::update-attached-db-non-rowid-column | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-update_expression_index.sqltest::substr-expression-index | expected success but got error: non-deterministic functions are prohibited in index expressions
 upsert.sqltest::upsert-select-single | expected success but got error: Managed UPSERT supports VALUES rows only and does not support INSERT ... SELECT or CTE sources.
 upsert.sqltest::upsert-multilple-conflict-targets | expected success but got error: Expected End. At SQL offset 183.
 upsert.sqltest::upsert-qualified-target | expected success but got error: ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint on table qt.

@@ -3713,10 +3713,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 }
             }
         }
-        else if (catalog.Tables.TryGetValue(statement.Target, out var targetTable))
+        else if (TryFindReindexTable(catalog.Tables, statement.Target, out var targetTableName, out var targetTable))
         {
             foreach (var index in targetTable.Indexes)
-                selected.Add((statement.Target, targetTable, index));
+                selected.Add((targetTableName, targetTable, index));
+        }
+        else if (TryFindReindexView(catalog.Views, statement.Target))
+        {
+            // SQLite treats REINDEX of a view as a valid no-op: Turso resolves the
+            // view at the table step and reindexes nothing.
+            return ExecutionResult.Empty;
         }
         else if (TryFindIndex(catalog.Tables, statement.Target, out var indexedTable, out var targetIndex))
         {
@@ -3764,6 +3770,62 @@ public sealed partial class EmbeddedDatabase : IDisposable
             foreach (var index in table.Indexes)
                 destination.Add((tableName, table, index));
         }
+    }
+
+    // SQLite resolves object names with ASCII-only case folding (sqlite3StrICmp):
+    // only 'A'-'Z' match their lowercase forms, so 'Café' and 'CAFÉ' are distinct
+    // objects. The catalog dictionaries approximate common lookups with
+    // OrdinalIgnoreCase, but REINDEX must match SQLite exactly.
+    private static bool AsciiEqualsIgnoreCase(string left, string right)
+    {
+        if (left.Length != right.Length)
+            return false;
+
+        for (var index = 0; index < left.Length; index++)
+        {
+            var leftChar = left[index];
+            var rightChar = right[index];
+            if (leftChar is >= 'A' and <= 'Z')
+                leftChar = (char)(leftChar | 0x20);
+            if (rightChar is >= 'A' and <= 'Z')
+                rightChar = (char)(rightChar | 0x20);
+            if (leftChar != rightChar)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryFindReindexTable(
+        IReadOnlyDictionary<string, EmbeddedTable> tables,
+        string target,
+        out string tableName,
+        out EmbeddedTable table)
+    {
+        foreach (var entry in tables)
+        {
+            if (!AsciiEqualsIgnoreCase(entry.Key, target))
+                continue;
+
+            tableName = entry.Key;
+            table = entry.Value;
+            return true;
+        }
+
+        tableName = string.Empty;
+        table = null!;
+        return false;
+    }
+
+    private static bool TryFindReindexView(IReadOnlyDictionary<string, ViewDefinition> views, string target)
+    {
+        foreach (var name in views.Keys)
+        {
+            if (AsciiEqualsIgnoreCase(name, target))
+                return true;
+        }
+
+        return false;
     }
 
     internal bool HasCollation(string name)
@@ -3819,7 +3881,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             foreach (var candidate in entry.Value.Indexes)
             {
-                if (string.Equals(candidate.Name, indexName, StringComparison.OrdinalIgnoreCase))
+                if (AsciiEqualsIgnoreCase(candidate.Name, indexName))
                 {
                     table = entry.Value;
                     index = candidate;
@@ -3841,15 +3903,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         foreach (var entry in tables)
         {
-            if (!entry.Value.WithoutRowid
-                || (!string.Equals(entry.Key, target, StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(
-                        entry.Value.WithoutRowidPrimaryKeyIndexName,
-                        target,
-                        StringComparison.OrdinalIgnoreCase)))
-            {
+            if (!entry.Value.WithoutRowid)
                 continue;
-            }
+
+            var matchesPrimaryKey = entry.Value.WithoutRowidPrimaryKeyIndexName is { } primaryKeyName
+                && AsciiEqualsIgnoreCase(primaryKeyName, target);
+            if (!AsciiEqualsIgnoreCase(entry.Key, target) && !matchesPrimaryKey)
+                continue;
 
             tableName = entry.Key;
             table = entry.Value;
@@ -35392,7 +35452,7 @@ public sealed class EmbeddedConnection : IDisposable
                 IsAttached: false);
         }
 
-        schema = ResolveExistingIndexOrTableSchema(statement.Target);
+        schema = ResolveExistingReindexTargetSchema(statement.Target);
         if (schema is null)
             throw new EmbeddedSqlException("unable to identify the object to be reindexed");
 
@@ -35412,29 +35472,12 @@ public sealed class EmbeddedConnection : IDisposable
         return RouteSchema(schema, objectName, rewrite);
     }
 
-    private string? ResolveExistingIndexOrTableSchema(string target)
-    {
-        if (CurrentCatalogContains(_tempDatabase, target, ManagedSchemaObjectKind.Table)
-            || CurrentCatalogContains(_tempDatabase, target, ManagedSchemaObjectKind.Index))
-        {
-            return "temp";
-        }
-        if (CurrentCatalogContains(_database, target, ManagedSchemaObjectKind.Table)
-            || CurrentCatalogContains(_database, target, ManagedSchemaObjectKind.Index))
-        {
-            return "main";
-        }
-
-        foreach (var pair in _attachedDatabases.OrderBy(pair => pair.Value.Sequence))
-        {
-            if (CurrentCatalogContains(pair.Value.Database, target, ManagedSchemaObjectKind.Table)
-                || CurrentCatalogContains(pair.Value.Database, target, ManagedSchemaObjectKind.Index))
-            {
-                return pair.Key;
-            }
-        }
-        return null;
-    }
+    // Mirrors SQLite's REINDEX resolution order: tables across all databases
+    // (temp, main, attached), then views, then indexes.
+    private string? ResolveExistingReindexTargetSchema(string target)
+        => FindExistingObjectSchema(target, ManagedSchemaObjectKind.Table)
+            ?? FindExistingObjectSchema(target, ManagedSchemaObjectKind.View)
+            ?? FindExistingObjectSchema(target, ManagedSchemaObjectKind.Index);
 
     private RoutedStatement RouteNamedStatement(string objectName, Func<string, ParsedStatement> rewrite)
     {

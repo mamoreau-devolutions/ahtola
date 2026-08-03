@@ -486,9 +486,12 @@ internal sealed class SqlLexer
         return true;
     }
 
-    private static bool IsIdentifierStart(char value) => char.IsAsciiLetter(value) || value == '_';
+    // SQLite's tokenizer treats every non-ASCII character (byte >= 0x80) as an
+    // identifier character, so 'Café' is a plain identifier; case folding stays
+    // ASCII-only at name-resolution time.
+    private static bool IsIdentifierStart(char value) => char.IsAsciiLetter(value) || value == '_' || value >= 0x80;
 
-    private static bool IsIdentifierContinue(char value) => char.IsAsciiLetterOrDigit(value) || value is '_' or '$';
+    private static bool IsIdentifierContinue(char value) => char.IsAsciiLetterOrDigit(value) || value is '_' or '$' || value >= 0x80;
 }
 
 /// <summary>

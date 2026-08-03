@@ -44,8 +44,8 @@
         "L": 37
       },
       "by_status": {
-        "open": 164,
-        "closed": 7
+        "open": 163,
+        "closed": 8
       }
     },
     "schema": {
@@ -1026,14 +1026,18 @@
       "layer": "compilation",
       "kind": "missing",
       "turso_ref": "turso-src/core/translate (REINDEX statement planning)",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (REINDEX/ANALYZE target parsing + indexed-column COLLATE unwrap) + src/Ahtola.Core/EmbeddedDatabase.cs (ExecuteReindex/RouteReindex: table/view/index/collation targets with ASCII case folding) + src/Ahtola.Core/IndexSemantics.cs (registry-driven index-expression determinism) + src/Ahtola.Core/Parsing/SqlLexer.cs (non-ASCII identifier characters)",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
-        "reindex.sqltest::reindex-table-with-multiple-index-types"
+        "reindex.sqltest::reindex-table-with-multiple-index-types",
+        "reindex.sqltest::reindex-view-is-noop",
+        "reindex.sqltest::reindex-expression-index-outer-collate-target",
+        "reindex.sqltest::reindex-non-ascii-identifiers-use-ascii-case-folding",
+        "reindex.sqltest::reindex-unquoted-compound-keyword-target-rejected"
       ],
-      "notes": "REINDEX statement not implemented.",
-      "status": "open"
+      "notes": "REINDEX diverged from SQLite/Turso in six ways: the index-expression determinism check was a hand-rolled allowlist that wrongly rejected SUBSTR (so rebuilding tables with substr expression indexes failed); view targets failed with 'unable to identify the object to be reindexed' instead of being a no-op; target name resolution used full OrdinalIgnoreCase folding instead of SQLite's ASCII-only case folding; the lexer rejected non-ASCII identifier characters outright; unquoted UNION/INTERSECT/EXCEPT were accepted as ANALYZE/REINDEX targets where SQLite reports a syntax error; and COLLATE wrappers around indexed columns were not unwrapped when comparing expression-index keys. Closed 2026-08-03: (1) IndexSemantics.IsDeterministicBuiltin now rejects aggregates/percentiles/window-only functions and delegates to SqliteBuiltinFunctions.IsDeterministic (registry-driven, mirroring Turso's Func::is_deterministic), which also cleared alter_table.sqltest::alter-table-drop-column-expr-index-unreferenced and update_expression_index.sqltest::substr-expression-index; SQLITE_VERSION/SQLITE_SOURCE_ID were added to the registry's non-deterministic set because SQLite does not mark them SQLITE_DETERMINISTIC, preserving the create-index-sqlite-version/create-index-sqlite-source-id rejections. (2) ExecuteReindex treats view targets as a no-op and resolves table/index targets with AsciiEqualsIgnoreCase (ASCII-only folding); target schema resolution order is table, then view, then index across temp/main/attached (ResolveExistingReindexTargetSchema). (3) SqlLexer accepts non-ASCII identifier characters (>= 0x80) per SQLite's tokenizer. (4) SqlParser.ParseOptionalMaintenanceTarget rejects unquoted compound-set-operator keywords as ANALYZE/REINDEX targets with 'near \"X\": syntax error'; ParseIndexedColumn unwraps nested COLLATE wrappers keeping the outermost collation. Expected-failures net: the 5 mapped reindex keys plus 2 bonus determinism keys removed, 0 added; reindex.sqltest::reindex-attached-qualified-targets remains listed under compile-attach-cross-database-support. Full lane 3765/3765 green.",
+      "status": "closed"
     },
     {
       "id": "compile-attach-cross-database-support",
@@ -1051,7 +1055,8 @@
         "temp_tables.sqltest::temp-table-join-can-distinguish-main-and-temp",
         "update_attached_db_index.sqltest::update-attached-db-non-rowid-column",
         "detach/transaction.sqltest::detach-fails-with-active-write-transaction",
-        "alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db"
+        "alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db",
+        "reindex.sqltest::reindex-attached-qualified-targets"
       ],
       "notes": "Managed ATTACH requires file-backed primary and forbids cross-database statements entirely; temp/main mixed statements are rejected as cross-database. Blocks the entire 41-case trigger_attach_regression file plus pragma attached-database cases.",
       "status": "open"

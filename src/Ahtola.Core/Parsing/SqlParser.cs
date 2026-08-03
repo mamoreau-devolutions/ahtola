@@ -181,9 +181,29 @@ internal sealed class SqlParser
     }
 
     private string? ParseOptionalMaintenanceTarget()
-        => _lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End
-            ? null
-            : ParsePragmaQualifiedName();
+    {
+        if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
+            return null;
+
+        // SQLite's maintenance-target grammar never demotes the compound set
+        // operators to identifiers (they are not in its %fallback ID list), so an
+        // unquoted UNION/INTERSECT/EXCEPT is a syntax error here even when an
+        // object of that name exists. Quoted spellings remain valid targets.
+        // Mirrors Turso's is_reindex_compound_operator_name.
+        if (_lexer.Current.Kind == TokenKind.Identifier
+            && !_lexer.Current.IsQuoted
+            && IsCompoundSetOperatorKeyword(_lexer.Current.Text))
+        {
+            throw Error($"near \"{_lexer.Current.Text}\": syntax error");
+        }
+
+        return ParsePragmaQualifiedName();
+    }
+
+    private static bool IsCompoundSetOperatorKeyword(string text)
+        => text.Equals("UNION", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("INTERSECT", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("EXCEPT", StringComparison.OrdinalIgnoreCase);
 
     private ParsedStatement ParsePragma()
     {
@@ -890,10 +910,12 @@ internal sealed class SqlParser
         if (_lexer.Current.Kind is not TokenKind.Comma and not TokenKind.RightParen)
             throw Error("Unexpected token in index expression.");
 
+        // Nested COLLATE wrappers peel down to the bare operand; like SQLite (and
+        // Turso's extract_collation), the outermost collation wins.
         string? collation = null;
-        if (expression is CollationExpression collated)
+        while (expression is CollationExpression collated)
         {
-            collation = collated.Name;
+            collation ??= collated.Name;
             expression = collated.Expression;
         }
 

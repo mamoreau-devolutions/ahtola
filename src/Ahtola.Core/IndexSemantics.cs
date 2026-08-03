@@ -514,17 +514,22 @@ internal static class IndexExpressionSemantics
         }
     }
 
+    // Mirrors Turso's registry-driven check (Func::resolve_function(name, argc)
+    // .is_deterministic()): an index-expression call is usable when it resolves to
+    // a built-in *scalar* implementation that is deterministic. Aggregate and
+    // window implementations never qualify (MIN/MAX resolve to scalars only with
+    // two or more arguments), and the non-deterministic built-in set is excluded
+    // by the registry lookup.
     private static bool IsDeterministicBuiltin(FunctionExpression function)
     {
-        var name = function.Name.ToUpperInvariant();
-        if (name is "MIN" or "MAX")
-            return function.Arguments.Count >= 2;
+        if (EmbeddedDatabase.IsBuiltInAggregate(function)
+            || EmbeddedDatabase.IsManagedPercentileAggregate(function.Name)
+            || SqliteBuiltinFunctions.IsWindowOnly(function.Name))
+        {
+            return false;
+        }
 
-        return name is "ABS" or "COALESCE" or "FORMAT" or "GLOB" or "HEX" or "IFNULL"
-            or "INSTR" or "JSON" or "JSON_ARRAY" or "JSON_ARRAY_LENGTH" or "JSON_ERROR_POSITION"
-            or "JSON_EXTRACT" or "JSON_INSERT" or "JSON_OBJECT" or "JSON_PATCH" or "JSON_QUOTE"
-            or "JSON_REMOVE" or "JSON_REPLACE" or "JSON_SET" or "JSON_TYPE" or "JSON_VALID"
-            or "LENGTH" or "LIKE" or "LOWER" or "NULLIF" or "PRINTF" or "TYPEOF" or "UPPER";
+        return SqliteBuiltinFunctions.IsDeterministic(function.Name);
     }
 
     private static void ValidateCollation(string indexName, string name)

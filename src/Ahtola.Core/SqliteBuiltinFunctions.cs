@@ -46,8 +46,10 @@ internal static class SqliteBuiltinFunctions
 
     // Function names whose result can change between invocations even when the underlying
     // table data does not. Statement-scoped subquery memoization must never cache a query
-    // that evaluates one of these. The date/time family is excluded wholesale because each
-    // member accepts the 'now' time string. Maintained alongside Names.
+    // that evaluates one of these, and index expressions prohibit them (mirroring SQLite,
+    // which does not mark sqlite_version()/sqlite_source_id() with SQLITE_DETERMINISTIC).
+    // The date/time family is excluded wholesale because each member accepts the 'now' time
+    // string. Maintained alongside Names.
     private static readonly HashSet<string> NonDeterministic = new(StringComparer.Ordinal)
     {
         "RANDOM",
@@ -55,6 +57,8 @@ internal static class SqliteBuiltinFunctions
         "CHANGES",
         "TOTAL_CHANGES",
         "LAST_INSERT_ROWID",
+        "SQLITE_VERSION",
+        "SQLITE_SOURCE_ID",
         "DATE",
         "DATETIME",
         "TIME",
