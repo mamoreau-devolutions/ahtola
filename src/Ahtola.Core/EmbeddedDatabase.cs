@@ -24120,7 +24120,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 ref rightSubqueryValues);
             var leftElement = GetExpressionElement(expression.Left, index);
             var rightElement = GetExpressionElement(expression.Right, index);
-            ApplyComparisonAffinities(leftElement, rightElement, row, ref left, ref right);
+            ApplyComparisonAffinities(leftElement, rightElement, row, ref left, ref right, context);
             var collation = GetComparisonCollation(leftElement, rightElement, row);
 
             if (expression.Operator is BinaryOperator.Is or BinaryOperator.IsNot)
@@ -24711,7 +24711,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 continue;
             }
 
-            ApplyInComparisonAffinity(expression.Value, row, ref candidate);
+            ApplyInComparisonAffinity(expression.Value, row, context, ref candidate);
             if (Compare(value, candidate, collation) == 0)
                 return SqlValue.Integer(expression.Negated ? 0 : 1);
         }
@@ -24724,9 +24724,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private static void ApplyInComparisonAffinity(
         Expression valueExpression,
         SourceRow? row,
+        QueryContext? context,
         ref SqlValue candidate)
     {
-        var affinity = GetComparisonAffinity(valueExpression, row);
+        var affinity = GetComparisonAffinity(valueExpression, row, context);
         if (IsNumericAffinity(affinity))
             candidate = ApplyComparisonNumericAffinity(candidate);
         else if (affinity == ColumnAffinity.Text)
@@ -24848,13 +24849,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 expression.Lower,
                 row,
                 ref lowerValue,
-                ref lower);
+                ref lower,
+                context);
             ApplyComparisonAffinities(
                 expression.Value,
                 expression.Upper,
                 row,
                 ref upperValue,
-                ref upper);
+                ref upper,
+                context);
             return EvaluateBetweenValues(
                 lowerValue,
                 lower,
@@ -24920,7 +24923,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 ref rightSubqueryValues);
             var leftElement = GetExpressionElement(leftExpression, index);
             var rightElement = GetExpressionElement(rightExpression, index);
-            ApplyComparisonAffinities(leftElement, rightElement, row, ref leftValue, ref rightValue);
+            ApplyComparisonAffinities(leftElement, rightElement, row, ref leftValue, ref rightValue, context);
             if (leftValue.Kind == SqlValueKind.Null || rightValue.Kind == SqlValueKind.Null)
             {
                 if (isOperator)
@@ -25414,7 +25417,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 rightElement,
                 representative,
                 ref leftValue,
-                ref rightValue);
+                ref rightValue,
+                context);
             if (leftValue.Kind == SqlValueKind.Null || rightValue.Kind == SqlValueKind.Null)
             {
                 if (isOperator)
@@ -25591,7 +25595,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 continue;
             }
 
-            ApplyInComparisonAffinity(expression.Value, representative, ref candidate);
+            ApplyInComparisonAffinity(expression.Value, representative, context, ref candidate);
             if (Compare(value, candidate, collation) == 0)
                 return SqlValue.Integer(expression.Negated ? 0 : 1);
         }
@@ -25715,7 +25719,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 rightElement,
                 representative,
                 ref leftValue,
-                ref rightValue);
+                ref rightValue,
+                context);
             if (leftValue.Kind == SqlValueKind.Null || rightValue.Kind == SqlValueKind.Null)
                 return SqlValue.Null;
 
@@ -26677,7 +26682,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 rightElement,
                 representative,
                 ref left,
-                ref right);
+                ref right,
+                context);
             if (left.Kind == SqlValueKind.Null || right.Kind == SqlValueKind.Null)
             {
                 foundNull = true;
@@ -28632,12 +28638,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
         Expression? rightExpression,
         SourceRow? row,
         ref SqlValue left,
-        ref SqlValue right)
+        ref SqlValue right,
+        QueryContext? context = null)
     {
-        var leftAffinity = GetComparisonAffinity(leftExpression, row);
+        var leftAffinity = GetComparisonAffinity(leftExpression, row, context);
         var rightAffinity = rightExpression is null
             ? null
-            : GetComparisonAffinity(rightExpression, row);
+            : GetComparisonAffinity(rightExpression, row, context);
         if (IsNumericAffinity(leftAffinity) && !IsNumericAffinity(rightAffinity))
         {
             right = ApplyComparisonNumericAffinity(right);
@@ -28657,19 +28664,43 @@ public sealed partial class EmbeddedDatabase : IDisposable
             left = ApplyComparisonTextAffinity(left);
     }
 
-    private static ColumnAffinity? GetComparisonAffinity(Expression expression, SourceRow? row)
+    private static ColumnAffinity? GetComparisonAffinity(
+        Expression expression,
+        SourceRow? row,
+        QueryContext? context)
     {
         return expression switch
         {
-            CollationExpression collation => GetComparisonAffinity(collation.Expression, row),
-            ColumnExpression column => row?.GetColumnDefinition(column) is { } definition
-                ? definition.StrictAny
-                    ? null
-                    : EmbeddedTable.GetAffinity(definition.DeclaredType)
-                : null,
+            CollationExpression collation => GetComparisonAffinity(collation.Expression, row, context),
+            ColumnExpression column => GetColumnComparisonAffinity(column, row, context),
             CastExpression cast => EmbeddedTable.GetAffinity(cast.TypeName),
             _ => null,
         };
+    }
+
+    private static ColumnAffinity? GetColumnComparisonAffinity(
+        ColumnExpression column,
+        SourceRow? row,
+        QueryContext? context)
+    {
+        if (row?.GetColumnDefinition(column) is { } definition)
+        {
+            return definition.StrictAny
+                ? null
+                : EmbeddedTable.GetAffinity(definition.DeclaredType);
+        }
+
+        // rowid/_rowid_/oid resolve to the hidden rowid even without a column definition;
+        // the rowid always compares with INTEGER affinity.
+        if (row?.IsRowidReference(column) == true)
+            return ColumnAffinity.Integer;
+
+        // NEW./OLD. references in trigger WHEN clauses evaluate without a SourceRow; the
+        // trigger row image carries the table's declared types instead.
+        if (TriggerRowFrame.IsTriggerQualifier(column.Qualifier) && context?.TriggerRow is { } frame)
+            return frame.GetComparisonAffinity(column);
+
+        return null;
     }
 
     private static bool IsNumericAffinity(ColumnAffinity? affinity)
@@ -28680,7 +28711,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (value.Kind != SqlValueKind.Text)
             return value;
 
-        var text = value.AsText().Trim();
+        var text = EmbeddedTable.TrimAsciiWhitespace(value.AsText());
         if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer))
             return SqlValue.Integer(integer);
         if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var real)
@@ -30579,7 +30610,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     var real = value.AsReal();
                     if (double.IsFinite(real)
                         && real == Math.Truncate(real)
-                        && real >= long.MinValue
+                        && real > long.MinValue
                         && real < -(double)long.MinValue)
                     {
                         integer = (long)real;
@@ -30590,13 +30621,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 }
             case SqlValueKind.Text:
                 {
-                    var text = value.AsText().Trim();
+                    var text = EmbeddedTable.TrimAsciiWhitespace(value.AsText());
                     if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out integer))
                         return true;
                     if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var real)
                         && double.IsFinite(real)
                         && real == Math.Truncate(real)
-                        && real >= long.MinValue
+                        && real > long.MinValue
                         && real < -(double)long.MinValue)
                     {
                         integer = (long)real;
@@ -30623,7 +30654,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return true;
             case SqlValueKind.Text:
                 return double.TryParse(
-                    value.AsText().Trim(),
+                    EmbeddedTable.TrimAsciiWhitespace(value.AsText()),
                     NumberStyles.Float,
                     CultureInfo.InvariantCulture,
                     out number);
@@ -30658,7 +30689,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             return (long)value.AsReal();
         if (value.Kind == SqlValueKind.Text
             && double.TryParse(
-                value.AsText().Trim(),
+                EmbeddedTable.TrimAsciiWhitespace(value.AsText()),
                 NumberStyles.Float,
                 CultureInfo.InvariantCulture,
                 out var real))
@@ -31026,7 +31057,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var real = value.AsReal();
             if (double.IsFinite(real)
                 && real == Math.Truncate(real)
-                && real >= long.MinValue
+                && real > long.MinValue
                 && real < -(double)long.MinValue)
             {
                 return (long)real;
@@ -39224,7 +39255,7 @@ internal sealed class EmbeddedTable
                 {
                     var real = value.AsReal();
                     if (real == Math.Truncate(real)
-                        && real >= long.MinValue
+                        && real > long.MinValue
                         && real < -(double)long.MinValue)
                     {
                         rowid = (long)real;
@@ -39235,13 +39266,13 @@ internal sealed class EmbeddedTable
                 }
             case SqlValueKind.Text:
                 {
-                    var text = value.AsText().Trim();
+                    var text = TrimAsciiWhitespace(value.AsText());
                     if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out rowid))
                         return true;
                     if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var real)
                         && double.IsFinite(real)
                         && real == Math.Truncate(real)
-                        && real >= long.MinValue
+                        && real > long.MinValue
                         && real < -(double)long.MinValue)
                     {
                         rowid = (long)real;
@@ -39255,6 +39286,26 @@ internal sealed class EmbeddedTable
         rowid = 0;
         return false;
     }
+
+    /// <summary>
+    /// SQLite skips only ASCII whitespace (space, tab, line feed, vertical tab, form feed,
+    /// carriage return) when parsing numbers out of text. .NET's <see cref="string.Trim()"/>
+    /// also strips Unicode whitespace such as U+00A0 (non-breaking space), which would wrongly
+    /// let text padded with U+00A0 convert to a number.
+    /// </summary>
+    internal static string TrimAsciiWhitespace(string text)
+    {
+        var start = 0;
+        var end = text.Length;
+        while (start < end && IsAsciiWhitespace(text[start]))
+            start++;
+        while (end > start && IsAsciiWhitespace(text[end - 1]))
+            end--;
+        return start == 0 && end == text.Length ? text : text[start..end];
+    }
+
+    private static bool IsAsciiWhitespace(char character)
+        => character is ' ' or '\t' or '\n' or '\v' or '\f' or '\r';
 
     public void AddColumn(EmbeddedColumn column)
     {
@@ -39281,7 +39332,20 @@ internal sealed class EmbeddedTable
         if (column.DefaultExpression is not null && Rows.Count > 0)
             throw new EmbeddedSqlException("Cannot add a column with non-constant default.");
 
-        var defaultValue = ApplyColumnAffinity(column, column.DefaultValue ?? SqlValue.Null);
+        // Turso (translate/alter.rs strict_default_type_mismatch): the added column's constant
+        // DEFAULT gets PLAIN affinity conversion without a strict storage-class throw. A STRICT
+        // table then reports "type mismatch on DEFAULT" — but only when the table already has
+        // rows, because upstream emits the validation as a table scan; an empty table defers the
+        // failure to the first INSERT that stores the default (which hits the normal strict
+        // storage-class check).
+        var defaultValue = CoerceColumnAffinity(column, column.DefaultValue ?? SqlValue.Null);
+        if (Strict
+            && Rows.Count > 0
+            && defaultValue.Kind != SqlValueKind.Null
+            && !StrictValueMatchesDeclaredType(column, defaultValue))
+        {
+            throw new EmbeddedSqlException("type mismatch on DEFAULT");
+        }
         if (column.NotNull && Rows.Count > 0 && defaultValue.Kind == SqlValueKind.Null)
             throw new EmbeddedSqlException("Cannot add a NOT NULL column without a default value.");
 
@@ -39859,6 +39923,24 @@ internal sealed class EmbeddedTable
             $"cannot store {storageClass} value in {declaredType} column {Name}.{column.Name}");
     }
 
+    // The storage-class predicate behind ValidateStrictValue, exposed for the ALTER TABLE ADD
+    // COLUMN DEFAULT validation on STRICT tables (Turso translate/alter.rs
+    // strict_default_type_mismatch), which reports "type mismatch on DEFAULT" instead. NULL is
+    // exempt and must be handled by the caller.
+    private static bool StrictValueMatchesDeclaredType(EmbeddedColumn column, SqlValue value)
+    {
+        var declaredType = column.DeclaredType!.Trim().ToUpperInvariant();
+        return declaredType switch
+        {
+            "INT" or "INTEGER" => value.Kind == SqlValueKind.Integer,
+            "REAL" => value.Kind == SqlValueKind.Real,
+            "TEXT" => value.Kind == SqlValueKind.Text,
+            "BLOB" => value.Kind == SqlValueKind.Blob,
+            "ANY" => true,
+            _ => throw new InvalidOperationException("A STRICT table contains an invalid declared type."),
+        };
+    }
+
     internal static ColumnAffinity GetAffinity(string? declaredType)
     {
         if (string.IsNullOrEmpty(declaredType)
@@ -39894,7 +39976,7 @@ internal sealed class EmbeddedTable
                 return true;
             case SqlValueKind.Text:
                 {
-                    var text = value.AsText().Trim();
+                    var text = TrimAsciiWhitespace(value.AsText());
                     if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer))
                     {
                         numeric = SqlValue.Integer(integer);
@@ -39921,8 +40003,11 @@ internal sealed class EmbeddedTable
             return numeric;
 
         var real = numeric.AsReal();
+        // SQLite requires the real to be STRICTLY between i64::MIN and i64::MAX
+        // (Turso cast_real_to_integer rejects the endpoints themselves), so a real that
+        // is exactly -9223372036854775808.0 stays REAL instead of converting to i64::MIN.
         return real == Math.Truncate(real)
-            && real >= long.MinValue
+            && real > long.MinValue
             && real < -(double)long.MinValue
             ? SqlValue.Integer((long)real)
             : numeric;
@@ -40297,6 +40382,50 @@ internal sealed record SourceRow(
         }
 
         return Parent?.GetColumnDefinition(expression);
+    }
+
+    // Whether a column expression resolves to a rowid value (hidden rowid or rowid alias)
+    // without a backing column definition, mirroring the shadowing order of TryGetValue.
+    // Comparison affinity treats such references as INTEGER, like a real INTEGER column.
+    public bool IsRowidReference(ColumnExpression column)
+    {
+        if (GetColumnDefinition(column) is not null)
+            return false;
+
+        if (column.Qualifier is null)
+        {
+            for (var index = 0; index < Columns.Length; index++)
+            {
+                if (string.Equals(Columns[index], column.Name, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            if (RowId is not null && EmbeddedTable.IsRowidAliasName(column.Name))
+                return true;
+
+            return Parent?.IsRowidReference(column) ?? false;
+        }
+
+        if (AmbiguousQualifiedColumns?.Contains(column.Name) == true)
+            return false;
+        if (QualifiedColumns?.ContainsKey(column.Name) == true)
+            return false;
+        if (QualifiedRowIds is not null
+            && column.UnqualifiedName is { } qualifiedName
+            && EmbeddedTable.IsRowidAliasName(qualifiedName)
+            && QualifiedRowIds.ContainsKey(column.Qualifier))
+        {
+            return true;
+        }
+        if (RowId is not null
+            && RowIdQualifier is not null
+            && string.Equals(column.Qualifier, RowIdQualifier, StringComparison.OrdinalIgnoreCase)
+            && column.UnqualifiedName is { } unqualifiedName
+            && EmbeddedTable.IsRowidAliasName(unqualifiedName))
+        {
+            return true;
+        }
+        return Parent?.IsRowidReference(column) ?? false;
     }
 
     private SqlValue GetValue(string name, bool allowQualifiedLookup)

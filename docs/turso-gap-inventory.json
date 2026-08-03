@@ -44,8 +44,8 @@
         "L": 37
       },
       "by_status": {
-        "open": 163,
-        "closed": 8
+        "open": 162,
+        "closed": 9
       }
     },
     "schema": {
@@ -293,10 +293,6 @@
       "conformance_links": [
         "affinity.sqltest::affinity-rowid",
         "affinity.sqltest::affinity-ascii-whitespace-1_1",
-        "subquery/memory.sqltest::subquery-column-affinity-inheritance",
-        "subquery/cte_materialization_adversarial.sqltest::range-scan-text-vs-int-affinity",
-        "gencol.sqltest::gencol_self_table_affinity_indexed_update_returning",
-        "gencol.sqltest::gencol_self_table_affinity_indexed_delete_returning",
         "trigger-before-insert-affinity.sqltest::when-rowid-alias-keeps-integer-affinity",
         "trigger-before-insert-affinity.sqltest::rowid-keeps-integer-affinity",
         "trigger.sqltest::trigger-when-rowid-alias-string-literal-affinity",
@@ -305,10 +301,12 @@
         "alter_table.sqltest::strict-alter-add-column-default-real-nonnumeric",
         "alter_table.sqltest::strict-alter-add-column-default-text-blob",
         "alter_table.sqltest::strict-alter-add-column-default-blob-text",
-        "update.sqltest::update-integer-pk-underflow-error"
+        "insert.sqltest::insert-integer-pk-i64-min-float-error",
+        "update.sqltest::update-integer-pk-underflow-error",
+        "window/nth_value.sqltest::nth-value-unicode-whitespace-n-errors"
       ],
-      "notes": "Turso centralizes write-time coercion in TypeCheck; Ahtola scatters it across write delegates and the compiler's NumericAffinityInstruction emission. The 148-case wrong-values conformance cluster (affinity.sqltest leads it) shows the current placement misses cases — e.g. affinity through expression shapes the compiler does not annotate. Not an opcode-port job per se: the fix is making the compiler/delegate emission match TypeCheck's coverage matrix.",
-      "status": "open"
+      "notes": "Closed 2026-08-03 via four coordinated fixes. (A) ALTER TABLE ADD COLUMN on a STRICT table now rejects a type-mismatched DEFAULT with 'type mismatch on DEFAULT' (existing rows only), matching SQLite instead of the row-level 'cannot store X value in Y column'. (B) i64 cast boundaries made exclusive at all six sites: a float exactly at i64::MIN/MAX (or beyond) no longer wraps, it errors 'integer overflow' per SQLite's cast semantics. (C) Comparison-affinity threading through a QueryContext: rowid and rowid-alias column references carry Integer affinity in comparisons (including IN lists via ApplyInComparisonAffinity), while NEW/OLD trigger pseudo-table columns carry NO affinity except rowid aliases and the rowid register, exactly per turso-src/core/translate/trigger_exec.rs:1043-1070 (SQLite forum 819f2d6627). (D) TRIM/LTRIM/RTRIM and nth_value boundary parsing now treat only ASCII whitespace as trimmable, so Unicode-space-padded values stay intact (SQLite trim is ASCII-only). Expected-failures count dropped by 13 (12 mapped + nth-value-unicode-whitespace-n-errors) with zero additions; full lane 3765/3765 passing. Two cases previously linked here (subquery-column-affinity-inheritance, range-scan-text-vs-int-affinity) are affinity-propagation issues in subquery/compound contexts and now track under compile-affinity-rules-diverge-in-subquery-and-compound-contexts; the two gencol_self_table_affinity_indexed_* cases were already closed by parser-indexed-by-hint.",
+      "status": "closed"
     },
     {
       "id": "vdbe-newrowid-semantics",
@@ -899,16 +897,16 @@
       "severity": "s1-correctness",
       "effort": "M",
       "conformance_links": [
-        "affinity.sqltest::affinity-rowid",
         "affinity.sqltest::affinity-in-subquery-text-lhs-integer-rhs",
         "affinity.sqltest::affinity-scalar-subquery-text-comparison",
         "affinity.sqltest::affinity-scalar-subquery-text-delete-predicate",
-        "affinity.sqltest::affinity-ascii-whitespace-1_1",
         "affinity.sqltest::affinity-compound-subquery-all-text",
         "affinity.sqltest::affinity-compound-subquery-numeric-col-plus-numeric-literal",
-        "affinity.sqltest::affinity-compound-subquery-numeric-literal-first-then-col"
+        "affinity.sqltest::affinity-compound-subquery-numeric-literal-first-then-col",
+        "subquery/memory.sqltest::subquery-column-affinity-inheritance",
+        "subquery/cte_materialization_adversarial.sqltest::range-scan-text-vs-int-affinity"
       ],
-      "notes": "A cluster of affinity.sqltest failures shows Ahtola computing a different column affinity than SQLite/Turso specifically when the affinity-bearing column flows through a scalar subquery, an IN (subquery), or a compound (UNION-family) SELECT -- i.e. affinity is correctly applied to direct column references but not consistently propagated through these composed query shapes, producing wrong comparison/coercion results (silently wrong row counts/values, hence s1).",
+      "notes": "A cluster of affinity.sqltest failures shows Ahtola computing a different column affinity than SQLite/Turso specifically when the affinity-bearing column flows through a scalar subquery, an IN (subquery), or a compound (UNION-family) SELECT -- i.e. affinity is correctly applied to direct column references but not consistently propagated through these composed query shapes, producing wrong comparison/coercion results (silently wrong row counts/values, hence s1). Direct-comparison affinity (affinity-rowid, affinity-ascii-whitespace-1_1) was fixed under vdbe-typecheck-on-write; this entry keeps the propagation-through-composed-shapes half, plus the subquery/CTE affinity-inheritance cases that moved here from vdbe-typecheck-on-write.",
       "status": "open"
     },
     {

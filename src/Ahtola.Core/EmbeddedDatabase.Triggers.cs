@@ -24,7 +24,8 @@ public sealed partial class EmbeddedDatabase
         string[] Columns,
         SqlValue[] Values,
         bool HasRowid,
-        long RowId)
+        long RowId,
+        int RowidAliasColumnIndex = -1)
     {
         public SqlValue GetValue(string name)
         {
@@ -38,6 +39,25 @@ public sealed partial class EmbeddedDatabase
                 return SqlValue.Integer(RowId);
 
             throw new EmbeddedSqlException($"no such column: {name}");
+        }
+
+        // NEW/OLD columns carry no comparison affinity; only the rowid and rowid aliases
+        // keep INTEGER affinity (https://www.sqlite.org/forum/forumpost/819f2d6627; Turso
+        // translate/trigger_exec.rs populate_trigger_row_register_affinities).
+        public ColumnAffinity? GetComparisonAffinity(string name)
+        {
+            for (var index = 0; index < Columns.Length; index++)
+            {
+                if (!string.Equals(Columns[index], name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                return index == RowidAliasColumnIndex ? ColumnAffinity.Integer : null;
+            }
+
+            if (HasRowid && EmbeddedTable.IsRowidAliasName(name))
+                return ColumnAffinity.Integer;
+
+            return null;
         }
     }
 
@@ -93,6 +113,19 @@ public sealed partial class EmbeddedDatabase
             var name = column.UnqualifiedName ?? column.Name;
             return image?.GetValue(name)
                 ?? throw new EmbeddedSqlException($"no such column: {column.Name}");
+        }
+
+        public ColumnAffinity? GetComparisonAffinity(ColumnExpression column)
+        {
+            var image = string.Equals(column.Qualifier, "OLD", StringComparison.OrdinalIgnoreCase)
+                ? Old
+                : string.Equals(column.Qualifier, "NEW", StringComparison.OrdinalIgnoreCase)
+                    ? New
+                    : null;
+            if (image is null)
+                return null;
+
+            return image.GetComparisonAffinity(column.UnqualifiedName ?? column.Name);
         }
     }
 
@@ -1071,7 +1104,12 @@ public sealed partial class EmbeddedDatabase
         EmbeddedTable table,
         SqlValue[] row,
         long rowId)
-        => new(table.Columns, row.ToArray(), table.HasRowid, rowId);
+        => new(
+            table.Columns,
+            row.ToArray(),
+            table.HasRowid,
+            rowId,
+            table.RowidAliasColumnIndex);
 
     private TriggerRowImage CreateBeforeInsertImage(
         EmbeddedTable table,
@@ -1088,7 +1126,12 @@ public sealed partial class EmbeddedDatabase
         if (table.RowidAliasColumnIndex >= 0)
             values[table.RowidAliasColumnIndex] = SqlValue.Integer(-1);
         ComputeGeneratedColumns(table, table.Name, values, parameters, context);
-        return new TriggerRowImage(table.Columns, values, HasRowid: true, RowId: -1);
+        return new TriggerRowImage(
+            table.Columns,
+            values,
+            HasRowid: true,
+            RowId: -1,
+            RowidAliasColumnIndex: table.RowidAliasColumnIndex);
     }
 
     private static bool UsesAutomaticRowId(

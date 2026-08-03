@@ -4,11 +4,9 @@
 #   dotnet test src/Ahtola.Tests/Ahtola.Tests.csproj \
 #     --filter FullyQualifiedName~RegenerateExpectedFailures -- NUnit.Explicit=true
 
-affinity.sqltest::affinity-rowid | expected 2 row(s), got 1 row(s)
 affinity.sqltest::affinity-in-subquery-text-lhs-integer-rhs | expected 3 row(s), got 1 row(s); row 0 expected '01' but was '1'
 affinity.sqltest::affinity-scalar-subquery-text-comparison | expected 1 row(s), got 1 row(s); row 0 expected '0' but was '1'
 affinity.sqltest::affinity-scalar-subquery-text-delete-predicate | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
-affinity.sqltest::affinity-ascii-whitespace-1_1 | expected 1 row(s), got 1 row(s); row 0 expected 'text/3' but was 'integer/2'
 affinity.sqltest::affinity-compound-subquery-all-text | expected 2 row(s), got 2 row(s); row 0 expected 'text/1' but was 'text/0'
 affinity.sqltest::affinity-compound-subquery-numeric-col-plus-numeric-literal | expected 2 row(s), got 2 row(s); row 0 expected 'integer/1' but was 'integer/0'
 affinity.sqltest::affinity-compound-subquery-numeric-literal-first-then-col | expected 2 row(s), got 2 row(s); row 0 expected 'real/1' but was 'real/0'
@@ -53,11 +51,6 @@ alter_table.sqltest::alter-table-drop-column-unique-special-name-schema-sql | ou
 alter_table.sqltest::alter-table-rename-to-quoted-identifier | expected 11 row(s), got 11 row(s); row 0 expected 'CREATE TABLE "t t" (a)' but was 'CREATE TABLE "t t" ("a")'
 alter_table.sqltest::alter-table-add-notnull-col | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (a, b NOT NULL)' but was 'CREATE TABLE "t" ("a", "b" NOT NULL)'
 alter_table.sqltest::alter-tbl-regression | expected success but got error: no such table: main.p_ren1
-alter_table.sqltest::strict-alter-add-column-default-type-mismatch | error 'cannot store TEXT value in INTEGER column t1.id' does not match pattern 'type mismatch on DEFAULT'
-alter_table.sqltest::strict-alter-add-column-default-integer-fractional | error 'cannot store REAL value in INTEGER column t.b' does not match pattern 'type mismatch on DEFAULT'
-alter_table.sqltest::strict-alter-add-column-default-real-nonnumeric | error 'cannot store TEXT value in REAL column t.b' does not match pattern 'type mismatch on DEFAULT'
-alter_table.sqltest::strict-alter-add-column-default-text-blob | error 'cannot store BLOB value in TEXT column t.b' does not match pattern 'type mismatch on DEFAULT'
-alter_table.sqltest::strict-alter-add-column-default-blob-text | error 'cannot store TEXT value in BLOB column t.b' does not match pattern 'type mismatch on DEFAULT'
 alter_table.sqltest::alter-add-column-invalid-collation | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel | expected success but got error: non-deterministic functions are prohibited in index expressions
 alter_table.sqltest::alter-table-rename-column-updates-unique-sets | output does not match pattern 'CREATE TABLE t\s*\(a INTEGER, c TEXT, d INTEGER, UNIQUE\s*\(c\)\)'
@@ -242,7 +235,6 @@ indexed_by.sqltest::indexed-by-attached-update-delete | expected success but got
 insert.sqltest::insert-explicit-rowid-with-rowidalias | expected 6 row(s), got 6 row(s); row 0 expected '-12/-10/-12/-9' but was '4/2/4/1'
 insert.sqltest::uniq_constraint | error 'UNIQUE constraint failed: test.id' does not match pattern 'UNIQUE constraint failed: test.id \(19\)'
 insert.sqltest::insert-explicit-rowid-conflict | error 'UNIQUE constraint failed: t.rowid' does not match pattern 'UNIQUE constraint failed: t.rowid \(19\)'
-insert.sqltest::insert-integer-pk-i64-min-float-error | expected an error but the statement succeeded
 insert.sqltest::insert-1-3 | error 'table has a different number of columns' does not match pattern 'table test1 has 3 columns but 2 values were supplied'
 insert.sqltest::insert-1-3b | error 'table has a different number of columns' does not match pattern 'table test1 has 3 columns but 4 values were supplied'
 insert.sqltest::insert-column-count-mismatch-values | error 'table has a different number of columns' does not match pattern 'table t1 has 1 columns but 3 values were supplied'
@@ -407,9 +399,6 @@ temp_tables_mvcc.sqltest::temp-autoincrement-is-allowed-when-main-db-is-mvcc | e
 total-changes.sqltest::total-changes-includes-trigger-body-rows | expected 1 row(s), got 1 row(s); row 0 expected '2' but was '1'
 total-changes.sqltest::total-changes-includes-fk-cascade-rows | expected 2 row(s), got 2 row(s); row 1 expected '4' but was '3'
 transactions.sqltest::temp-and-main-table-in-immediate-tx | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
-trigger-before-insert-affinity.sqltest::when-rowid-alias-keeps-integer-affinity | expected 1 row(s), got 0 row(s)
-trigger-before-insert-affinity.sqltest::rowid-keeps-integer-affinity | expected 1 row(s), got 0 row(s)
-trigger.sqltest::trigger-when-rowid-alias-string-literal-affinity | expected 1 row(s), got 0 row(s)
 trigger.sqltest::trigger-raise-shorthand | error 'Expected ROLLBACK, ABORT, FAIL, or IGNORE in RAISE(). At SQL offset 81.' does not match pattern 'shorthand abort'
 trigger.sqltest::trigger-raise-expr-concat | error 'Expected RightParen. At SQL offset 118.' does not match pattern 'bad: -5'
 trigger.sqltest::trigger-raise-expr-concat-pass | expected success but got error: Expected RightParen. At SQL offset 120.
@@ -473,7 +462,6 @@ update-from.sqltest::update-from-attached-constant-where-zero | expected success
 update-from.sqltest::update-from-attached-constant-where-one | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update-from.sqltest::update-from-attached-constant-where-noop-set | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update.sqltest::update-set-expression-missing-identifier | expected an error but the statement succeeded
-update.sqltest::update-integer-pk-underflow-error | expected an error but the statement succeeded
 update_attached_db_index.sqltest::update-attached-db-rowid-change-with-unique-index | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update_attached_db_index.sqltest::update-attached-db-rowid-with-where-subquery | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update_attached_db_index.sqltest::update-attached-db-integrity-after-rowid-change | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
@@ -524,7 +512,6 @@ window/memory.sqltest::window-row-number-nulls-in-order-by | expected 5 row(s), 
 window/memory.sqltest::window-row-number-nulls-in-partition-by | expected 5 row(s), got 5 row(s); row 0 expected '5//1' but was '1/x/1'
 window/multi-window-ordering.sqltest::empty-over-first-then-ordered-then-partitioned | expected 5 row(s), got 5 row(s); row 0 expected 'c/50/1/1/1' but was 'a/10/1/5/1'
 window/nth_value.sqltest::nth-value-limit-stops-before-late-invalid-n | expected success but got error: second argument to nth_value must be a positive integer
-window/nth_value.sqltest::nth-value-unicode-whitespace-n-errors | expected an error but the statement succeeded
 window/nth_value.sqltest::nth-value-large-peer-group-uses-temp-storage | setup 'nth_large_peer' failed: Unsupported PRAGMA temp_store. At SQL offset 17.
 window/nth_value.sqltest::nth-value-return-cursor-survives-growing-buffer | setup 'nth_large_peer' failed: Unsupported PRAGMA temp_store. At SQL offset 17.
 window/ntile.sqltest::ntile-order-by-desc | expected 10 row(s), got 10 row(s); row 0 expected '10/1' but was '1/3'
