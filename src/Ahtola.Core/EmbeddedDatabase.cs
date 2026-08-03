@@ -8570,6 +8570,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[] parameters,
         QueryContext context)
     {
+        ValidateDmlTargetIndexDirective(statement.TableName, statement.IndexDirective, context);
         var updatedColumns = statement.Assignments
             .Select(assignment => assignment.Column)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -10857,6 +10858,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[] parameters,
         QueryContext context)
     {
+        ValidateDmlTargetIndexDirective(statement.TableName, statement.IndexDirective, context);
         ValidateForeignKeyActionTriggerPrograms(
             context,
             statement.TableName,
@@ -11611,6 +11613,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         context.CheckInterrupt();
         ValidateSelectIndexDirectives(select, context);
+        select = StripUnusableForcedIndexForCountStar(select, context);
         ValidateGroupByCollations(select.GroupBy);
         ValidateOrderByAggregateMisuse(select);
         var canUseCompiledRoute = CanUseCompiledSelectRoute(select, context, outerRow);
@@ -17844,6 +17847,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             inheritedJoinConstraints: [],
             nullSupplying: false,
             allowUnqualified: CountTableSourceLeaves(statement.Source) <= 1,
+            simpleCountStar: IsSimpleCountStarSelect(statement),
             context);
         foreach (var projection in statement.Projections)
             ValidateExpressionIndexDirectives(projection.Expression, context);
@@ -17865,6 +17869,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         IReadOnlyList<IndexConstraint> inheritedJoinConstraints,
         bool nullSupplying,
         bool allowUnqualified,
+        bool simpleCountStar,
         QueryContext context)
     {
         switch (source)
@@ -17880,7 +17885,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     .Concat(whereTerms.Select(expression =>
                         new IndexConstraint(expression, RequiresNullRejection: nullSupplying)))
                     .ToArray();
-                ValidateNamedTableIndexDirective(named, constraints, allowUnqualified, context);
+                ValidateNamedTableIndexDirective(named, constraints, allowUnqualified, simpleCountStar, context);
                 if (TryGetView(context, named.Name, out var view)
                     && named.IndexDirective is not IndexedByDirective)
                 {
@@ -17933,6 +17938,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     leftJoinConstraints,
                     nullSupplying || leftBecomesNullSupplying,
                     allowUnqualified,
+                    simpleCountStar: false,
                     context);
                 ValidateTableSourceIndexDirectives(
                     join.Right,
@@ -17940,6 +17946,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     rightJoinConstraints,
                     nullSupplying || rightBecomesNullSupplying,
                     allowUnqualified,
+                    simpleCountStar: false,
                     context);
                 return;
             default:
@@ -18050,6 +18057,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         NamedTableSource source,
         IReadOnlyList<IndexConstraint> constraints,
         bool allowUnqualified,
+        bool simpleCountStar,
         QueryContext context)
     {
         if (source.IndexDirective is not IndexedByDirective indexedBy)
@@ -18080,7 +18088,76 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 source,
                 allowUnqualified))
         {
+            // Mirrors Turso's enforce_indexed_by_hints simple-COUNT exemption: SQLite's
+            // COUNT(*) fast path bypasses the WHERE machinery (OP_Count scans the whole
+            // table), so a forced unusable partial index is ignored there rather than
+            // failing with "no query solution".
+            if (simpleCountStar)
+                return;
             throw new EmbeddedSqlException("no query solution");
+        }
+    }
+
+    // Mirrors Turso's `simple_aggregate == SimpleAggregate::Count` check: no WHERE/GROUP BY/
+    // HAVING, a single COUNT(*) projection over a single table source.
+    private static bool IsSimpleCountStarSelect(SelectStatement statement)
+    {
+        return statement.Where is null
+            && statement.Having is null
+            && statement.GroupBy.Count == 0
+            && statement.Projections.Count == 1
+            && statement.Source is NamedTableSource
+            && statement.Projections[0].Expression is FunctionExpression
+            {
+                CountStar: true,
+                Distinct: false,
+                Filter: null,
+                Window: null,
+            } function
+            && string.Equals(function.Name, "count", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Mirrors Turso's enforce_indexed_by_hints simple-COUNT exemption: SQLite's whole-table
+    // OP_Count fast path skips the WHERE machinery, so an unusable forced partial index is
+    // ignored for `SELECT COUNT(*) FROM t INDEXED BY idx` and the count must come from the
+    // table rather than the (smaller) index entries. A simple count-star select has no WHERE,
+    // so every partial index is unusable there; drop the directive for the rest of execution
+    // so every planning/evaluation route table-scans. Existence of the named index was already
+    // enforced by validation before this runs.
+    private SelectStatement StripUnusableForcedIndexForCountStar(
+        SelectStatement statement,
+        QueryContext context)
+    {
+        if (!IsSimpleCountStarSelect(statement)
+            || statement.Source is not NamedTableSource { IndexDirective: IndexedByDirective indexedBy } source
+            || !context.Tables.TryGetValue(source.Name, out var table))
+        {
+            return statement;
+        }
+
+        var forced = table.Indexes.FirstOrDefault(candidate =>
+            string.Equals(candidate.Name, indexedBy.IndexName, StringComparison.OrdinalIgnoreCase));
+        return forced is { IsPartial: true }
+            ? statement with { Source = source with { IndexDirective = null } }
+            : statement;
+    }
+
+    // The managed engine always table-scans UPDATE/DELETE row selection, so INDEXED BY and
+    // NOT INDEXED hints are advisory there — but INDEXED BY must still name an index of the
+    // target table (SQLite: "no such index: <name>").
+    private static void ValidateDmlTargetIndexDirective(
+        string tableName,
+        TableIndexDirective? directive,
+        QueryContext context)
+    {
+        if (directive is not IndexedByDirective indexedBy)
+            return;
+        if (!context.Tables.TryGetValue(tableName, out var table))
+            return; // "no such table" surfaces through the regular DML path.
+        if (!table.Indexes.Any(index =>
+                string.Equals(index.Name, indexedBy.IndexName, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new EmbeddedSqlException($"no such index: {indexedBy.IndexName}");
         }
     }
 
@@ -18527,6 +18604,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         context.CheckInterrupt();
         statement = BindTableValuedFunctionSources(statement, context);
         ValidateSelectIndexDirectives(statement, context);
+        statement = StripUnusableForcedIndexForCountStar(statement, context);
         statement = ResolveNamedWindows(statement);
         context = EnterCollationSource(context, statement.Source);
         ValidateGroupByCollations(statement.GroupBy);

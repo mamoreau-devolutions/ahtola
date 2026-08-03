@@ -1429,18 +1429,26 @@
       "id": "parser-indexed-by-hint",
       "layer": "parser",
       "kind": "missing",
-      "turso_ref": "turso-src/sqlite/parser (INDEXED BY / NOT INDEXED clauses on table refs and DML)",
-      "ahtola_ref": "none (Managed UPDATE/DELETE do not support INDEXED BY)",
+      "turso_ref": "turso-src/sqlite/parser (INDEXED BY / NOT INDEXED clauses on table refs and DML); turso-src/core/translate/optimizer/mod.rs:1754-1820 (enforce_indexed_by_hints, simple-COUNT exemption)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (ParseTableIndexDirective on UPDATE/DELETE), src/Ahtola.Core/EmbeddedDatabase.cs (ValidateDmlTargetIndexDirective, StripUnusableForcedIndexForCountStar)",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
         "indexed_by.sqltest::indexed-by-delete",
-        "update-from.sqltest::update-from-indexed-by-target-hint-is-preserved",
+        "indexed_by.sqltest::indexed-by-update",
+        "indexed_by.sqltest::not-indexed-delete",
+        "indexed_by.sqltest::not-indexed-update",
+        "index-cursor-record-after-overflow-update.sqltest::update-indexed-by-overflow-keys",
+        "index-cursor-record-after-overflow-update.sqltest::select-via-index-after-overflow-update",
+        "index-cursor-record-after-overflow-update.sqltest::select-via-index-empty-result-after-update",
         "gencol.sqltest::gencol_self_table_affinity_indexed_update_returning",
-        "gencol.sqltest::gencol_self_table_affinity_indexed_delete_returning"
+        "gencol.sqltest::gencol_self_table_affinity_indexed_delete_returning",
+        "partial_idx.sqltest::partial-index-indexed-by-count-star-without-predicate-counts-table",
+        "simple-count-optimization.sqltest::simple-count-index-correctness",
+        "update-from.sqltest::update-from-indexed-by-target-hint-is-preserved"
       ],
-      "notes": "INDEXED BY/NOT INDEXED hint syntax unsupported across SELECT/UPDATE/DELETE.",
-      "status": "open"
+      "notes": "INDEXED BY/NOT INDEXED hints now parse and are accepted on SELECT/UPDATE/DELETE. UPDATE/DELETE directives are validated (index must exist) and treated as advisory, since the managed DML path table-scans. Turso's simple-COUNT(*) exemption for an unusable forced partial index is honored: StripUnusableForcedIndexForCountStar drops the directive so COUNT(*) returns the table row count instead of counting index entries. The two indexed-by-attached-* cases remain failing under the separate ATTACH gap. Closed 2026-08-03.",
+      "status": "closed"
     },
     {
       "id": "parser-join-subquery-form",

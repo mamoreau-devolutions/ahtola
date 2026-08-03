@@ -210,7 +210,8 @@ internal sealed record UpdateStatement(
     Expression? Offset = null,
     string? Alias = null,
     TableSource? From = null,
-    InsertConflictAlgorithm? ConflictAlgorithm = null) : ParsedStatement
+    InsertConflictAlgorithm? ConflictAlgorithm = null,
+    TableIndexDirective? IndexDirective = null) : ParsedStatement
 {
     public IReadOnlyList<OrderByTerm> EffectiveOrderBy => OrderBy ?? [];
 
@@ -228,7 +229,8 @@ internal sealed record DeleteStatement(
     IReadOnlyList<OrderByTerm>? OrderBy = null,
     Expression? Limit = null,
     Expression? Offset = null,
-    string? Alias = null) : ParsedStatement
+    string? Alias = null,
+    TableIndexDirective? IndexDirective = null) : ParsedStatement
 {
     public IReadOnlyList<OrderByTerm> EffectiveOrderBy => OrderBy ?? [];
 

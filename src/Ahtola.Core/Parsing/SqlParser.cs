@@ -1325,7 +1325,7 @@ internal sealed class SqlParser
         var tableName = ParseSchemaQualifiedName();
         RejectQualifiedTriggerDmlTarget(tableName);
         var alias = ParseDmlTargetAlias();
-        RejectUnsupportedDmlTargetSuffix("UPDATE");
+        var indexDirective = ParseTableIndexDirective();
         ExpectKeyword("SET");
         var assignments = ParseAssignments();
 
@@ -1354,7 +1354,8 @@ internal sealed class SqlParser
             offset,
             alias,
             from,
-            conflictAlgorithm);
+            conflictAlgorithm,
+            indexDirective);
     }
 
     private IReadOnlyList<ColumnAssignment> ParseAssignments()
@@ -1400,26 +1401,20 @@ internal sealed class SqlParser
         var tableName = ParseSchemaQualifiedName();
         RejectQualifiedTriggerDmlTarget(tableName);
         var alias = ParseDmlTargetAlias();
-        RejectUnsupportedDmlTargetSuffix("DELETE");
+        var indexDirective = ParseTableIndexDirective();
         Expression? where = null;
         if (ConsumeKeyword("WHERE"))
             where = ParseExpression();
 
         var returning = ParseReturning();
         var (orderBy, limit, offset) = ParseLimitedDmlTail("DELETE");
-        return new DeleteStatement(tableName, where, returning, orderBy, limit, offset, alias);
+        return new DeleteStatement(tableName, where, returning, orderBy, limit, offset, alias, indexDirective);
     }
 
     // SQLite's qualified-table-name allows an alias on UPDATE and DELETE targets. Only the
     // explicit AS form is accepted so a bare identifier cannot silently swallow SET or WHERE.
     private string? ParseDmlTargetAlias()
         => ConsumeKeyword("AS") ? ExpectIdentifier() : null;
-
-    private void RejectUnsupportedDmlTargetSuffix(string statementKind)
-    {
-        if (CurrentIsKeyword("INDEXED") || CurrentIsKeyword("NOT"))
-            throw Error($"Managed {statementKind} does not support INDEXED BY or NOT INDEXED.");
-    }
 
     private void RejectQualifiedTriggerDmlTarget(string tableName)
     {
