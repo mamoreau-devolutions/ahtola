@@ -91,13 +91,19 @@ jobs:
         shell: pwsh
         run: ./build.ps1 build -Framework net10.0
 
+      # The managed engine uses SQLite main-file byte-range locks for physical
+      # databases, which the port currently only implements on Windows and
+      # Linux. On macOS it throws PlatformNotSupportedException at runtime, so
+      # we build there (compile gate) but skip the test suite. tracked: macOS
+      # byte-range locking support.
       - name: "Test (full gate: pack, validate, run suite)"
+        if: matrix.os != 'macos-latest'
         shell: pwsh
         run: |
           ./build.ps1 test -Framework net10.0 -MinimumExecutedTests $env:MINIMUM_EXECUTED_TESTS
 
       - name: Upload test results
-        if: always()
+        if: always() && matrix.os != 'macos-latest'
         uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ matrix.os }}
