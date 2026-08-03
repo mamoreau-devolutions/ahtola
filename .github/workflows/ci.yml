@@ -36,6 +36,10 @@ jobs:
             9.0.x
             10.0.x
 
+      - name: Restore
+        shell: pwsh
+        run: ./build.ps1 restore
+
       - name: Check formatting
         shell: pwsh
         run: ./build.ps1 format-check
