@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      package-version:
+        description: Package version (blank = derive from tag, or generate a CI version for non-tag runs)
+        default: ""
+        required: false
+      dry-run:
+        description: Dry run (pack and validate, do not publish anywhere)
+        type: boolean
+        default: true
+      skip-nuget:
+        description: Skip NuGet.org publish
+        type: boolean
+        default: false
+      skip-github-release:
+        description: Skip GitHub release creation
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  NUGET_SOURCE: "https://api.nuget.org/v3/index.json"
+
+jobs:
+  pack:
+    name: Pack release packages
+    runs-on: ubuntu-latest
+    outputs:
+      package-version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Compute package version
+        id: version
+        shell: pwsh
+        run: |
+          $v = '${{ inputs.package-version }}'
+          if ([string]::IsNullOrWhiteSpace($v)) {
+            $ref = '${{ github.ref }}'
+            if ($ref -like 'refs/tags/v*') {
+              $v = $ref -replace '^refs/tags/v', ''
+            } else {
+              $v = "0.0.0-ci.${{ github.run_number }}"
+            }
+          }
+          Write-Host "Package version: $v"
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore
+        shell: pwsh
+        run: ./build.ps1 restore
+
+      - name: Pack Release nupkgs
+        shell: pwsh
+        run: ./build.ps1 pack -Configuration Release -PackageVersion ${{ steps.version.outputs.version }}
+
+      - name: Validate packed closure (no native/Rust in nupkgs)
+        shell: pwsh
+        run: ./build.ps1 validate-packed-closure
+
+      - name: Upload nupkgs
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-packages
+          path: artifacts/managed-packages/*.nupkg
+          if-no-files-found: error
+
+  publish-nuget:
+    name: Publish to NuGet.org
+    needs: pack
+    if: ${{ github.event.inputs.dry-run != 'true' && github.event.inputs.skip-nuget != 'true' }}
+    runs-on: ubuntu-latest
+    environment: nuget
+    permissions:
+      contents: read
+    steps:
+      - name: Download nupkgs
+        uses: actions/download-artifact@v8
+        with:
+          name: release-packages
+          path: artifacts/managed-packages
+
+      - name: Push to NuGet.org
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)) {
+            throw 'NUGET_API_KEY secret is not set on the nuget environment.'
+          }
+          Get-ChildItem -Path artifacts/managed-packages -Filter *.nupkg -Recurse |
+            ForEach-Object {
+              dotnet nuget push $_.FullName --api-key $env:NUGET_API_KEY --source $env:NUGET_SOURCE --skip-duplicate
+            }
+
+  github-release:
+    name: Create GitHub release
+    needs: pack
+    if: ${{ github.event.inputs.dry-run != 'true' && github.event.inputs.skip-github-release != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download nupkgs
+        uses: actions/download-artifact@v8
+        with:
+          name: release-packages
+          path: artifacts/managed-packages
+
+      - name: Create GitHub release with nupkg assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/managed-packages/*.nupkg
+          fail_on_unmatched_files: true

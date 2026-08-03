@@ -1,10 +1,16 @@
 # Ahtola .NET
 
-Pure managed (C#) SQLite-compatible engine and ADO.NET / EF Core provider, by
-[Devolutions](https://devolutions.net).
+An experimental pure managed (C#) port of [Turso](https://turso.tech)’s
+SQLite-compatible database engine, with [ADO.NET](https://learn.microsoft.com/dotnet/framework/data/adonet/) and [EF Core](https://learn.microsoft.com/efcore/) providers.
 
-Ahtola is a from-scratch C# engine that reads and writes SQLite’s on-disk format.
-It is **not** a binding over native SQLite or over any Rust core. No native
+> ⚠️ **Experimental project.** Ahtola is a research / prototype engine and is
+> **not** production-ready. For production .NET workloads, use the official
+> bindings to the original Turso Rust core at
+> [tursodatabase/turso](https://github.com/tursodatabase/turso).
+
+Ahtola is a C# engine that reads and writes SQLite’s on-disk format directly —
+automatically vibe-ported from Turso’s Rust core, as a fun experiment. It is
+**not** a binding over native SQLite or over any Rust core — no native
 companion, P/Invoke SDK, or Rust toolchain is required to restore, build, pack,
 or run.
 
