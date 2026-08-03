@@ -39,6 +39,11 @@ jobs:
       - name: Restore (full solution, so dotnet format's implicit restore is cached)
         shell: pwsh
         run: |
+          # ConsumerBenchmarks/nuget.config declares a local source at
+          # artifacts/nupkg that only exists after `pack`. Create it empty so
+          # full-solution restore (and dotnet format's implicit restore)
+          # doesn't fail with NU1301 on a fresh checkout.
+          New-Item -ItemType Directory -Force -Path artifacts/nupkg | Out-Null
           ./build.ps1 restore
           dotnet restore ./Ahtola.slnx
 
