@@ -1091,8 +1091,8 @@
         "window/memory.sqltest::window-collate-partition-by",
         "window/dense_rank.sqltest::dense-rank-collate-nocase-peers"
       ],
-      "notes": "Column collation is lost across subquery boundaries and compound arms, flipping NOCASE comparisons and window peer groups.",
-      "status": "open"
+      "notes": "Column collation is lost across subquery boundaries and compound arms, flipping NOCASE comparisons and window peer groups. Closed 2026-08-04 via runtime source-column definitions carrying query-output collations into derived-table/view/CTE rows (DescribeRuntimeSourceColumnDefinitions + BuildSourceColumnDefinitionsFromAffinities), GROUP BY ordinal resolution through COLLATE wrappers (ResolveGroupByBindings), and ORDER BY ordinal detection with parens-before-COLLATE stripping (TryParseOrderByOrdinal). All 6 mapped collate.sqltest keys pass.",
+      "status": "closed"
     },
     {
       "id": "compile-analyze-stat-tables",

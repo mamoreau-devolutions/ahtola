@@ -157,7 +157,19 @@ public sealed partial class EmbeddedDatabase
             var term = groupBy[index];
             var resolved = term;
 
-            if (TryGetOrdinalLiteral(term, out var ordinal))
+            // An ordinal literal wrapped in COLLATE clauses (GROUP BY 1 COLLATE NOCASE) is
+            // still an ordinal position; resolve the inner literal and re-apply the wrappers
+            // so the explicit collation governs the grouping key.
+            var ordinalExpression = term;
+            List<CollationExpression>? collationWrappers = null;
+            while (ordinalExpression is CollationExpression collationWrapper)
+            {
+                collationWrappers ??= [];
+                collationWrappers.Add(collationWrapper);
+                ordinalExpression = collationWrapper.Expression;
+            }
+
+            if (TryGetOrdinalLiteral(ordinalExpression, out var ordinal))
             {
                 if (ordinal < 1 || ordinal > resultColumns.Count)
                 {
@@ -166,8 +178,14 @@ public sealed partial class EmbeddedDatabase
                 }
 
                 resolved = resultColumns[(int)ordinal - 1].Expression;
+                if (collationWrappers is not null)
+                {
+                    for (var wrapperIndex = collationWrappers.Count - 1; wrapperIndex >= 0; wrapperIndex--)
+                        resolved = collationWrappers[wrapperIndex] with { Expression = resolved };
+                }
             }
-            else if (term is ColumnExpression { Qualifier: null } column
+            else if (collationWrappers is null
+                && term is ColumnExpression { Qualifier: null } column
                 && !ResolvesInLocalSource(column.Name, outputColumns, rawOutputColumns)
                 && !ResolvesInOuterRow(column, outerRow)
                 && TryFindProjectionAlias(column.Name, projections, out var aliased))

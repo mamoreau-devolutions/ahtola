@@ -94,12 +94,6 @@ check_constraint.sqltest::check_constraint_inline_rename_then_drop_keeps_renamed
 check_constraint.sqltest::check_constraint_update_only_checks_changed_columns | expected success but got error: Unsupported PRAGMA ignore_check_constraints. At SQL offset 32.
 check_constraint.sqltest::check_constraint_update_table_level_multi_column | expected success but got error: Unsupported PRAGMA ignore_check_constraints. At SQL offset 32.
 check_constraint.sqltest::check_constraint_integrity_check_detects_real_violation | expected success but got error: Unsupported PRAGMA ignore_check_constraints. At SQL offset 32.
-collate.sqltest::collate_subquery_from_nocase_outer_comparison | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
-collate.sqltest::collate_union_all_nocase_branch | expected 2 row(s), got 2 row(s); row 0 expected '1' but was '0'
-collate.sqltest::collate_subquery_preserves_column_collation | expected 2 row(s), got 2 row(s); row 0 expected '2' but was '1'
-collate.sqltest::collate_subquery_preserves_explicit_collation | expected 2 row(s), got 2 row(s); row 0 expected '2' but was '1'
-collate.sqltest::collate_groupby_ordinal_with_explicit_collate | expected 1 row(s), got 1 row(s); row 0 expected '3' but was '1'
-collate.sqltest::collate_orderby_ordinal_with_collate_inside_parens | expected 1 row(s), got 1 row(s); row 0 expected 'a/b/c/Z' but was 'b/Z/c/a'
 compound-select-orderby.sqltest::three-way-union-order-by | expected 11 row(s), got 11 row(s); row 0 expected '1/alpha' but was '1/apple'
 compound-select-orderby.sqltest::union-order-by-expr-no-match | error 'ORDER BY term does not match any column in the result set' does not match pattern '1st ORDER BY term does not match any column in the result set'
 create_index.sqltest::create-index-string-literal-no-such-column | expected an error but the statement succeeded

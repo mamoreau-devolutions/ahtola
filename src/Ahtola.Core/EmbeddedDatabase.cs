@@ -23475,17 +23475,24 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     // Materializes per-column definitions for a derived/CTE row source from a query's
     // described affinities so comparisons against its columns apply SQLite's affinity
-    // rules. BLOB-affinity columns carry no definition (no affinity), matching SQLite.
+    // rules. BLOB-affinity columns carry no definition (no affinity), matching SQLite,
+    // unless the query output column carries a declared collation — then the definition
+    // exists only to expose that collation to comparisons.
     private static IReadOnlyList<EmbeddedColumn?> BuildSourceColumnDefinitionsFromAffinities(
         IReadOnlyList<QueryAffinityColumn> affinities,
-        string[] outputColumns)
+        string[] outputColumns,
+        IReadOnlyList<string?>? collations)
     {
         var definitions = new EmbeddedColumn?[outputColumns.Length];
         var count = Math.Min(affinities.Count, outputColumns.Length);
         for (var index = 0; index < count; index++)
         {
             var affinity = affinities[index].Affinity;
-            if (affinity == ColumnAffinity.Blob)
+            var collation = collations is not null && index < collations.Count
+                ? NormalizeDeclaredCollation(collations[index])
+                : null;
+            if (affinity == ColumnAffinity.Blob
+                && (collation is null || string.Equals(collation, "BINARY", StringComparison.OrdinalIgnoreCase)))
             {
                 definitions[index] = null;
                 continue;
@@ -23497,7 +23504,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 PrimaryKey: false,
                 NotNull: false,
                 Unique: false,
-                DefaultValue: null);
+                DefaultValue: null,
+                Collation: collation);
         }
 
         return definitions;
@@ -23517,7 +23525,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 query,
                 context,
                 BuildAffinityMapFromRuntimeCtes(context.CommonTableExpressions));
-            return BuildSourceColumnDefinitionsFromAffinities(affinities, outputColumns);
+            IReadOnlyList<string?>? collations;
+            try
+            {
+                collations = GetQueryOutputCollations(query, context);
+            }
+            catch (EmbeddedSqlException)
+            {
+                collations = null;
+            }
+
+            return BuildSourceColumnDefinitionsFromAffinities(affinities, outputColumns, collations);
         }
         catch (EmbeddedSqlException)
         {

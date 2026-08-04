@@ -1753,13 +1753,28 @@ internal sealed class SqlParser
 
     private static long? TryParseOrderByOrdinal(ReadOnlySpan<char> expression)
     {
-        var collation = expression.IndexOf("COLLATE", StringComparison.OrdinalIgnoreCase);
-        if (collation >= 0)
-            expression = expression[..collation];
-
+        // Parentheses must be stripped before cutting a COLLATE clause: a COLLATE inside
+        // the parentheses (as in "(1 COLLATE NOCASE)") would otherwise leave an unbalanced
+        // "(1" behind. Both transforms repeat because they can expose each other.
         expression = expression.Trim();
-        while (TryStripOuterParentheses(ref expression))
-            expression = expression.Trim();
+        bool reshaped;
+        do
+        {
+            reshaped = false;
+            while (TryStripOuterParentheses(ref expression))
+            {
+                expression = expression.Trim();
+                reshaped = true;
+            }
+
+            var collation = expression.IndexOf("COLLATE", StringComparison.OrdinalIgnoreCase);
+            if (collation >= 0)
+            {
+                expression = expression[..collation].Trim();
+                reshaped = true;
+            }
+        }
+        while (reshaped);
 
         var sign = '\0';
         if (!expression.IsEmpty && expression[0] is '+' or '-')
