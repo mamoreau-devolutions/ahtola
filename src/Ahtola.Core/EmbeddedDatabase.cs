@@ -1065,194 +1065,194 @@ public sealed partial class EmbeddedDatabase : IDisposable
             : 0L;
         while (true)
         {
-        try
-        {
-        lock (_gate)
-        {
-            // A commit hook can veto the implicit commit of an autocommit mutation, so the
-            // statement has to run against a working clone that can be discarded. The in-memory
-            // fast path below mutates the live catalog in place and cannot be rolled back, so an
-            // installed gate forces the clone-and-publish shape here.
-            var commitGate = hooks?.CommitGate;
-            if ((cancellationToken.CanBeCanceled || commitGate is not null) && MayMutate(statement))
-            {
-                var cancellableWorking = new SchemaCatalog(_tables, _views, _triggers).Clone();
-                ExecutionResult cancellableResult;
-                try
-                {
-                    cancellableResult = Execute(
-                        statement,
-                        parameters,
-                        cancellableWorking,
-                        lastInsertRowId,
-                        foreignKeysEnabled,
-                        recursiveTriggersEnabled,
-                        deferForeignKeys,
-                        inTransaction,
-                        cancellationToken,
-                        compilationEnabled,
-                        tempTriggers,
-                        hooks);
-                }
-                catch (EmbeddedConflictFailException)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    // ON CONFLICT FAIL keeps the rows written before the failure, so this is still
-                    // a commit and the hook still gets to veto it.
-                    if (commitGate is not null && !commitGate())
-                        throw new EmbeddedCommitVetoException();
-                    if (_fileStore is null)
-                        PublishCatalog(cancellableWorking);
-                    else
-                        PersistFileCatalog(
-                            cancellableWorking,
-                            busyTimeout: GetRemainingBusyTimeout(busyRetryDeadline));
-                    throw;
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!cancellableResult.Changed)
-                    return cancellableResult;
-
-                if (commitGate is not null && !commitGate())
-                    throw new EmbeddedCommitVetoException();
-
-                if (_fileStore is null)
-                {
-                    if (MayChangeSchema(statement))
-                    {
-                        _inMemoryPragmaHeader = _inMemoryPragmaHeader with
-                        {
-                            SchemaVersion = unchecked(_inMemoryPragmaHeader.SchemaVersion + 1),
-                        };
-                    }
-
-                    PublishCatalog(cancellableWorking);
-                }
-                else
-                {
-                    PersistFileCatalog(
-                        cancellableWorking,
-                        forceFullRewrite: cancellableResult.ForceFullCatalogRewrite,
-                        busyTimeout: GetRemainingBusyTimeout(busyRetryDeadline));
-                }
-
-                return cancellableResult;
-            }
-
-            if (_fileStore is null)
-            {
-                ExecutionResult inMemoryResult;
-                try
-                {
-                    inMemoryResult = Execute(
-                        statement,
-                        parameters,
-                        new SchemaCatalog(_tables, _views, _triggers),
-                        lastInsertRowId,
-                        foreignKeysEnabled,
-                        recursiveTriggersEnabled,
-                        deferForeignKeys,
-                        inTransaction,
-                        cancellationToken,
-                        compilationEnabled,
-                        tempTriggers,
-                        hooks);
-                }
-                catch (EmbeddedConflictFailException)
-                {
-                    _version++;
-                    throw;
-                }
-                if (inMemoryResult.Changed)
-                {
-                    if (MayChangeSchema(statement))
-                        _inMemoryPragmaHeader = _inMemoryPragmaHeader with
-                        {
-                            SchemaVersion = unchecked(_inMemoryPragmaHeader.SchemaVersion + 1),
-                        };
-                    _version++;
-                }
-
-                return inMemoryResult;
-            }
-
-            // For file-backed databases a mutating autocommit statement runs against
-            // a working clone so that a rejected pre-commit persist rolls back
-            // cleanly. A reported post-commit maintenance failure instead publishes
-            // the catalog because the WAL mutation is already durable.
-            if (!MayMutate(statement))
-                return Execute(
-                    statement,
-                    parameters,
-                    new SchemaCatalog(_tables, _views, _triggers),
-                    lastInsertRowId,
-                    foreignKeysEnabled,
-                    recursiveTriggersEnabled,
-                    deferForeignKeys,
-                    inTransaction,
-                    cancellationToken,
-                    compilationEnabled,
-                    tempTriggers,
-                    hooks);
-
-            var working = new SchemaCatalog(_tables, _views, _triggers).Clone();
-            ExecutionResult result;
             try
             {
-                result = Execute(
-                    statement,
-                    parameters,
-                    working,
-                    lastInsertRowId,
-                    foreignKeysEnabled,
-                    recursiveTriggersEnabled,
-                    deferForeignKeys,
-                    inTransaction,
-                    cancellationToken,
-                    compilationEnabled,
-                    tempTriggers,
-                    hooks);
-            }
-            catch (EmbeddedConflictFailException)
-            {
-                PersistFileCatalog(
-                    working,
-                    busyTimeout: GetRemainingBusyTimeout(busyRetryDeadline));
-                throw;
-            }
-            if (result.Changed)
-            {
-                PersistFileCatalog(
-                    working,
-                    forceFullRewrite: result.ForceFullCatalogRewrite,
-                    busyTimeout: GetRemainingBusyTimeout(busyRetryDeadline));
-            }
-            else if (!inTransaction)
-            {
-                // A mutating autocommit statement that produced no change (most
-                // importantly a conflicting INSERT OR IGNORE returning changes()==0)
-                // decided its outcome against the heap clone. If another connection
-                // committed meanwhile (e.g. deleted the conflicting row), that decision
-                // is stale: native SQLite serializes the conflicting write through the
-                // write lock against the live btree, so a loser retries and can win.
-                // Force the same stale-check the persist path runs so a changed durable
-                // version reloads the catalog and re-executes this statement instead of
-                // silently returning the stale outcome (ENGINE #17 migrations lock).
-                EnsureFileCatalogVersionCurrent(GetRemainingBusyTimeout(busyRetryDeadline));
-            }
+                lock (_gate)
+                {
+                    // A commit hook can veto the implicit commit of an autocommit mutation, so the
+                    // statement has to run against a working clone that can be discarded. The in-memory
+                    // fast path below mutates the live catalog in place and cannot be rolled back, so an
+                    // installed gate forces the clone-and-publish shape here.
+                    var commitGate = hooks?.CommitGate;
+                    if ((cancellationToken.CanBeCanceled || commitGate is not null) && MayMutate(statement))
+                    {
+                        var cancellableWorking = new SchemaCatalog(_tables, _views, _triggers).Clone();
+                        ExecutionResult cancellableResult;
+                        try
+                        {
+                            cancellableResult = Execute(
+                                statement,
+                                parameters,
+                                cancellableWorking,
+                                lastInsertRowId,
+                                foreignKeysEnabled,
+                                recursiveTriggersEnabled,
+                                deferForeignKeys,
+                                inTransaction,
+                                cancellationToken,
+                                compilationEnabled,
+                                tempTriggers,
+                                hooks);
+                        }
+                        catch (EmbeddedConflictFailException)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            // ON CONFLICT FAIL keeps the rows written before the failure, so this is still
+                            // a commit and the hook still gets to veto it.
+                            if (commitGate is not null && !commitGate())
+                                throw new EmbeddedCommitVetoException();
+                            if (_fileStore is null)
+                                PublishCatalog(cancellableWorking);
+                            else
+                                PersistFileCatalog(
+                                    cancellableWorking,
+                                    busyTimeout: GetRemainingBusyTimeout(busyRetryDeadline));
+                            throw;
+                        }
 
-            return result;
-        }
-        }
-        catch (EmbeddedCatalogSnapshotStaleException)
-        {
-            if (busyRetryDeadline == 0)
-                throw;
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (!cancellableResult.Changed)
+                            return cancellableResult;
 
-            ReloadFileCatalogAfterStale();
-            cancellationToken.ThrowIfCancellationRequested();
-        }
+                        if (commitGate is not null && !commitGate())
+                            throw new EmbeddedCommitVetoException();
+
+                        if (_fileStore is null)
+                        {
+                            if (MayChangeSchema(statement))
+                            {
+                                _inMemoryPragmaHeader = _inMemoryPragmaHeader with
+                                {
+                                    SchemaVersion = unchecked(_inMemoryPragmaHeader.SchemaVersion + 1),
+                                };
+                            }
+
+                            PublishCatalog(cancellableWorking);
+                        }
+                        else
+                        {
+                            PersistFileCatalog(
+                                cancellableWorking,
+                                forceFullRewrite: cancellableResult.ForceFullCatalogRewrite,
+                                busyTimeout: GetRemainingBusyTimeout(busyRetryDeadline));
+                        }
+
+                        return cancellableResult;
+                    }
+
+                    if (_fileStore is null)
+                    {
+                        ExecutionResult inMemoryResult;
+                        try
+                        {
+                            inMemoryResult = Execute(
+                                statement,
+                                parameters,
+                                new SchemaCatalog(_tables, _views, _triggers),
+                                lastInsertRowId,
+                                foreignKeysEnabled,
+                                recursiveTriggersEnabled,
+                                deferForeignKeys,
+                                inTransaction,
+                                cancellationToken,
+                                compilationEnabled,
+                                tempTriggers,
+                                hooks);
+                        }
+                        catch (EmbeddedConflictFailException)
+                        {
+                            _version++;
+                            throw;
+                        }
+                        if (inMemoryResult.Changed)
+                        {
+                            if (MayChangeSchema(statement))
+                                _inMemoryPragmaHeader = _inMemoryPragmaHeader with
+                                {
+                                    SchemaVersion = unchecked(_inMemoryPragmaHeader.SchemaVersion + 1),
+                                };
+                            _version++;
+                        }
+
+                        return inMemoryResult;
+                    }
+
+                    // For file-backed databases a mutating autocommit statement runs against
+                    // a working clone so that a rejected pre-commit persist rolls back
+                    // cleanly. A reported post-commit maintenance failure instead publishes
+                    // the catalog because the WAL mutation is already durable.
+                    if (!MayMutate(statement))
+                        return Execute(
+                            statement,
+                            parameters,
+                            new SchemaCatalog(_tables, _views, _triggers),
+                            lastInsertRowId,
+                            foreignKeysEnabled,
+                            recursiveTriggersEnabled,
+                            deferForeignKeys,
+                            inTransaction,
+                            cancellationToken,
+                            compilationEnabled,
+                            tempTriggers,
+                            hooks);
+
+                    var working = new SchemaCatalog(_tables, _views, _triggers).Clone();
+                    ExecutionResult result;
+                    try
+                    {
+                        result = Execute(
+                            statement,
+                            parameters,
+                            working,
+                            lastInsertRowId,
+                            foreignKeysEnabled,
+                            recursiveTriggersEnabled,
+                            deferForeignKeys,
+                            inTransaction,
+                            cancellationToken,
+                            compilationEnabled,
+                            tempTriggers,
+                            hooks);
+                    }
+                    catch (EmbeddedConflictFailException)
+                    {
+                        PersistFileCatalog(
+                            working,
+                            busyTimeout: GetRemainingBusyTimeout(busyRetryDeadline));
+                        throw;
+                    }
+                    if (result.Changed)
+                    {
+                        PersistFileCatalog(
+                            working,
+                            forceFullRewrite: result.ForceFullCatalogRewrite,
+                            busyTimeout: GetRemainingBusyTimeout(busyRetryDeadline));
+                    }
+                    else if (!inTransaction)
+                    {
+                        // A mutating autocommit statement that produced no change (most
+                        // importantly a conflicting INSERT OR IGNORE returning changes()==0)
+                        // decided its outcome against the heap clone. If another connection
+                        // committed meanwhile (e.g. deleted the conflicting row), that decision
+                        // is stale: native SQLite serializes the conflicting write through the
+                        // write lock against the live btree, so a loser retries and can win.
+                        // Force the same stale-check the persist path runs so a changed durable
+                        // version reloads the catalog and re-executes this statement instead of
+                        // silently returning the stale outcome (ENGINE #17 migrations lock).
+                        EnsureFileCatalogVersionCurrent(GetRemainingBusyTimeout(busyRetryDeadline));
+                    }
+
+                    return result;
+                }
+            }
+            catch (EmbeddedCatalogSnapshotStaleException)
+            {
+                if (busyRetryDeadline == 0)
+                    throw;
+
+                ReloadFileCatalogAfterStale();
+                cancellationToken.ThrowIfCancellationRequested();
+            }
         }
     }
 
@@ -4123,17 +4123,79 @@ public sealed partial class EmbeddedDatabase : IDisposable
         candidateTables.Remove(statement.TableName);
         candidateTable.Rename(statement.NewName);
         candidateTables.Add(statement.NewName, candidateTable);
+
+        // Dependent views and triggers must follow the rename the way SQLite rewrites them
+        // (sqlite3_rename_trigger): the stored SQL gets its table references rewritten in place
+        // and the definitions are reparsed so the parsed bodies match the new name.
+        Dictionary<string, ViewDefinition>? candidateViews = null;
+        Dictionary<string, TriggerDefinition>? candidateTriggers = null;
+        foreach (var view in catalog.Views.Values)
+        {
+            context.CheckInterrupt();
+            var rewritten = AlterTableSqlRewriter.RenameTableReferences(
+                view.Sql, statement.TableName, statement.NewName);
+            if (rewritten is null || string.Equals(rewritten, view.Sql, StringComparison.Ordinal))
+                continue;
+
+            candidateViews ??= new Dictionary<string, ViewDefinition>(
+                catalog.Views,
+                StringComparer.OrdinalIgnoreCase);
+            var parsed = (CreateViewStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
+            candidateViews[view.Name] = view with { Query = parsed.Query, Sql = parsed.Sql };
+        }
+
+        foreach (var trigger in catalog.Triggers.Values)
+        {
+            context.CheckInterrupt();
+            var rewritten = AlterTableSqlRewriter.RenameTableReferences(
+                trigger.Sql, statement.TableName, statement.NewName);
+            if (rewritten is null || string.Equals(rewritten, trigger.Sql, StringComparison.Ordinal))
+                continue;
+
+            candidateTriggers ??= new Dictionary<string, TriggerDefinition>(
+                catalog.Triggers,
+                StringComparer.OrdinalIgnoreCase);
+            var parsed = (CreateTriggerStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
+            // The catalog stores the watched table as its bare local name even when the stored
+            // ON clause keeps a verbatim main.<table> qualifier.
+            var parsedTableName = ManagedSchemaName.TrySplit(parsed.TableName, out var parsedSchema, out var parsedLocalName)
+                && parsedSchema.Equals("main", StringComparison.OrdinalIgnoreCase)
+                ? parsedLocalName
+                : parsed.TableName;
+            candidateTriggers[trigger.Name] = trigger with
+            {
+                TableName = parsedTableName,
+                UpdateOfColumns = parsed.UpdateOfColumns,
+                When = parsed.When,
+                Body = parsed.Body,
+                Sql = parsed.Sql,
+            };
+        }
+
+        var candidateCatalog = candidateViews is null && candidateTriggers is null
+            ? catalog
+            : new SchemaCatalog(
+                candidateTables,
+                candidateViews ?? catalog.Views,
+                candidateTriggers ?? catalog.Triggers);
         ValidateDependentSchema(
-            catalog,
+            candidateCatalog,
             context with
             {
                 Tables = candidateTables,
+                Views = candidateCatalog.Views,
+                Triggers = candidateCatalog.Triggers,
                 SchemaValidation = true,
             },
             context.CancellationToken,
             "rename table",
             catalog,
-            context with { SchemaValidation = true });
+            context with
+            {
+                Views = catalog.Views,
+                Triggers = catalog.Triggers,
+                SchemaValidation = true,
+            });
 
         if (!tables.Remove(statement.TableName))
             throw new InvalidOperationException($"Table '{statement.TableName}' disappeared during rename.");
@@ -4143,6 +4205,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
         RewriteRenamedTableSql(tables, table, previousName, statement.NewName);
         if (table.IsAutoIncrement)
             RenameSqliteSequenceRows(tables, previousName, statement.NewName);
+        if (candidateViews is not null)
+        {
+            foreach (var entry in candidateViews)
+                catalog.Views[entry.Key] = entry.Value;
+        }
+
+        if (candidateTriggers is not null)
+        {
+            foreach (var entry in candidateTriggers)
+                catalog.Triggers[entry.Key] = entry.Value;
+        }
+
         return new ExecutionResult([], [], 0, true);
     }
 
@@ -24378,8 +24452,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     break;
                 case ValuesClause values:
                     foreach (var valueRow in values.Rows)
-                    foreach (var value in valueRow)
-                        pending.Push(value);
+                        foreach (var value in valueRow)
+                            pending.Push(value);
                     break;
                 case NamedTableSource:
                     break; // reads stable table data

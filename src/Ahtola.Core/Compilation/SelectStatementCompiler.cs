@@ -695,10 +695,13 @@ internal sealed class SelectStatementCompiler
             return true;
         }
 
-        if (where is not BinaryExpression { Operator: BinaryOperator.GreaterThan
+        if (where is not BinaryExpression
+            {
+                Operator: BinaryOperator.GreaterThan
                                                     or BinaryOperator.GreaterThanOrEqual
                                                     or BinaryOperator.LessThan
-                                                    or BinaryOperator.LessThanOrEqual } binary)
+                                                    or BinaryOperator.LessThanOrEqual
+            } binary)
             return false;
 
         var directOp = binary.Operator switch

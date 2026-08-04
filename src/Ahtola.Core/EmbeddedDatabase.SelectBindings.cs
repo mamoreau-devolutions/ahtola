@@ -313,90 +313,90 @@ public sealed partial class EmbeddedDatabase
             case ColumnExpression column:
                 return rewrite(column) ?? column;
             case CollationExpression collation:
-            {
-                var inner = RewriteColumnReferences(collation.Expression, rewrite);
-                return ReferenceEquals(inner, collation.Expression) ? collation : collation with { Expression = inner };
-            }
+                {
+                    var inner = RewriteColumnReferences(collation.Expression, rewrite);
+                    return ReferenceEquals(inner, collation.Expression) ? collation : collation with { Expression = inner };
+                }
             case CastExpression cast:
-            {
-                var inner = RewriteColumnReferences(cast.Expression, rewrite);
-                return ReferenceEquals(inner, cast.Expression) ? cast : cast with { Expression = inner };
-            }
+                {
+                    var inner = RewriteColumnReferences(cast.Expression, rewrite);
+                    return ReferenceEquals(inner, cast.Expression) ? cast : cast with { Expression = inner };
+                }
             case CaseExpression @case:
-            {
-                var operand = @case.Operand is null ? null : RewriteColumnReferences(@case.Operand, rewrite);
-                var clauses = RewriteCaseClauses(@case.Clauses, rewrite);
-                var @else = @case.Else is null ? null : RewriteColumnReferences(@case.Else, rewrite);
-                return ReferenceEquals(operand, @case.Operand)
-                    && ReferenceEquals(clauses, @case.Clauses)
-                    && ReferenceEquals(@else, @case.Else)
-                    ? @case
-                    : @case with { Operand = operand, Clauses = clauses, Else = @else };
-            }
+                {
+                    var operand = @case.Operand is null ? null : RewriteColumnReferences(@case.Operand, rewrite);
+                    var clauses = RewriteCaseClauses(@case.Clauses, rewrite);
+                    var @else = @case.Else is null ? null : RewriteColumnReferences(@case.Else, rewrite);
+                    return ReferenceEquals(operand, @case.Operand)
+                        && ReferenceEquals(clauses, @case.Clauses)
+                        && ReferenceEquals(@else, @case.Else)
+                        ? @case
+                        : @case with { Operand = operand, Clauses = clauses, Else = @else };
+                }
             case LikeExpression like:
-            {
-                var value = RewriteColumnReferences(like.Value, rewrite);
-                var pattern = RewriteColumnReferences(like.Pattern, rewrite);
-                var escape = like.Escape is null ? null : RewriteColumnReferences(like.Escape, rewrite);
-                return ReferenceEquals(value, like.Value)
-                    && ReferenceEquals(pattern, like.Pattern)
-                    && ReferenceEquals(escape, like.Escape)
-                    ? like
-                    : like with { Value = value, Pattern = pattern, Escape = escape };
-            }
+                {
+                    var value = RewriteColumnReferences(like.Value, rewrite);
+                    var pattern = RewriteColumnReferences(like.Pattern, rewrite);
+                    var escape = like.Escape is null ? null : RewriteColumnReferences(like.Escape, rewrite);
+                    return ReferenceEquals(value, like.Value)
+                        && ReferenceEquals(pattern, like.Pattern)
+                        && ReferenceEquals(escape, like.Escape)
+                        ? like
+                        : like with { Value = value, Pattern = pattern, Escape = escape };
+                }
             case GlobExpression glob:
-            {
-                var value = RewriteColumnReferences(glob.Value, rewrite);
-                var pattern = RewriteColumnReferences(glob.Pattern, rewrite);
-                return ReferenceEquals(value, glob.Value) && ReferenceEquals(pattern, glob.Pattern)
-                    ? glob
-                    : glob with { Value = value, Pattern = pattern };
-            }
+                {
+                    var value = RewriteColumnReferences(glob.Value, rewrite);
+                    var pattern = RewriteColumnReferences(glob.Pattern, rewrite);
+                    return ReferenceEquals(value, glob.Value) && ReferenceEquals(pattern, glob.Pattern)
+                        ? glob
+                        : glob with { Value = value, Pattern = pattern };
+                }
             case InExpression @in:
-            {
-                var value = RewriteColumnReferences(@in.Value, rewrite);
-                var values = RewriteExpressionList(@in.Values, rewrite);
-                return ReferenceEquals(value, @in.Value) && ReferenceEquals(values, @in.Values)
-                    ? @in
-                    : @in with { Value = value, Values = values };
-            }
+                {
+                    var value = RewriteColumnReferences(@in.Value, rewrite);
+                    var values = RewriteExpressionList(@in.Values, rewrite);
+                    return ReferenceEquals(value, @in.Value) && ReferenceEquals(values, @in.Values)
+                        ? @in
+                        : @in with { Value = value, Values = values };
+                }
             case InSubqueryExpression inSubquery:
-            {
-                // Only the left-hand value binds here; the subquery has its own scope.
-                var value = RewriteColumnReferences(inSubquery.Value, rewrite);
-                return ReferenceEquals(value, inSubquery.Value) ? inSubquery : inSubquery with { Value = value };
-            }
+                {
+                    // Only the left-hand value binds here; the subquery has its own scope.
+                    var value = RewriteColumnReferences(inSubquery.Value, rewrite);
+                    return ReferenceEquals(value, inSubquery.Value) ? inSubquery : inSubquery with { Value = value };
+                }
             case BetweenExpression between:
-            {
-                var value = RewriteColumnReferences(between.Value, rewrite);
-                var lower = RewriteColumnReferences(between.Lower, rewrite);
-                var upper = RewriteColumnReferences(between.Upper, rewrite);
-                return ReferenceEquals(value, between.Value)
-                    && ReferenceEquals(lower, between.Lower)
-                    && ReferenceEquals(upper, between.Upper)
-                    ? between
-                    : between with { Value = value, Lower = lower, Upper = upper };
-            }
+                {
+                    var value = RewriteColumnReferences(between.Value, rewrite);
+                    var lower = RewriteColumnReferences(between.Lower, rewrite);
+                    var upper = RewriteColumnReferences(between.Upper, rewrite);
+                    return ReferenceEquals(value, between.Value)
+                        && ReferenceEquals(lower, between.Lower)
+                        && ReferenceEquals(upper, between.Upper)
+                        ? between
+                        : between with { Value = value, Lower = lower, Upper = upper };
+                }
             case UnaryExpression unary:
-            {
-                var operand = RewriteColumnReferences(unary.Operand, rewrite);
-                return ReferenceEquals(operand, unary.Operand) ? unary : unary with { Operand = operand };
-            }
+                {
+                    var operand = RewriteColumnReferences(unary.Operand, rewrite);
+                    return ReferenceEquals(operand, unary.Operand) ? unary : unary with { Operand = operand };
+                }
             case BinaryExpression binary:
-            {
-                var left = RewriteColumnReferences(binary.Left, rewrite);
-                var right = RewriteColumnReferences(binary.Right, rewrite);
-                return ReferenceEquals(left, binary.Left) && ReferenceEquals(right, binary.Right)
-                    ? binary
-                    : binary with { Left = left, Right = right };
-            }
+                {
+                    var left = RewriteColumnReferences(binary.Left, rewrite);
+                    var right = RewriteColumnReferences(binary.Right, rewrite);
+                    return ReferenceEquals(left, binary.Left) && ReferenceEquals(right, binary.Right)
+                        ? binary
+                        : binary with { Left = left, Right = right };
+                }
             case FunctionExpression function:
                 return RewriteFunctionArguments(function, rewrite);
             case RowValueExpression rowValue:
-            {
-                var values = RewriteExpressionList(rowValue.Values, rewrite);
-                return ReferenceEquals(values, rowValue.Values) ? rowValue : rowValue with { Values = values };
-            }
+                {
+                    var values = RewriteExpressionList(rowValue.Values, rewrite);
+                    return ReferenceEquals(values, rowValue.Values) ? rowValue : rowValue with { Values = values };
+                }
             default:
                 // Literals, parameters, stars, raise, current-time, scalar subqueries and
                 // EXISTS all either contain no column reference or open a new binding scope.

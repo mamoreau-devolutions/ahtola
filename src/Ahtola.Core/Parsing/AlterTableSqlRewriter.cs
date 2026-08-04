@@ -189,6 +189,349 @@ internal static class AlterTableSqlRewriter
         return sql;
     }
 
+    /// <summary>
+    /// Rewrites every reference to <paramref name="oldName"/> in the stored text of a CREATE
+    /// TRIGGER or CREATE VIEW statement so it follows an ALTER TABLE RENAME, mirroring SQLite's
+    /// sqlite3_rename_trigger rewriting of dependent schema objects: the trigger's ON-clause
+    /// table, DML target tables, FROM/JOIN table sources, and qualified column references
+    /// (<c>t.col</c>, <c>t.*</c>). Returns the statement text unchanged when nothing matches,
+    /// and <see langword="null"/> when the stored text cannot be reparsed or a matching
+    /// reference lacks a recorded token span.
+    /// </summary>
+    public static string? RenameTableReferences(string sql, string oldName, string newName)
+    {
+        ParsedStatement parsed;
+        SqlSourceSpans spans;
+        try
+        {
+            parsed = SqlParser.ParseWithSpans(sql, out spans);
+        }
+        catch (EmbeddedSqlException)
+        {
+            return null;
+        }
+
+        var collector = new TableReferenceCollector(spans, oldName);
+        switch (parsed)
+        {
+            case CreateTriggerStatement trigger:
+                if (collector.IsRenameTarget(trigger.TableName))
+                    collector.Add(spans.GetQualifier(trigger));
+                collector.CollectExpression(trigger.When);
+                foreach (var statement in trigger.Body)
+                    collector.CollectStatement(statement);
+                break;
+            case CreateViewStatement view:
+                collector.CollectQuery(view.Query);
+                break;
+            default:
+                return sql;
+        }
+
+        if (collector.Aborted)
+            return null;
+        if (collector.Spans.Count == 0)
+            return sql;
+
+        var replacement = SqlIdentifierFormatter.QuoteIfNeeded(newName);
+        foreach (var span in collector.Spans.OrderByDescending(span => span.Start))
+            sql = ReplaceSpan(sql, span, replacement);
+
+        return sql;
+    }
+
+    /// <summary>
+    /// Collects the token spans of every table reference to the renamed table inside a stored
+    /// trigger or view definition. A matching reference without a recorded span aborts the whole
+    /// rewrite (the caller then leaves the dependent object untouched rather than corrupting it).
+    /// </summary>
+    private sealed class TableReferenceCollector(SqlSourceSpans spans, string oldName)
+    {
+        private readonly HashSet<int> _seenStarts = [];
+
+        public List<SqlSourceSpan> Spans { get; } = [];
+
+        public bool Aborted { get; private set; }
+
+        public bool IsRenameTarget(string writtenName)
+        {
+            if (ManagedSchemaName.TrySplit(writtenName, out var schema, out var name))
+            {
+                return string.Equals(schema, "main", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(name, oldName, StringComparison.OrdinalIgnoreCase);
+            }
+
+            return string.Equals(writtenName, oldName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        public void Add(SqlSourceSpan? span)
+        {
+            if (span is not { } found)
+            {
+                Aborted = true;
+                return;
+            }
+
+            if (_seenStarts.Add(found.Start))
+                Spans.Add(found);
+        }
+
+        public void CollectStatement(ParsedStatement statement)
+        {
+            if (Aborted)
+                return;
+
+            switch (statement)
+            {
+                case InsertStatement insert:
+                    if (IsRenameTarget(insert.TableName))
+                        Add(spans.GetName(insert));
+                    foreach (var row in insert.Rows)
+                    {
+                        foreach (var value in row)
+                            CollectExpression(value);
+                    }
+                    if (insert.Source is not null)
+                        CollectQuery(insert.Source);
+                    CollectProjections(insert.Returning);
+                    CollectUpsert(insert.Upsert);
+                    break;
+                case UpdateStatement update:
+                    if (IsRenameTarget(update.TableName))
+                        Add(spans.GetName(update));
+                    foreach (var assignment in update.Assignments)
+                        CollectExpression(assignment.Value);
+                    if (update.From is not null)
+                        CollectTableSource(update.From);
+                    CollectExpression(update.Where);
+                    CollectProjections(update.Returning);
+                    CollectOrderBy(update.EffectiveOrderBy);
+                    CollectExpression(update.Limit);
+                    CollectExpression(update.Offset);
+                    break;
+                case DeleteStatement delete:
+                    if (IsRenameTarget(delete.TableName))
+                        Add(spans.GetName(delete));
+                    CollectExpression(delete.Where);
+                    CollectProjections(delete.Returning);
+                    CollectOrderBy(delete.EffectiveOrderBy);
+                    CollectExpression(delete.Limit);
+                    CollectExpression(delete.Offset);
+                    break;
+                case WithDmlStatement with:
+                    CollectCommonTableExpressions(with.CommonTableExpressions);
+                    CollectStatement(with.Dml);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        public void CollectQuery(QueryStatement query)
+        {
+            if (Aborted)
+                return;
+
+            switch (query)
+            {
+                case SelectStatement select:
+                    CollectProjections(select.Projections);
+                    if (select.Source is not null)
+                        CollectTableSource(select.Source);
+                    CollectExpression(select.Where);
+                    foreach (var term in select.GroupBy)
+                        CollectExpression(term);
+                    CollectExpression(select.Having);
+                    foreach (var window in select.NamedWindows)
+                        CollectWindow(window.Specification);
+                    CollectOrderBy(select.OrderBy);
+                    CollectExpression(select.Limit);
+                    CollectExpression(select.Offset);
+                    break;
+                case CompoundSelectStatement compound:
+                    foreach (var term in compound.Terms)
+                        CollectQuery(term);
+                    CollectOrderBy(compound.OrderBy);
+                    CollectExpression(compound.Limit);
+                    CollectExpression(compound.Offset);
+                    break;
+                case WithSelectStatement with:
+                    CollectCommonTableExpressions(with.CommonTableExpressions);
+                    CollectQuery(with.Query);
+                    break;
+                case ValuesClause values:
+                    foreach (var row in values.Rows)
+                    {
+                        foreach (var value in row)
+                            CollectExpression(value);
+                    }
+                    break;
+            }
+        }
+
+        private void CollectTableSource(TableSource source)
+        {
+            if (Aborted)
+                return;
+
+            switch (source)
+            {
+                case NamedTableSource named:
+                    if (IsRenameTarget(named.Name))
+                        Add(spans.GetName(named));
+                    break;
+                case JoinTableSource join:
+                    CollectTableSource(join.Left);
+                    CollectTableSource(join.Right);
+                    CollectExpression(join.Condition);
+                    break;
+                case DerivedTableSource derived:
+                    CollectQuery(derived.Query);
+                    break;
+                case TableValuedFunctionSource function:
+                    foreach (var argument in function.Arguments)
+                        CollectExpression(argument);
+                    break;
+            }
+        }
+
+        public void CollectExpression(Expression? expression)
+        {
+            if (expression is null || Aborted)
+                return;
+
+            switch (expression)
+            {
+                case ColumnExpression column:
+                    if (column.Qualifier is not null
+                        && string.Equals(column.Qualifier, oldName, StringComparison.OrdinalIgnoreCase))
+                        Add(spans.GetQualifier(column));
+                    break;
+                case QualifiedStarExpression star:
+                    if (string.Equals(star.Qualifier, oldName, StringComparison.OrdinalIgnoreCase))
+                        Add(spans.GetQualifier(star));
+                    break;
+                case BinaryExpression binary:
+                    CollectExpression(binary.Left);
+                    CollectExpression(binary.Right);
+                    break;
+                case UnaryExpression unary:
+                    CollectExpression(unary.Operand);
+                    break;
+                case FunctionExpression function:
+                    foreach (var argument in function.Arguments)
+                        CollectExpression(argument);
+                    CollectExpression(function.Filter);
+                    if (function.Window is not null)
+                        CollectWindow(function.Window);
+                    CollectOrderBy(function.AggregateOrderBy);
+                    break;
+                case CaseExpression caseExpression:
+                    CollectExpression(caseExpression.Operand);
+                    foreach (var clause in caseExpression.Clauses)
+                    {
+                        CollectExpression(clause.When);
+                        CollectExpression(clause.Then);
+                    }
+                    CollectExpression(caseExpression.Else);
+                    break;
+                case CastExpression cast:
+                    CollectExpression(cast.Expression);
+                    break;
+                case CollationExpression collation:
+                    CollectExpression(collation.Expression);
+                    break;
+                case LikeExpression like:
+                    CollectExpression(like.Value);
+                    CollectExpression(like.Pattern);
+                    CollectExpression(like.Escape);
+                    break;
+                case GlobExpression glob:
+                    CollectExpression(glob.Value);
+                    CollectExpression(glob.Pattern);
+                    break;
+                case BetweenExpression between:
+                    CollectExpression(between.Value);
+                    CollectExpression(between.Lower);
+                    CollectExpression(between.Upper);
+                    break;
+                case InExpression inList:
+                    CollectExpression(inList.Value);
+                    foreach (var value in inList.Values)
+                        CollectExpression(value);
+                    break;
+                case InSubqueryExpression inSubquery:
+                    CollectExpression(inSubquery.Value);
+                    CollectQuery(inSubquery.Query);
+                    break;
+                case ExistsExpression exists:
+                    CollectQuery(exists.Query);
+                    break;
+                case ScalarSubqueryExpression subquery:
+                    CollectQuery(subquery.Query);
+                    break;
+                case RowValueExpression rowValue:
+                    foreach (var value in rowValue.Values)
+                        CollectExpression(value);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        private void CollectWindow(WindowSpecification window)
+        {
+            foreach (var term in window.PartitionBy)
+                CollectExpression(term);
+            CollectOrderBy(window.OrderBy);
+            if (window.Frame is not { } frame)
+                return;
+
+            CollectExpression(frame.Start.Offset);
+            CollectExpression(frame.End.Offset);
+        }
+
+        private void CollectUpsert(UpsertClause? upsert)
+        {
+            if (upsert is null)
+                return;
+
+            foreach (var target in upsert.Target)
+                CollectExpression(target.Expression);
+            CollectExpression(upsert.TargetWhere);
+            if (upsert.Action is DoUpdateUpsertAction doUpdate)
+            {
+                foreach (var assignment in doUpdate.Assignments)
+                    CollectExpression(assignment.Value);
+                CollectExpression(doUpdate.Where);
+            }
+        }
+
+        private void CollectCommonTableExpressions(IReadOnlyList<CommonTableExpression> expressions)
+        {
+            foreach (var expression in expressions)
+                CollectQuery(expression.Query);
+        }
+
+        private void CollectProjections(IReadOnlyList<Projection>? projections)
+        {
+            if (projections is null)
+                return;
+
+            foreach (var projection in projections)
+                CollectExpression(projection.Expression);
+        }
+
+        private void CollectOrderBy(IReadOnlyList<OrderByTerm>? terms)
+        {
+            if (terms is null)
+                return;
+
+            foreach (var term in terms)
+                CollectExpression(term.Expression);
+        }
+    }
+
     private static string ReplaceSpan(string sql, SqlSourceSpan span, string replacement)
         => string.Concat(sql.AsSpan(0, span.Start), replacement, sql.AsSpan(span.End));
 

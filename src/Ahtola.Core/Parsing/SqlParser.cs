@@ -1140,7 +1140,7 @@ internal sealed class SqlParser
 
         var (triggerEvent, updateOfColumns) = ParseTriggerEvent();
         ExpectKeyword("ON");
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var triggerTableToken);
 
         _inTriggerBody = true;
         try
@@ -1182,6 +1182,7 @@ internal sealed class SqlParser
                 temporary);
             if (_spans is not null && _pendingUpdateOfTokens is not null)
                 _spans.RecordList(trigger, _pendingUpdateOfTokens);
+            _spans?.RecordQualifier(trigger, triggerTableToken);
 
             return trigger;
         }
@@ -1280,7 +1281,7 @@ internal sealed class SqlParser
     {
         var conflictAlgorithm = impliedConflictAlgorithm ?? ParseInsertConflictAlgorithm();
         ExpectKeyword("INTO");
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var insertTableToken);
         RejectQualifiedTriggerDmlTarget(tableName);
         string[]? columns = null;
         IReadOnlyList<SqlToken>? columnTokens = null;
@@ -1335,6 +1336,7 @@ internal sealed class SqlParser
             ParseReturning(),
             upsert,
             conflictAlgorithm);
+        _spans?.RecordName(insert, insertTableToken);
         if (_spans is not null && columnTokens is not null)
             _spans.RecordList(insert, columnTokens);
 
@@ -1416,7 +1418,7 @@ internal sealed class SqlParser
     private ParsedStatement ParseUpdate()
     {
         var conflictAlgorithm = ParseInsertConflictAlgorithm();
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var updateTableToken);
         RejectQualifiedTriggerDmlTarget(tableName);
         var alias = ParseDmlTargetAlias();
         var indexDirective = ParseTableIndexDirective();
@@ -1438,7 +1440,7 @@ internal sealed class SqlParser
         if (from is not null && limit is not null)
             throw Error("LIMIT is not supported on UPDATE ... FROM.");
 
-        return new UpdateStatement(
+        var update = new UpdateStatement(
             tableName,
             assignments,
             where,
@@ -1450,6 +1452,8 @@ internal sealed class SqlParser
             from,
             conflictAlgorithm,
             indexDirective);
+        _spans?.RecordName(update, updateTableToken);
+        return update;
     }
 
     private IReadOnlyList<ColumnAssignment> ParseAssignments()
@@ -1492,7 +1496,7 @@ internal sealed class SqlParser
     private ParsedStatement ParseDelete()
     {
         ExpectKeyword("FROM");
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var deleteTableToken);
         RejectQualifiedTriggerDmlTarget(tableName);
         var alias = ParseDmlTargetAlias();
         var indexDirective = ParseTableIndexDirective();
@@ -1502,7 +1506,9 @@ internal sealed class SqlParser
 
         var returning = ParseReturning();
         var (orderBy, limit, offset) = ParseLimitedDmlTail("DELETE");
-        return new DeleteStatement(tableName, where, returning, orderBy, limit, offset, alias, indexDirective);
+        var delete = new DeleteStatement(tableName, where, returning, orderBy, limit, offset, alias, indexDirective);
+        _spans?.RecordName(delete, deleteTableToken);
+        return delete;
     }
 
     // SQLite's qualified-table-name allows an alias on UPDATE and DELETE targets. Only the
@@ -1945,12 +1951,15 @@ internal sealed class SqlParser
         if (_lexer.Current.Kind == TokenKind.Identifier)
         {
             var snapshot = _lexer.Snapshot();
-            var qualifier = _lexer.Current.Text;
+            var qualifierToken = _lexer.Current;
+            var qualifier = qualifierToken.Text;
             _lexer.Next();
             if (Consume(TokenKind.Dot) && _lexer.Current.Kind == TokenKind.Asterisk)
             {
                 _lexer.Next();
-                return new Projection(new QualifiedStarExpression(qualifier), null);
+                var qualifiedStar = new QualifiedStarExpression(qualifier);
+                _spans?.RecordQualifier(qualifiedStar, qualifierToken);
+                return new Projection(qualifiedStar, null);
             }
 
             _lexer.Restore(snapshot);
@@ -2355,11 +2364,13 @@ internal sealed class SqlParser
             return inner;
         }
 
-        var name = ParseSchemaQualifiedName();
+        var name = ParseSchemaQualifiedName(out var tableSourceToken);
         if (_lexer.Current.Kind != TokenKind.LeftParen)
         {
             var alias = ParseTableAlias();
-            return new NamedTableSource(name, alias, ParseTableIndexDirective());
+            var namedSource = new NamedTableSource(name, alias, ParseTableIndexDirective());
+            _spans?.RecordName(namedSource, tableSourceToken);
+            return namedSource;
         }
 
         var qualified = ManagedSchemaName.TrySplit(name, out var schema, out var functionName);

@@ -23,14 +23,6 @@ alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db | expect
 alter_table.sqltest::alter-table-add-column-trailing-named-constraint | expected success but got error: Expected a constraint after CONSTRAINT c. At SQL offset 39.
 alter_table.sqltest::alter-add-column-invalid-collation | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel | expected success but got error: non-deterministic functions are prohibited in index expressions
-alter_table.sqltest::alter-table-rename-trigger-fires-after-rename | expected success but got error: error in trigger trig1 after rename table: no such table: t1
-alter_table.sqltest::alter-table-rename-trigger-body-update | expected success but got error: error in trigger trig1 after rename table: no such table: t1
-alter_table.sqltest::alter-table-rename-trigger-body-delete | expected success but got error: error in trigger trig1 after rename table: no such table: t2
-alter_table.sqltest::alter-table-rename-trigger-body-insert-other-table | expected success but got error: error in trigger trig1 after rename table: no such table: log
-alter_table.sqltest::alter-table-rename-trigger-schema-tbl-name | expected success but got error: error in trigger trig1 after rename table: no such table: t1
-alter_table.sqltest::alter-table-rename-trigger-self-insert-sql-rewritten | expected success but got error: error in trigger tr after rename table: no such table: t1
-alter_table.sqltest::alter-table-rename-trigger-self-insert-blob-text-binding | expected success but got error: error in trigger tr after rename table: no such table: t1
-alter_table.sqltest::alter-table-rename-trigger-self-insert-wide-row | expected success but got error: error in trigger tr after rename table: no such table: wide
 alter_table.sqltest::alter-table-rename-column-temp-trigger-main-cross-table | expected success but got error: no such column: b
 alter_table.sqltest::alter-table-rename-column-temp-trigger-main-alias-cross-table | expected success but got error: no such column: u.b
 alter_table.sqltest::alter-table-rename-temp-table-invalid-temp-trigger-missing-main-table | expected an error but the statement succeeded
@@ -49,7 +41,6 @@ alter_table.sqltest::drop-column-cross-table-trigger-set-target-deferred | expec
 alter_table.sqltest::drop-column-other-table-trigger-insert-col-deferred | expected success but got error: error in trigger tu after drop column: table has no column named zer
 alter_table.sqltest::drop-column-owning-table-trigger-insert-col-deferred | expected success but got error: error in trigger tu after drop column: table has no column named x
 alter_table.sqltest::drop-column-owning-table-trigger-update-set-deferred | expected success but got error: error in trigger tu after drop column: table has no column named x
-alter_table.sqltest::alter-table-rename-then-rename-column-with-trigger | expected success but got error: error in trigger tr after rename table: no such table: orders
 autoincr.sqltest::autoinc-create-sequence-table | expected 3 row(s), got 2 row(s); row 0 expected '__turso_internal_seq___turso_internal_autoincrement_t1' but was 'sqlite_sequence'
 autoincr.sqltest::autoinc-alter-column-clears-sequence-row | expected success but got error: Expected ADD, DROP, or RENAME after ALTER TABLE. At SQL offset 14.
 before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorrelated-subquery | expected 3 row(s), got 3 row(s); row 1 expected '2/600' but was '2/1100'

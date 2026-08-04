@@ -845,7 +845,7 @@
       "layer": "compilation",
       "kind": "missing",
       "turso_ref": "turso-src/core/translate/alter.rs (RenameTable/RenameColumn rewrites trigger body table references), trigger.rs",
-      "ahtola_ref": "none (RenameColumnRewriter.cs handles columns; no equivalent trigger-body table-rename rewrite found)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/AlterTableSqlRewriter.cs (RenameTableReferences), src/Ahtola.Core/EmbeddedDatabase.cs (ExecuteAlterTableRename view/trigger rebind)",
       "severity": "s1-correctness",
       "effort": "M",
       "conformance_links": [
@@ -854,10 +854,13 @@
         "alter_table.sqltest::alter-table-rename-trigger-body-delete",
         "alter_table.sqltest::alter-table-rename-trigger-body-insert-other-table",
         "alter_table.sqltest::alter-table-rename-trigger-schema-tbl-name",
-        "alter_table.sqltest::alter-table-rename-trigger-self-insert-sql-rewritten"
+        "alter_table.sqltest::alter-table-rename-trigger-self-insert-sql-rewritten",
+        "alter_table.sqltest::alter-table-rename-trigger-self-insert-blob-text-binding",
+        "alter_table.sqltest::alter-table-rename-trigger-self-insert-wide-row",
+        "alter_table.sqltest::alter-table-rename-then-rename-column-with-trigger"
       ],
-      "notes": "After `ALTER TABLE t1 RENAME TO t2`, six conformance cases show existing triggers referencing the old table name inside their body (e.g. `INSERT INTO t1 ...` in a trigger on t1 itself) now fail at fire-time with \"no such table: t1\" -- Turso rewrites trigger-body table references on rename (mirroring RenameColumnRewriter.cs's column-level rewriting, src/Ahtola.Core/RenameColumnRewriter.cs) but Ahtola has no equivalent table-name rewrite for trigger bodies.",
-      "status": "open"
+      "notes": "CLOSED 2026-08-05: ALTER TABLE RENAME now rewrites trigger and view bodies. AlterTableSqlRewriter.RenameTableReferences performs span-based renaming of every reference to the old table name (ON-clause qualifier, DML targets, FROM/JOIN sources, qualified column refs, subqueries, CTEs, upsert, window/ORDER BY) over the stored CREATE text; ExecuteAlterTableRename reparses the rewritten text, rebinds TriggerDefinition.TableName (bare name) plus When/Body/UpdateOfColumns and ViewDefinition.Query, validates against a candidate catalog via ValidateDependentSchema, and persists the rewritten Sql so sqlite_schema.sql/tbl_name stay consistent. Expected-failures 401->392 (all 9 mapped keys cleared, 0 added).",
+      "status": "closed"
     },
     {
       "id": "compile-attach-same-file-not-supported",
