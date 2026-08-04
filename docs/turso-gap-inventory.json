@@ -752,8 +752,8 @@
         "window/dense_rank.sqltest::dense-rank-storage-class-ordering",
         "nulls-first-last.sqltest::window-two-different-nulls-orderings"
       ],
-      "notes": "Multiple DENSE_RANK/RANK conformance cases show different peer-grouping outcomes (which rows tie for the same rank) versus SQLite/Turso when collation (NOCASE), cross-type numeric comparison, float precision, or storage-class ordering are involved -- indicating the window ORDER BY comparator used to detect peer groups in WindowProgramBuilder does not fully match SQLite's type/collation-aware comparison semantics used by the rest of the engine.",
-      "status": "open"
+      "notes": "Closed 2026-08-03 via three coordinated window emission/comparison fixes in EmbeddedDatabase.cs. (1) Window emission order: a windowed SELECT without a top-level ORDER BY now emits in the first window's sort-key order (PARTITION BY all ASC ++ ORDER BY verbatim) instead of scan order, matching SQLite's first-window emission rule; partition-only windows emit in partition order through a sorter (BufferedWindowProgramBuilder OpenSorter) rather than scan order. (2) Collation-aware peer comparison: BuildWindowOrderComparer/CompareWindowOrderKeys now apply each ORDER BY term's effective declared collation via GetEffectiveCollation, so peer-group (tie) detection matches SQLite's collation semantics for NOCASE, cross-type numeric, float-precision, and storage-class cases. (3) Empty-OVER() numbering: bare OVER() window functions are numbered in the window emission order (the first sort-key-carrying window), not scan order, even when a statement ORDER BY re-sorts the output (values ride with rows). Cleared 30 conformance keys (dense_rank, first_last_value, memory-collate, ntile, lag/lead, rank, multi-window-ordering empty-over). Full lane 3765/3765 green; WindowSqlRoutingTests updated to partition-order emission per sqlite3 ground truth. dense-rank-column-declared-collation remains expected-failing (also maps to func-agg-arg-collation-typeof-spotcheck).",
+      "status": "closed"
     },
     {
       "id": "compile-save-all-cursors-window-selfjoin-timeout",

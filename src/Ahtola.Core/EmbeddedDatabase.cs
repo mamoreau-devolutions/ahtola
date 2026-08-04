@@ -16067,17 +16067,21 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return false;
         }
 
+        var emissionOrder = resolvedOrderBy.Count > 0
+            ? resolvedOrderBy
+            : FirstWindowEmissionOrder(windowFunctions);
+
         VdbeRowComparer? orderComparer = null;
-        if (resolvedOrderBy.Count > 0)
+        if (emissionOrder is { Count: > 0 })
         {
-            foreach (var term in resolvedOrderBy)
+            foreach (var term in emissionOrder)
             {
                 if (!IsRoutableWindowExpression(term.Expression, target, placeholders))
                     return false;
             }
 
             orderComparer = BuildWindowOrderComparer(
-                resolvedOrderBy, target, windowFunctions, parameters, context, outerRow);
+                emissionOrder, target, windowFunctions, parameters, context, outerRow);
         }
 
         program = BufferedWindowProgramBuilder.Build(
@@ -16166,6 +16170,35 @@ public sealed partial class EmbeddedDatabase : IDisposable
     // compare with the term's direction, NULL placement, and collation — so a routed sort is the
     // evaluator's sort. The sorter is stable, matching the evaluator's StableSortIndices tie-break on
     // scan position.
+    // SQLite emits the rows of a windowed SELECT in the sort order of the first window
+    // function (in declaration order) that carries a sort key, unless the statement itself
+    // supplies an ORDER BY that overrides it. A window's sort key is its PARTITION BY
+    // expressions (ascending) followed by its ORDER BY terms verbatim; a bare OVER() window
+    // has no sort key and is skipped. When no window carries a sort key the output stays in
+    // scan order. Returns null when no window carries a sort key.
+    private static IReadOnlyList<OrderByTerm>? FirstWindowEmissionOrder(
+        IReadOnlyList<FunctionExpression> windowFunctions)
+    {
+        foreach (var function in windowFunctions)
+        {
+            if (function.Window is not { } window)
+                continue;
+            if (window.PartitionBy.Count == 0 && window.OrderBy.Count == 0)
+                continue;
+
+            if (window.PartitionBy.Count == 0)
+                return window.OrderBy;
+
+            var emission = new List<OrderByTerm>(window.PartitionBy.Count + window.OrderBy.Count);
+            foreach (var partitionExpression in window.PartitionBy)
+                emission.Add(new OrderByTerm(partitionExpression, Descending: false));
+            emission.AddRange(window.OrderBy);
+            return emission;
+        }
+
+        return null;
+    }
+
     private VdbeRowComparer BuildWindowOrderComparer(
         IReadOnlyList<OrderByTerm> resolvedOrderBy,
         ScanTarget target,
@@ -16196,7 +16229,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         rightRow,
                         context),
                     term,
-                    GetCollation(term.Expression));
+                    GetEffectiveCollation(term.Expression, context));
                 if (comparison != 0)
                     return comparison;
             }
@@ -30102,6 +30135,23 @@ public sealed partial class EmbeddedDatabase : IDisposable
             indices = StableSortIndices(indices, (left, right) =>
                 CompareOrderKeys(orderKeys[left], orderKeys[right], orderBy, orderCollations));
         }
+        else if (FirstWindowEmissionOrder(windowFunctions) is { } windowOrder)
+        {
+            // Without a statement ORDER BY, SQLite emits window rows in the ORDER BY
+            // order of the first window function that declares one (ties stable).
+            var orderCollations = windowOrder
+                .Select(term => GetEffectiveCollation(term.Expression, context))
+                .ToArray();
+            var orderKeys = new SqlValue[rowCount][];
+            for (var index = 0; index < rowCount; index++)
+            {
+                orderKeys[index] = windowOrder
+                    .Select(term => Evaluate(term.Expression, parameters, selectedRows[index], context))
+                    .ToArray();
+            }
+            indices = StableSortIndices(indices, (left, right) =>
+                CompareWindowOrderKeys(orderKeys[left], orderKeys[right], windowOrder, orderCollations));
+        }
 
         var resultRows = new List<SqlValue[]>(rowCount);
         foreach (var index in indices)
@@ -30168,7 +30218,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             rows.Count,
             (index, expression) => Evaluate(expression, parameters, rows[index], context),
             parameters,
-            context);
+            context,
+            FirstWindowEmissionOrder(windowFunctions));
     }
 
     // The window pass reads every one of its inputs - arguments, FILTER, PARTITION BY and window
@@ -30180,7 +30231,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         int rowCount,
         WindowInputEvaluator evaluate,
         SqlValue[] parameters,
-        QueryContext context)
+        QueryContext context,
+        IReadOnlyList<OrderByTerm>? emissionOrder = null)
     {
         var values = new SqlValue[rowCount][];
         for (var index = 0; index < rowCount; index++)
@@ -30207,7 +30259,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         foreach (var group in groups)
         {
             var functions = group.Select(ordinal => windowFunctions[ordinal]).ToArray();
-            var computed = ComputeWindowFunctions(functions, rowCount, evaluate, inputs, parameters, context);
+            var computed = ComputeWindowFunctions(
+                functions, rowCount, evaluate, inputs, parameters, context, emissionOrder);
             for (var position = 0; position < functions.Length; position++)
             {
                 var series = computed[functions[position]];
@@ -30351,7 +30404,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         WindowInputEvaluator evaluate,
         IReadOnlyDictionary<FunctionExpression, WindowFunctionInput[]> inputs,
         SqlValue[] parameters,
-        QueryContext context)
+        QueryContext context,
+        IReadOnlyList<OrderByTerm>? emissionOrder)
     {
         var spec = functions[0].Window!;
         var results = new Dictionary<FunctionExpression, SqlValue[]>();
@@ -30360,6 +30414,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         var partitionCollations = spec.PartitionBy
             .Select(expression => GetEffectiveCollation(expression, context))
+            .ToArray();
+        var orderCollations = spec.OrderBy
+            .Select(term => GetEffectiveCollation(term.Expression, context))
             .ToArray();
         VdbeGroupComparer partitionEquality = (left, right) =>
             GroupKeysEqual(left, right, partitionCollations);
@@ -30423,14 +30480,42 @@ public sealed partial class EmbeddedDatabase : IDisposable
             {
                 entries.Sort((left, right) =>
                 {
-                    var comparison = CompareWindowOrderKeys(left.OrderKeys, right.OrderKeys, spec.OrderBy);
+                    var comparison = CompareWindowOrderKeys(left.OrderKeys, right.OrderKeys, spec.OrderBy, orderCollations);
                     return comparison != 0
                         ? comparison
                         : left.StableOrdinal.CompareTo(right.StableOrdinal);
                 });
             }
+            else if (spec.PartitionBy.Count == 0 && emissionOrder is { Count: > 0 })
+            {
+                // A bare OVER() window has no ordering of its own, so SQLite numbers its rows in the
+                // statement's window emission order (the first window that carries a sort key) rather
+                // than in scan order. Reorder the entries that way so row_number/rank/ntile follow the
+                // order the rows are actually emitted in.
+                var emissionCollations = emissionOrder
+                    .Select(term => GetEffectiveCollation(term.Expression, context))
+                    .ToArray();
+                var decorated = new List<(SqlValue[] Keys, WindowOrderEntry Entry)>(entries.Count);
+                for (var position = 0; position < entries.Count; position++)
+                {
+                    var keys = emissionOrder
+                        .Select(term => evaluate(entries[position].SourceIndex, term.Expression))
+                        .ToArray();
+                    decorated.Add((keys, entries[position]));
+                }
 
-            var peers = BuildWindowPeerInfo(entries, spec.OrderBy);
+                decorated.Sort((left, right) =>
+                {
+                    var comparison = CompareWindowOrderKeys(left.Keys, right.Keys, emissionOrder, emissionCollations);
+                    return comparison != 0
+                        ? comparison
+                        : left.Entry.StableOrdinal.CompareTo(right.Entry.StableOrdinal);
+                });
+                for (var position = 0; position < entries.Count; position++)
+                    entries[position] = decorated[position].Entry;
+            }
+
+            var peers = BuildWindowPeerInfo(entries, spec.OrderBy, orderCollations);
             var ntileBuckets = new Dictionary<FunctionExpression, long>();
             foreach (var function in functions.Where(function =>
                          function.Name.Equals("NTILE", StringComparison.OrdinalIgnoreCase)))
@@ -30502,7 +30587,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private int CompareWindowOrderKeys(
         IReadOnlyList<SqlValue> left,
         IReadOnlyList<SqlValue> right,
-        IReadOnlyList<OrderByTerm> orderBy)
+        IReadOnlyList<OrderByTerm> orderBy,
+        IReadOnlyList<string?> collations)
     {
         for (var index = 0; index < orderBy.Count; index++)
         {
@@ -30510,7 +30596,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 left[index],
                 right[index],
                 orderBy[index],
-                GetCollation(orderBy[index].Expression));
+                collations[index]);
             if (comparison != 0)
                 return comparison;
         }
@@ -30520,7 +30606,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     private WindowPeerInfo BuildWindowPeerInfo(
         IReadOnlyList<WindowOrderEntry> entries,
-        IReadOnlyList<OrderByTerm> orderBy)
+        IReadOnlyList<OrderByTerm> orderBy,
+        IReadOnlyList<string?> collations)
     {
         var starts = new int[entries.Count];
         var ends = new int[entries.Count];
@@ -30531,7 +30618,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             var end = start;
             while (end + 1 < entries.Count
-                && CompareWindowOrderKeys(entries[start].OrderKeys, entries[end + 1].OrderKeys, orderBy) == 0)
+                && CompareWindowOrderKeys(entries[start].OrderKeys, entries[end + 1].OrderKeys, orderBy, collations) == 0)
             {
                 end++;
             }

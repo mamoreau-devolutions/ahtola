@@ -362,22 +362,24 @@ public class WindowSqlRoutingTests
     }
 
     [Test]
-    public void PartitionedWindowWithoutTopOrderRoutesInScanOrder()
+    public void PartitionedWindowWithoutTopOrderEmitsInPartitionOrder()
     {
         using var connection = new EmbeddedDatabase().Connect();
         Execute(connection, "CREATE TABLE t(grp INTEGER, v INTEGER);");
         Execute(connection, "INSERT INTO t VALUES (1, 10), (2, 20), (1, 30);");
 
-        // With no top-level ORDER BY the buffered lowering emits in scan order while the window pass
-        // still folds each partition, which is exactly what the evaluator produces.
+        // With no top-level ORDER BY SQLite emits a windowed SELECT in the first window's sort order —
+        // its PARTITION BY keys ascending — so the buffered lowering sorts the projected records by the
+        // partition key (stable, preserving scan order within each partition) rather than emitting raw
+        // scan order.
         var query = $"SELECT grp, sum(v) OVER (PARTITION BY grp {RunningFrame}) AS running FROM t;";
         ReadRows(connection, query).Select(row => (row[0], row[1])).Should().Equal(
             (SqlValue.Integer(1), SqlValue.Integer(10)),
-            (SqlValue.Integer(2), SqlValue.Integer(20)),
-            (SqlValue.Integer(1), SqlValue.Integer(40)));
+            (SqlValue.Integer(1), SqlValue.Integer(40)),
+            (SqlValue.Integer(2), SqlValue.Integer(20)));
 
         Opcodes(ReadRows(connection, "EXPLAIN " + query)).Should()
-            .Contain("WindowBufferCompute").And.NotContain("OpenSorter");
+            .Contain("WindowBufferCompute").And.Contain("OpenSorter");
     }
 
     // ---- Fallback boundaries (evaluator keeps ownership; EXPLAIN cannot describe them) ------
