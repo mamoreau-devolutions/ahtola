@@ -21301,9 +21301,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
         QueryContext context)
     {
         var outputCollations = GetQueryOutputCollations(statement.Terms[0], context);
-        var orderBy = statement.OrderBy.Select(term =>
+        var orderBy = statement.OrderBy.Select((term, termIndex) =>
         {
-            var index = ResolveCompoundOrderByIndex(term, statement.Terms, columns);
+            var index = ResolveCompoundOrderByIndex(term, termIndex + 1, statement.Terms, columns);
             // An explicit ORDER BY collation overrides the result expression's collation.
             // Projection collations only exist on SELECT terms; a leading VALUES term has none.
             var projectionCollation = outputCollations.ElementAtOrDefault(index);
@@ -21354,15 +21354,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         var columns = DescribeQuery(statement.Terms[0], context);
         var outputCollations = GetQueryOutputCollations(statement.Terms[0], context);
-        foreach (var term in statement.OrderBy)
+        for (var termNumber = 1; termNumber <= statement.OrderBy.Count; termNumber++)
         {
-            var index = ResolveCompoundOrderByIndex(term, statement.Terms, columns);
+            var term = statement.OrderBy[termNumber - 1];
+            var index = ResolveCompoundOrderByIndex(term, termNumber, statement.Terms, columns);
             ValidateCollation(GetCollation(term.Expression) ?? outputCollations.ElementAtOrDefault(index));
         }
     }
 
     private static int ResolveCompoundOrderByIndex(
         OrderByTerm orderBy,
+        int termNumber,
         IReadOnlyList<QueryStatement> terms,
         IReadOnlyList<string> columns)
     {
@@ -21372,8 +21374,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
             if (ordinal >= 1 && ordinal <= columns.Count)
                 return (int)ordinal - 1;
 
+            // Turso reports the literal's own value as the prefix for compound range
+            // errors (resolve_compound_order_by_expr in select.rs).
             throw new EmbeddedSqlException(
-                $"ORDER BY position {ordinal} is out of range for {columns.Count} result columns");
+                $"{ordinal} ORDER BY term out of range - should be between 1 and {columns.Count}");
         }
 
         var reference = UnwrapCollation(expression);
@@ -21406,7 +21410,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
             }
         }
 
-        throw new EmbeddedSqlException("ORDER BY term does not match any column in the result set");
+        // Turso prefixes the no-match error with the ordinal form of the term position
+        // (1st/2nd/3rd..., select.rs ordinal()).
+        throw new EmbeddedSqlException(
+            $"{OrdinalSuffix(termNumber - 1)} ORDER BY term does not match any column in the result set");
     }
 
     private SqlValue[][] ApplyDistinctLimit(
@@ -32173,14 +32180,29 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         if (ordinal is { } value)
         {
+            // Resolve the ordinal to the referenced result expression. This is the only
+            // resolution site for routes that never run ResolveSelectBindings (EXPLAIN and
+            // the bytecode compilers call ResolveOrderBy directly), so it must splice the
+            // projection expression itself. ResolveSelectBindings rewrites the same term at
+            // prepare time for the execution paths; both paths converge on the same
+            // projection expression, so resolving twice is idempotent. The ordinal branch
+            // returns before the alias fallback below, so a resolved expression is never
+            // re-matched against result aliases (SELECT x AS y, y AS x FROM t ORDER BY 1
+            // sorts by x, not by the alias sharing a later output column's name).
             if (value is >= 1 and <= int.MaxValue && value <= projections.Count)
                 return projections[(int)value - 1].Expression;
 
+            // A star projection expands to more result columns than projections.Count
+            // reflects; the expanded range is validated where the star is expanded
+            // (ResolveOrderByBindings). Pass the literal through so star queries keep their
+            // pre-rewrite behavior instead of erroring on the unexpanded count.
             if (!projections.Any(projection =>
                     projection.Expression is StarExpression or QualifiedStarExpression))
             {
+                // Turso hard-codes the "1st" prefix for simple-select range errors
+                // regardless of which term carries the ordinal (select.rs:1124).
                 throw new EmbeddedSqlException(
-                    $"ORDER BY position {value} is out of range for {projections.Count} result columns");
+                    $"1st ORDER BY term out of range - should be between 1 and {projections.Count}");
             }
         }
 

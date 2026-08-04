@@ -48,12 +48,76 @@ public sealed partial class EmbeddedDatabase
                 statement.Where,
                 column => ResolveWhereAliasFallback(column, statement.Projections, outputColumns, rawOutputColumns, outerRow));
 
+        var orderBy = ResolveOrderByBindings(statement.OrderBy, resultColumns);
+
         return statement with
         {
             GroupBy = groupBy,
             Having = having,
             Where = where,
+            OrderBy = orderBy,
         };
+    }
+
+    /// <summary>
+    /// ORDER BY ordinal positions resolve to result columns at prepare time the way SQLite
+    /// does (Turso's <c>replace_column_number_with_copy_of_column_expr</c>): the literal is
+    /// replaced by a copy of the referenced result expression, with the range validated
+    /// against the expanded result columns (star projections count once per visible output
+    /// column). COLLATE wrappers around the ordinal are re-applied so an explicit collation
+    /// governs the sort key. The term keeps its <c>Ordinal</c> marker so downstream
+    /// index-order heuristics observe the same shape as before the rewrite.
+    /// </summary>
+    private static IReadOnlyList<OrderByTerm> ResolveOrderByBindings(
+        IReadOnlyList<OrderByTerm> orderBy,
+        IReadOnlyList<SelectBindingColumn> resultColumns)
+    {
+        if (orderBy.Count == 0)
+            return orderBy;
+
+        List<OrderByTerm>? result = null;
+        for (var index = 0; index < orderBy.Count; index++)
+        {
+            var term = orderBy[index];
+            if (term.Ordinal is not { } ordinal)
+                continue;
+
+            // The rewrite must be idempotent: ResolveSelectBindings runs both at the select
+            // entry points and again inside ExecuteSelect, so a term whose expression no
+            // longer carries an ordinal literal at its core was already resolved and must be
+            // left untouched (re-resolving could wrap the projection expression twice).
+            var inner = term.Expression;
+            List<CollationExpression>? collationWrappers = null;
+            while (inner is CollationExpression collationWrapper)
+            {
+                collationWrappers ??= [];
+                collationWrappers.Add(collationWrapper);
+                inner = collationWrapper.Expression;
+            }
+
+            if (!TryGetOrdinalLiteral(inner, out _))
+                continue;
+
+            if (ordinal < 1 || ordinal > resultColumns.Count)
+            {
+                // Turso hard-codes the "1st" prefix for simple-select range errors
+                // regardless of which term carries the ordinal (select.rs:1124).
+                throw new EmbeddedSqlException(
+                    $"1st ORDER BY term out of range - should be between 1 and {resultColumns.Count}");
+            }
+
+            var resolved = resultColumns[(int)ordinal - 1].Expression;
+            if (collationWrappers is not null)
+            {
+                for (var wrapperIndex = collationWrappers.Count - 1; wrapperIndex >= 0; wrapperIndex--)
+                    resolved = collationWrappers[wrapperIndex] with { Expression = resolved };
+            }
+
+            result ??= new List<OrderByTerm>(orderBy);
+            result[index] = term with { Expression = resolved };
+        }
+
+        return result ?? orderBy;
     }
 
     /// <summary>

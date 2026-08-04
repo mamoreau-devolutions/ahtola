@@ -14,11 +14,11 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "entry_count": 179,
+    "entry_count": 180,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 44,
+        "compilation": 45,
         "parser": 23,
         "functions": 24,
         "storage": 20,
@@ -27,25 +27,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 45,
+        "divergent": 46,
         "partial": 26,
         "extension": 7,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 92,
+        "s2-capability": 93,
         "s4-intentional": 32,
         "s1-correctness": 21
       },
       "by_effort": {
         "M": 72,
         "L": 37,
-        "S": 70
+        "S": 71
       },
       "by_status": {
         "open": 150,
-        "closed": 29
+        "closed": 30
       }
     },
     "schema": {
@@ -987,10 +987,9 @@
       "conformance_links": [
         "select/memory.sqltest::select-intersect-union-with-limit",
         "select/memory.sqltest::select-except-union",
-        "compound-select-orderby.sqltest::three-way-union-order-by",
-        "compound-select-orderby.sqltest::union-order-by-expr-no-match"
+        "compound-select-orderby.sqltest::three-way-union-order-by"
       ],
-      "notes": "Compound SELECT arms return rows in wrong order when LIMIT/ORDER BY wraps the compound; Ahtola evaluates arms independently without SQLite merge/ordering contract.",
+      "notes": "Compound SELECT arms return rows in wrong order when LIMIT/ORDER BY wraps the compound; Ahtola evaluates arms independently without SQLite merge/ordering contract. The union-order-by-expr-no-match key was cleared by Wave F2.10 Batch 2 (ORDER BY no-match wording parity, see compile-order-by-ordinal-range-error-parity); the remaining links are row-ordering gaps.",
       "status": "open"
     },
     {
@@ -2651,6 +2650,25 @@
         "join/outer_hash_join.sqltest::full-outer-with-not-exists-subquery"
       ],
       "notes": "Closed 2026-08-06 (Wave F2.10 Batch 1). Ahtola executed every FULL/RIGHT JOIN shape; Turso rejects the unimplementable ones after planning fails: FULL OUTER JOIN chains, FULL OUTER JOIN with correlated subqueries referencing FROM sources, and FULL OUTER JOIN ... USING(...) (USING is unrepresentable for full joins; ON and NATURAL are fine). RIGHT JOIN is swapped to LEFT JOIN before planning, so a RIGHT JOIN following another join errors at parse. Added a planner-independent structure validator that reproduces the four error contracts, keeping the Turso-plannable shapes executable (FULL-then-LEFT/INNER chains, INNER-then-FULL reorder, no-ON FULL joins). The join/memory.sqltest key was a bonus USING case (the summary named only correlated subqueries). Oracle 275->266: 9 keys removed (7 batch keys + 2 bonus RIGHT-chain keys), 0 added.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-order-by-ordinal-range-error-parity",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/select.rs:1074-1136 (replace_column_number_with_copy_of_column_expr, hardcoded '1st' range message) + turso-src/core/translate/select.rs:1142-1203 (resolve_compound_order_by_expr ordinal range / no-match wording)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.SelectBindings.cs (ResolveOrderByBindings) + src/Ahtola.Core/EmbeddedDatabase.cs (ResolveCompoundOrderByIndex + SortCompoundRows + ValidateCompoundOrderByCollations 1-based term threading)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "orderby/memory.sqltest::order-by-negative-1",
+        "orderby/memory.sqltest::order-by-negative-100",
+        "orderby/memory.sqltest::order-by-out-of-range",
+        "orderby/memory.sqltest::order-by-zero",
+        "orderby/memory.sqltest::order-by-plus-2",
+        "compound-select-orderby.sqltest::union-order-by-expr-no-match"
+      ],
+      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 2). Out-of-range and no-match ORDER BY ordinal diagnostics diverged from Turso in wording and term numbering. Simple SELECT: an integer-literal ORDER BY term outside [1, result-column count] now throws '1st ORDER BY term out of range - should be between 1 and {count}', matching Turso select.rs:1124's hardcoded '1st' prefix (upstream never pluralizes); in-range ordinals still substitute the result-column expression (re-wrapped in any COLLATE). Compound SELECT: the range message is '{ordinal} ORDER BY term out of range - should be between 1 and {count}' and the no-match message '{OrdinalSuffix(termNumber-1)} ORDER BY term does not match any column in the result set', with 1-based term numbers threaded through SortCompoundRows/ValidateCompoundOrderByCollations; the compound ordinal-literal path is an early pass-through so the rewrite never double-fires. Deliberate non-mirror: Ahtola keeps accepting 'ORDER BY 1 COLLATE NOCASE' on compound SELECTs where Turso rejects it (SQLite-compatible). Oracle 266->260: 6 keys removed, 0 added. orderby_rowid_truncation{,_explicit_rowid} (sub-select 2 columns) and three-way-union-order-by (row order) retained on separate gaps.",
       "status": "closed"
     }
   ]
