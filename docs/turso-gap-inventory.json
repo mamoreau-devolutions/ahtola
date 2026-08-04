@@ -14,11 +14,11 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "entry_count": 182,
+    "entry_count": 183,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 47,
+        "compilation": 48,
         "parser": 23,
         "functions": 24,
         "storage": 20,
@@ -27,25 +27,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 47,
+        "divergent": 48,
         "partial": 27,
         "extension": 7,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 94,
+        "s2-capability": 95,
         "s4-intentional": 32,
         "s1-correctness": 22
       },
       "by_effort": {
-        "M": 72,
+        "M": 73,
         "L": 37,
         "S": 73
       },
       "by_status": {
         "open": 150,
-        "closed": 32
+        "closed": 33
       }
     },
     "schema": {
@@ -1508,11 +1508,9 @@
         "trigger.sqltest::trigger-raise-shorthand",
         "views.sqltest::view-rejects-aggregate-order-by",
         "views.sqltest::view-mutual-circle-detection",
-        "default_value.sqltest::default-value-column-name",
-        "select/memory.sqltest::ambiguous-column-error-message-format",
-        "select/memory.sqltest::ambiguous-self-join"
+        "default_value.sqltest::default-value-column-name"
       ],
-      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint.)",
+      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint. Cleared 2026-08-06 by Wave F2.10 Batch 4 / compile-select-prepare-time-column-resolution: ambiguous-self-join and ambiguous-column-error-message-format.)",
       "status": "open"
     },
     {
@@ -2699,6 +2697,25 @@
         "create_index.sqltest::create-index-parenthesized-string-no-such-column"
       ],
       "notes": "Closed 2026-08-06 (Wave F2.10 Batch 3). SQLite/Turso treat a standalone single-quoted string in an index column list as a column name (a backwards-compatibility quirk), erroring 'no such column' when it matches no column; Ahtola instead built an expression index on the string literal and silently succeeded. EmbeddedIndexFactory.Create now detects a bare LiteralExpression of SqlValueKind.Text in an index term and resolves AsText() against the table's columns (OrdinalIgnoreCase, COLLATE/parens already peeled by the parser): a match builds a real column index with the term's collation falling back to the column's declared collation; no match throws 'no such column: {name}'. Numeric literals and literals nested in larger expressions are untouched (they remain expression indexes). Oracle: 3 string-literal keys removed, 0 added.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-select-prepare-time-column-resolution",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/expr/binding.rs:120-160,283 (column references are bound at translate time; unresolved names and same-scope ambiguity raise 'no such column'/'ambiguous column name' at prepare, with the USING-clause dedup exemption and BTree rowid resolution) + turso-src/core/translate/select.rs:450 (qualified/star ambiguity)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ValidateQuerySchema hooked in ExecuteSelectStatement after ResolveSelectBindings; ValidateExpressionSchema ColumnExpression honors the BooleanKeyword fallback; OutputColumn.Origin + origin-aware ThrowIfAmbiguousStarExpansion in GetColumnNames)",
+      "severity": "s2-capability",
+      "effort": "M",
+      "conformance_links": [
+        "view-rowid.sqltest::view-rowid-select",
+        "view-rowid.sqltest::view-rowid-order-by-index",
+        "select/memory.sqltest::rowid-select-from-clause-subquery",
+        "select/memory.sqltest::ambiguous-self-join",
+        "select/memory.sqltest::ambiguous-column-error-message-format",
+        "cte.sqltest::cte-unreferenced-qualified-column-orderby-exists"
+      ],
+      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 4). Two coupled fixes that bring Ahtola's SELECT column-resolution error timing and star-ambiguity detection to Turso parity. (1) Prepare-time validation: Ahtola previously resolved columns lazily at STEP time, so a SELECT that referenced an unresolvable column (rowid over a view or a FROM-clause derived table that does not expose rowid, or a CTE column not in scope) prepared successfully and only failed — or silently succeeded — during stepping. A new ValidateQuerySchema pass now runs at prepare time (after ResolveSelectBindings, before execution) mirroring Turso's translate-time binding, erroring 'no such column: ...' for view-rowid-select / view-rowid-order-by-index / rowid-select-from-clause-subquery / cte-unreferenced-qualified-column-orderby-exists. The hook is guarded by !context.InsideTrigger (trigger bodies are validated at CREATE TRIGGER and NEW/OLD bind through context.TriggerRow). ValidateExpressionSchema's ColumnExpression case now uses TryGetValue and treats an unresolvable name whose BooleanKeyword is set as a legal TRUE/FALSE literal (SQLite keywords -> 1/0), matching EvaluateColumn's runtime fallback so bare TRUE/FALSE still pass validation. (2) Origin-aware star ambiguity: OutputColumn gained a trailing Origin token (the leaf source object, compared with ReferenceEqualityComparer so two self-joined value-equal source nodes stay distinct). ThrowIfAmbiguousStarExpansion now reports 'ambiguous column name: {qualifier}.{name}' only when a column name is contributed by two or more distinct leaf sources; duplicates inside a single source are legal, and USING/NATURAL-coalesced columns (which appear once in the flattened output) remain legal. This cleared the ambiguous-self-join key and the ambiguous-column-error-message-format wording key as a bonus. Oracle 256->250 across the batch (5 target keys + 1 bonus, 0 added); regressions surfaced during iteration (bare TRUE/FALSE validation, single-derived-table duplicate-column false positive) fixed before landing.",
       "status": "closed"
     }
   ]

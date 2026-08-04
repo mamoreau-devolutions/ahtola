@@ -5351,12 +5351,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 ValidateTableSourceSchema(join.Right, context, outerRow, cancellationToken);
                 var columns = GetSourceColumns(join, context);
                 var outputColumns = GetOutputColumns(join, context);
-                var row = new SourceRow(
-                    columns,
-                    Enumerable.Repeat(SqlValue.Null, columns.Length).ToArray(),
-                    GetQualifiedColumns(join, context),
-                    outerRow,
-                    outputColumns);
+                // Reuse the query validation row so qualified rowid references on real
+                // tables (ON l.rowid = r.lid) resolve in the join condition too.
+                var row = CreateQuerySchemaValidationRow(join, context, columns, outputColumns, outerRow);
                 ValidateExpressionSchema(join.Condition, row, context, cancellationToken);
                 return;
             default:
@@ -5384,8 +5381,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     ValidateExpressionSchema(value, row, context, cancellationToken);
                 return;
             case ColumnExpression column:
-                (row ?? new SourceRow([], [])).GetValue(column);
-                return;
+                {
+                    var probe = row ?? new SourceRow([], []);
+                    // TRUE/FALSE are not reserved words: they fall back to the integer literals
+                    // 1/0 once the name fails to resolve (mirroring EvaluateColumn), so only an
+                    // unresolvable name that is not a boolean keyword is a schema error here.
+                    if (!probe.TryGetValue(column, out _) && column.BooleanKeyword is null)
+                        probe.GetValue(column);
+                    return;
+                }
             case FunctionExpression function:
                 foreach (var argument in function.Arguments)
                     ValidateExpressionSchema(argument, row, context, cancellationToken);
@@ -12096,6 +12100,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
         ValidateSelectIndexDirectives(select, context);
         select = StripUnusableForcedIndexForCountStar(select, context);
         select = ResolveSelectBindings(select, context, outerRow);
+        // Resolve column references eagerly at prepare time so bad references error
+        // before any row is produced (SQLite semantics). Trigger bodies already ran
+        // this validation at CREATE TRIGGER against the trigger pseudo-table row, and
+        // NEW/OLD references resolve through context.TriggerRow rather than outerRow,
+        // so re-validating inside a trigger would reject legal NEW/OLD references.
+        if (!context.InsideTrigger)
+            ValidateQuerySchema(select, context, outerRow, context.CancellationToken);
         ValidateGroupByCollations(select.GroupBy);
         ValidateOrderByAggregateMisuse(select);
         ValidateJoinStructure(select);
@@ -21492,21 +21503,22 @@ public sealed partial class EmbeddedDatabase : IDisposable
             case null:
                 return [];
             case NamedTableSource named when IsSchemaTable(named.Name):
-                return BuildOutputColumns(named.Alias ?? named.Name, ["type", "name", "tbl_name", "rootpage", "sql"]);
+                return BuildOutputColumns(named.Alias ?? named.Name, ["type", "name", "tbl_name", "rootpage", "sql"], source);
             case NamedTableSource named when context.CommonTableExpressions.TryGetValue(named.Name, out var commonTableExpression):
-                return BuildOutputColumns(named.Alias ?? named.Name, commonTableExpression.Columns);
+                return BuildOutputColumns(named.Alias ?? named.Name, commonTableExpression.Columns, source);
             case NamedTableSource named when TryGetView(context, named.Name, out var view):
-                return BuildOutputColumns(named.Alias ?? view.Name, ResolveViewColumns(view, EnterView(context, view.Name)));
+                return BuildOutputColumns(named.Alias ?? view.Name, ResolveViewColumns(view, EnterView(context, view.Name)), source);
             case NamedTableSource named when TryBindBareTableValuedFunction(named, context, out var bare):
                 return GetOutputColumns(bare, context);
             case NamedTableSource named:
-                return BuildOutputColumns(named.Alias ?? named.Name, GetTable(named, context.Tables).Columns);
+                return BuildOutputColumns(named.Alias ?? named.Name, GetTable(named, context.Tables).Columns, source);
             case TableValuedFunctionSource function:
                 return BuildOutputColumns(
                     function.Alias ?? function.Name,
-                    TableValuedFunctionRegistry.Resolve(function.Name).Schema.VisibleColumns);
+                    TableValuedFunctionRegistry.Resolve(function.Name).Schema.VisibleColumns,
+                    source);
             case DerivedTableSource derived:
-                return BuildOutputColumns(derived.Alias, DescribeQuery(derived.Query, context));
+                return BuildOutputColumns(derived.Alias, DescribeQuery(derived.Query, context), source);
             case JoinTableSource join:
                 return GetJoinOutputColumns(join, context);
             default:
@@ -21525,11 +21537,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return left.Concat(right.Select(column => column with { Index = column.Index + leftWidth })).ToArray();
     }
 
-    private static IReadOnlyList<OutputColumn> BuildOutputColumns(string? qualifier, IReadOnlyList<string> columns)
+    private static IReadOnlyList<OutputColumn> BuildOutputColumns(string? qualifier, IReadOnlyList<string> columns, object? origin = null)
     {
         var result = new OutputColumn[columns.Count];
         for (var index = 0; index < columns.Count; index++)
-            result[index] = new OutputColumn(qualifier, columns[index], index);
+            result[index] = new OutputColumn(qualifier, columns[index], index, Origin: origin);
 
         return result;
     }
@@ -23550,6 +23562,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 if (outputColumns.Count == 0)
                     throw new EmbeddedSqlException("SELECT * requires a row source");
 
+                ThrowIfAmbiguousStarExpansion(outputColumns);
                 names.AddRange(outputColumns.Select(column => column.Name));
                 continue;
             }
@@ -23562,6 +23575,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 if (rawMatches.Length == 0)
                     throw new EmbeddedSqlException($"no such table: {qualifiedStar.Qualifier}");
 
+                // Ambiguity is judged on the coalesced output columns (USING/NATURAL
+                // collapse the join column to a single entry), not on the raw per-side
+                // expansion, so a fully-coalesced self-join stays legal.
+                ThrowIfAmbiguousStarExpansion(
+                    outputColumns
+                        .Where(column => string.Equals(column.Qualifier, qualifiedStar.Qualifier, StringComparison.OrdinalIgnoreCase))
+                        .ToArray());
                 names.AddRange(rawMatches.Select(column => column.Name));
                 continue;
             }
@@ -23570,6 +23590,34 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
 
         return names.ToArray();
+    }
+
+    // SQLite rejects a * expansion only when the same expanded column name is contributed
+    // by two DISTINCT leaf table sources. Duplicate names produced by a single source (a
+    // derived table or CTE whose projection repeats a column name) are legal, as are
+    // USING/NATURAL-coalesced join columns which appear once in the coalesced view. The
+    // Origin token carries the producing leaf source so we can tell these apart; it is
+    // compared by reference because two self-joined references to the same table are
+    // value-equal AST nodes but distinct sources.
+    private static void ThrowIfAmbiguousStarExpansion(IReadOnlyList<OutputColumn> columns)
+    {
+        Dictionary<string, HashSet<object>>? originsByColumn = null;
+        foreach (var column in columns)
+        {
+            if (column.Qualifier is null || column.Origin is null)
+                continue;
+
+            originsByColumn ??= new Dictionary<string, HashSet<object>>(StringComparer.OrdinalIgnoreCase);
+            var key = $"{column.Qualifier}\u0000{column.Name}";
+            if (!originsByColumn.TryGetValue(key, out var origins))
+            {
+                origins = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                originsByColumn[key] = origins;
+            }
+
+            if (origins.Add(column.Origin) && origins.Count > 1)
+                throw new EmbeddedSqlException($"ambiguous column name: {column.Qualifier}.{column.Name}");
+        }
     }
 
     internal static string[] DescribeQuery(QueryStatement statement, QueryContext context)
@@ -41932,7 +41980,11 @@ internal sealed record OutputColumn(
     string Name,
     int Index,
     int? CoalesceIndex = null,
-    IReadOnlyList<int>? AdditionalCoalesceIndices = null);
+    IReadOnlyList<int>? AdditionalCoalesceIndices = null,
+    // Identity of the leaf table source that produced this column. Used only by the
+    // star-expansion ambiguity check to tell "one source with duplicate names" (legal)
+    // apart from "the same name contributed by two distinct FROM sources" (ambiguous).
+    object? Origin = null);
 
 internal sealed record SourceRow(
     string[] Columns,

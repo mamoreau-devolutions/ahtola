@@ -751,10 +751,12 @@ public class JoinSqlRoutingTests
                 connection,
                 "SELECT l.label FROM l LEFT JOIN r ON l.key = r.key WHERE r.missing IS NULL LIMIT 1;"))!
             .Message.Should().Be("no such column: r.missing");
+        // Column resolution happens at prepare time, before the LIMIT datatype is
+        // checked, so a bad column wins even when LIMIT is also invalid (sqlite3 parity).
         Assert.Throws<EmbeddedSqlException>(() => ReadRows(
                 connection,
                 "SELECT l.label FROM l LEFT JOIN r ON l.key = r.key WHERE r.missing IS NULL LIMIT 'x';"))!
-            .Message.Should().Be("datatype mismatch");
+            .Message.Should().Be("no such column: r.missing");
         Assert.Throws<EmbeddedSqlException>(() => ReadRows(
             connection,
             "EXPLAIN SELECT l.label FROM l LEFT JOIN r ON l.key = r.key WHERE r.missing IS NULL LIMIT 1;"));
