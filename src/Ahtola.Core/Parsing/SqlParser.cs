@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Ahtola.Core;
 
 namespace Ahtola.Core.Parsing;
@@ -11,7 +12,6 @@ internal sealed class SqlParser
     private readonly SqlSourceSpans? _spans;
     private int _maximumParameterIndex;
     private bool _inTriggerBody;
-    private (int Offset, int Length)? _temporaryKeywordSpan;
     private IReadOnlyList<SqlToken>? _pendingUpdateOfTokens;
 
     private SqlParser(string sql, SqlParameterMap parameterMap, SqlSourceSpans? spans = null)
@@ -181,9 +181,29 @@ internal sealed class SqlParser
     }
 
     private string? ParseOptionalMaintenanceTarget()
-        => _lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End
-            ? null
-            : ParsePragmaQualifiedName();
+    {
+        if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
+            return null;
+
+        // SQLite's maintenance-target grammar never demotes the compound set
+        // operators to identifiers (they are not in its %fallback ID list), so an
+        // unquoted UNION/INTERSECT/EXCEPT is a syntax error here even when an
+        // object of that name exists. Quoted spellings remain valid targets.
+        // Mirrors Turso's is_reindex_compound_operator_name.
+        if (_lexer.Current.Kind == TokenKind.Identifier
+            && !_lexer.Current.IsQuoted
+            && IsCompoundSetOperatorKeyword(_lexer.Current.Text))
+        {
+            throw Error($"near \"{_lexer.Current.Text}\": syntax error");
+        }
+
+        return ParsePragmaQualifiedName();
+    }
+
+    private static bool IsCompoundSetOperatorKeyword(string text)
+        => text.Equals("UNION", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("INTERSECT", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("EXCEPT", StringComparison.OrdinalIgnoreCase);
 
     private ParsedStatement ParsePragma()
     {
@@ -206,15 +226,17 @@ internal sealed class SqlParser
         if (name.Equals("index_xinfo", StringComparison.OrdinalIgnoreCase))
             return new PragmaIndexXInfoStatement(ParsePragmaObjectName(schema));
         if (name.Equals("foreign_key_list", StringComparison.OrdinalIgnoreCase))
-            return new PragmaForeignKeyListStatement(ParsePragmaObjectName(schema));
+            return new PragmaForeignKeyListStatement(ParseOptionalPragmaObjectName(name, schema));
         if (name.Equals("foreign_key_check", StringComparison.OrdinalIgnoreCase))
             return new PragmaForeignKeyCheckStatement(
                 ParseOptionalPragmaObjectName(name, schema),
                 schema);
         if (name.Equals("table_list", StringComparison.OrdinalIgnoreCase))
         {
-            RequireReadOnlyPragma(name);
-            return new PragmaTableListStatement(schema);
+            var filter = _lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End
+                ? null
+                : ParsePragmaTableListFilter();
+            return new PragmaTableListStatement(schema, filter);
         }
         if (name.Equals("database_list", StringComparison.OrdinalIgnoreCase))
         {
@@ -259,6 +281,10 @@ internal sealed class SqlParser
             return new PragmaJournalModeStatement(ParseOptionalPragmaMode(name), schema);
         if (name.Equals("page_size", StringComparison.OrdinalIgnoreCase))
             return new PragmaPageSizeStatement(ParseOptionalPragmaInteger(name), schema);
+        if (name.Equals("cache_size", StringComparison.OrdinalIgnoreCase))
+            return new PragmaCacheSizeStatement(ParseOptionalPragmaLong(name), schema);
+        if (name.Equals("cache_spill", StringComparison.OrdinalIgnoreCase))
+            return new PragmaCacheSpillStatement(ParseOptionalPragmaBoolean(name), schema);
         if (name.Equals("page_count", StringComparison.OrdinalIgnoreCase))
         {
             RequireReadOnlyPragma(name);
@@ -275,7 +301,30 @@ internal sealed class SqlParser
         if (name.Equals("quick_check", StringComparison.OrdinalIgnoreCase))
             return ParsePragmaIntegrityCheck(name, quick: true, schema);
 
-        throw Error($"Unsupported PRAGMA {name}.");
+        if (name.Equals("max_page_count", StringComparison.OrdinalIgnoreCase))
+            return new PragmaMaxPageCountStatement(ParseOptionalPragmaLong(name), schema);
+        if (name.Equals("ignore_check_constraints", StringComparison.OrdinalIgnoreCase))
+            return new PragmaIgnoreCheckConstraintsStatement(ParseOptionalPragmaBoolean(name), schema);
+        if (name.Equals("require_where", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("i_am_a_dummy", StringComparison.OrdinalIgnoreCase))
+            return new PragmaRequireWhereStatement(ParseOptionalPragmaBoolean(name), schema);
+        if (name.Equals("temp_store", StringComparison.OrdinalIgnoreCase))
+            return new PragmaTempStoreStatement(ParseOptionalPragmaTempStore(name), schema);
+        if (name.Equals("wal_checkpoint", StringComparison.OrdinalIgnoreCase))
+            return new PragmaWalCheckpointStatement(ParseOptionalPragmaMode(name), schema);
+        if (name.Equals("busy_timeout", StringComparison.OrdinalIgnoreCase))
+            return new PragmaBusyTimeoutStatement(ParseOptionalPragmaLong(name), schema);
+
+        // The introspection pragmas stay documented-unsupported (they return rows in
+        // Turso). Every other unrecognized pragma is silently ignored by SQLite, so accept
+        // the common argument shapes and execute as a no-op (Turso translate/pragma.rs
+        // falls through the same way).
+        if (name.Equals("function_list", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("module_list", StringComparison.OrdinalIgnoreCase))
+            throw Error($"Unsupported PRAGMA {name}.");
+
+        ParseOptionalPragmaIgnoredValue(name);
+        return new PragmaNoOpStatement(name, schema);
     }
 
     /// <remarks>
@@ -314,9 +363,20 @@ internal sealed class SqlParser
 
     private string ParsePragmaObjectName(string? pragmaSchema)
     {
-        Expect(TokenKind.LeftParen);
-        var objectName = ParsePragmaQualifiedName();
-        Expect(TokenKind.RightParen);
+        // SQLite accepts both the parenthesized form (PRAGMA table_info('t')) and the
+        // equals form (PRAGMA table_info=t) for object-name pragmas.
+        string objectName;
+        if (Consume(TokenKind.Equal))
+        {
+            objectName = ParsePragmaQualifiedName();
+        }
+        else
+        {
+            Expect(TokenKind.LeftParen);
+            objectName = ParsePragmaQualifiedName();
+            Expect(TokenKind.RightParen);
+        }
+
         if (ManagedSchemaName.TrySplit(objectName, out var objectSchema, out var localName))
         {
             if (pragmaSchema is not null
@@ -333,11 +393,34 @@ internal sealed class SqlParser
             : ManagedSchemaName.Create(pragmaSchema, localName);
     }
 
+    /// <summary>
+    /// Parses the optional filter argument of <c>PRAGMA table_list</c>. The schema is carried
+    /// by the pragma prefix (<c>main.table_list</c>), so only the local table name is kept.
+    /// </summary>
+    private string ParsePragmaTableListFilter()
+    {
+        string objectName;
+        if (Consume(TokenKind.Equal))
+        {
+            objectName = ParsePragmaQualifiedName();
+        }
+        else
+        {
+            Expect(TokenKind.LeftParen);
+            objectName = ParsePragmaQualifiedName();
+            Expect(TokenKind.RightParen);
+        }
+
+        return ManagedSchemaName.TrySplit(objectName, out _, out var localName)
+            ? localName
+            : objectName;
+    }
+
     private string? ParseOptionalPragmaObjectName(string name, string? pragmaSchema)
     {
         if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
             return null;
-        if (_lexer.Current.Kind != TokenKind.LeftParen)
+        if (_lexer.Current.Kind is not (TokenKind.LeftParen or TokenKind.Equal))
             throw Error($"PRAGMA {name} requires a parenthesized table name.");
         return ParsePragmaObjectName(pragmaSchema);
     }
@@ -452,6 +535,59 @@ internal sealed class SqlParser
             : 0;
     }
 
+    private long? ParseOptionalPragmaLong(string name)
+    {
+        if (Consume(TokenKind.Equal))
+            return ParsePragmaLong(name);
+
+        if (Consume(TokenKind.LeftParen))
+        {
+            var value = ParsePragmaLong(name);
+            Expect(TokenKind.RightParen);
+            return value;
+        }
+
+        if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
+            return null;
+
+        throw Error($"PRAGMA {name} requires '=' or a parenthesized value.");
+    }
+
+    private long ParsePragmaLong(string name)
+    {
+        var sign = string.Empty;
+        if (Consume(TokenKind.Minus))
+            sign = "-";
+        else if (Consume(TokenKind.Plus))
+            sign = "+";
+
+        var token = _lexer.Current;
+        _lexer.Next();
+        return token.Kind switch
+        {
+            TokenKind.Integer => ParsePragmaLongText(sign + token.Text),
+            TokenKind.Real => ParsePragmaLongReal(sign + token.Text),
+            TokenKind.Identifier or TokenKind.String when sign.Length == 0 => ParsePragmaLongText(token.Text),
+            _ => throw Error($"Invalid value for PRAGMA {name}."),
+        };
+    }
+
+    private static long ParsePragmaLongText(string value)
+    {
+        return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer)
+            ? integer
+            : 0;
+    }
+
+    private static long ParsePragmaLongReal(string value)
+    {
+        return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var real)
+            && double.IsFinite(real)
+            && real is >= long.MinValue and <= long.MaxValue
+            ? (long)real
+            : 0;
+    }
+
     private string? ParseOptionalPragmaMode(string name)
     {
         if (Consume(TokenKind.Equal))
@@ -480,15 +616,84 @@ internal sealed class SqlParser
         return token.Text;
     }
 
+    private int? ParseOptionalPragmaTempStore(string name)
+    {
+        if (Consume(TokenKind.Equal))
+            return ParsePragmaTempStoreValue();
+
+        if (Consume(TokenKind.LeftParen))
+        {
+            var value = ParsePragmaTempStoreValue();
+            Expect(TokenKind.RightParen);
+            return value;
+        }
+
+        if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
+            return null;
+
+        throw Error($"PRAGMA {name} requires '=' or a parenthesized value.");
+    }
+
+    private int ParsePragmaTempStoreValue()
+    {
+        var token = _lexer.Current;
+        _lexer.Next();
+        switch (token.Kind)
+        {
+            case TokenKind.Integer:
+                var value = ParsePragmaLongText(token.Text);
+                if (value is 0 or 1 or 2)
+                    return (int)value;
+                throw Error("temp_store must be 0, 1, 2, DEFAULT, FILE, or MEMORY");
+            case TokenKind.Identifier or TokenKind.String:
+                if (token.Text.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase))
+                    return 0;
+                if (token.Text.Equals("FILE", StringComparison.OrdinalIgnoreCase))
+                    return 1;
+                if (token.Text.Equals("MEMORY", StringComparison.OrdinalIgnoreCase))
+                    return 2;
+                throw Error("temp_store must be 0, 1, 2, DEFAULT, FILE, or MEMORY");
+            default:
+                throw Error("temp_store must be 0, 1, 2, DEFAULT, FILE, or MEMORY");
+        }
+    }
+
+    private void ParseOptionalPragmaIgnoredValue(string name)
+    {
+        if (Consume(TokenKind.Equal))
+        {
+            ParsePragmaIgnoredValue(name);
+            return;
+        }
+
+        if (Consume(TokenKind.LeftParen))
+        {
+            ParsePragmaIgnoredValue(name);
+            Expect(TokenKind.RightParen);
+            return;
+        }
+
+        if (_lexer.Current.Kind is not (TokenKind.Semicolon or TokenKind.End))
+            throw Error($"PRAGMA {name} requires '=' or a parenthesized value.");
+    }
+
+    private void ParsePragmaIgnoredValue(string name)
+    {
+        if (_lexer.Current.Kind is TokenKind.Minus or TokenKind.Plus)
+            _lexer.Next();
+
+        var token = _lexer.Current;
+        if (token.Kind is not (TokenKind.Integer or TokenKind.Real or TokenKind.Identifier or TokenKind.String))
+            throw Error($"Invalid value for PRAGMA {name}.");
+
+        _lexer.Next();
+    }
+
     private ParsedStatement ParseCreate()
     {
-        var temporaryKeyword = _lexer.Current;
         var temporary = ConsumeKeyword("TEMP") || ConsumeKeyword("TEMPORARY");
         if (temporary)
         {
-            // sqlite_temp_schema stores the definition without the TEMP keyword, so remember
-            // where it was and elide it when the object SQL is captured.
-            _temporaryKeywordSpan = (temporaryKeyword.Offset, temporaryKeyword.Text.Length);
             if (ConsumeKeyword("VIEW"))
                 return ParseCreateView(temporary: true);
             if (ConsumeKeyword("TRIGGER"))
@@ -531,7 +736,7 @@ internal sealed class SqlParser
             ifNotExists = true;
         }
 
-        var name = ParseSchemaQualifiedName();
+        var name = ParseSchemaQualifiedName(out var tableNameToken, out var schemaToken);
         if (temporary
             && ManagedSchemaName.TrySplit(name, out var schema, out _)
             && !schema.Equals("temp", StringComparison.OrdinalIgnoreCase))
@@ -545,7 +750,9 @@ internal sealed class SqlParser
             if (!IsQueryStart())
                 throw Error("Expected a SELECT query after AS.");
 
-            return new CreateTableAsSelectStatement(name, ParseQuery(), ifNotExists, temporary);
+            var ctas = new CreateTableAsSelectStatement(name, ParseQuery(), ifNotExists, temporary);
+            _spans?.RecordName(ctas, tableNameToken);
+            return ctas;
         }
 
         Expect(TokenKind.LeftParen);
@@ -558,8 +765,10 @@ internal sealed class SqlParser
         var checkConstraints = new List<CheckConstraint>();
         var tableConstraintOrder = 0;
         var tableForeignKeys = new List<ForeignKeyDefinition>();
-        do
+        SqlToken? precedingComma = null;
+        while (true)
         {
+            EmbeddedColumn? extentColumn = null;
             if (IsTableConstraintStart())
             {
                 var parsed = ParseTableConstraint();
@@ -593,14 +802,28 @@ internal sealed class SqlParser
                             check.ConflictAlgorithm));
                         break;
                 }
-
-                continue;
+            }
+            else
+            {
+                extentColumn = ParseColumnDefinition();
+                columns.Add(extentColumn);
             }
 
-            columns.Add(ParseColumnDefinition());
+            if (_lexer.Current.Kind != TokenKind.Comma)
+            {
+                if (extentColumn is not null)
+                    RecordColumnDefinitionExtent(extentColumn, precedingComma, _lexer.Current.Offset);
+                break;
+            }
+
+            var commaToken = _lexer.Current;
+            _lexer.Next();
+            if (extentColumn is not null)
+                RecordColumnDefinitionExtent(extentColumn, null, _lexer.Current.Offset);
+            precedingComma = commaToken;
         }
-        while (Consume(TokenKind.Comma));
-        Expect(TokenKind.RightParen);
+
+        var columnListCloseParen = ExpectToken(TokenKind.RightParen);
 
         var withoutRowid = false;
         var strict = false;
@@ -635,7 +858,7 @@ internal sealed class SqlParser
                 break;
         }
 
-        return new CreateTableStatement(
+        var createTable = new CreateTableStatement(
             name,
             columns,
             ifNotExists,
@@ -647,7 +870,30 @@ internal sealed class SqlParser
             tablePrimaryKeyConstraintName,
             tablePrimaryKeyDeclarationOrder,
             tableForeignKeys,
-            strict);
+            strict,
+            InitialRows: null,
+            Sql: NormalizeObjectSql("CREATE TABLE ", tableNameToken));
+        _spans?.RecordQualifier(createTable, columnListCloseParen);
+        _spans?.RecordName(createTable, tableNameToken);
+        return createTable;
+    }
+
+    /// <summary>
+    /// Records the exact character range a future <c>ALTER TABLE ... DROP COLUMN</c> removes for
+    /// this definition. A definition followed by a comma extends from its name through the comma
+    /// and the whitespace up to the next item; the final definition extends back through its
+    /// preceding comma so no dangling separator survives. Mirrors SQLite's token-based extent in
+    /// alter.c.
+    /// </summary>
+    private void RecordColumnDefinitionExtent(EmbeddedColumn column, SqlToken? precedingComma, int extentEnd)
+    {
+        if (_spans is null)
+            return;
+        if (_spans.GetName(column) is not { } nameSpan)
+            return;
+
+        var extentStart = precedingComma is { } comma ? comma.Offset : nameSpan.Start;
+        _spans.RecordDefinitionExtent(column, new SqlSourceSpan(extentStart, extentEnd, false));
     }
 
     private abstract record TableConstraint;
@@ -692,9 +938,10 @@ internal sealed class SqlParser
         if (ConsumeKeyword("FOREIGN"))
         {
             ExpectKeyword("KEY");
-            var childColumns = ParseForeignKeyColumns();
+            var childColumns = ParseForeignKeyColumns(out var childTokens);
             ExpectKeyword("REFERENCES");
-            return new ForeignKeyTableConstraint(ParseForeignKeyReference(childColumns, constraintName));
+            return new ForeignKeyTableConstraint(
+                ParseForeignKeyReference(childColumns, constraintName, childTokens));
         }
 
         if (ConsumeKeyword("CHECK"))
@@ -712,7 +959,8 @@ internal sealed class SqlParser
         var columns = new List<TablePrimaryKeyColumn>();
         do
         {
-            var columnName = ExpectIdentifier();
+            var nameToken = ExpectIdentifierToken();
+            var columnName = nameToken.Text;
             string? collation = null;
             if (ConsumeKeyword("COLLATE"))
                 collation = ExpectIdentifier();
@@ -722,37 +970,51 @@ internal sealed class SqlParser
                 descending = true;
 
             var autoIncrement = allowAutoIncrement && ConsumeKeyword("AUTOINCREMENT");
-            columns.Add(new TablePrimaryKeyColumn(columnName, descending, collation, autoIncrement));
+            var column = new TablePrimaryKeyColumn(columnName, descending, collation, autoIncrement);
+            _spans?.RecordName(column, nameToken);
+            columns.Add(column);
         }
         while (Consume(TokenKind.Comma));
         Expect(TokenKind.RightParen);
         return columns;
     }
 
-    private IReadOnlyList<string> ParseForeignKeyColumns()
+    private IReadOnlyList<string> ParseForeignKeyColumns(out IReadOnlyList<SqlToken>? tokens)
     {
         Expect(TokenKind.LeftParen);
         var columns = new List<string>();
+        List<SqlToken>? collected = _spans is null ? null : [];
         do
         {
-            columns.Add(ExpectIdentifier());
+            var token = ExpectIdentifierToken();
+            columns.Add(token.Text);
+            collected?.Add(token);
         }
         while (Consume(TokenKind.Comma));
         Expect(TokenKind.RightParen);
+        tokens = collected;
         return columns;
     }
 
     private ForeignKeyDefinition ParseForeignKeyReference(
         IReadOnlyList<string> childColumns,
         string? constraintName = null)
+        => ParseForeignKeyReference(childColumns, constraintName, childTokens: null);
+
+    private ForeignKeyDefinition ParseForeignKeyReference(
+        IReadOnlyList<string> childColumns,
+        string? constraintName,
+        IReadOnlyList<SqlToken>? childTokens)
     {
-        var parentTable = ExpectIdentifier();
+        var parentTableToken = ExpectIdentifierToken();
+        var parentTable = parentTableToken.Text;
         if (Consume(TokenKind.Dot))
             throw Error("Schema-qualified foreign keys are not supported.");
 
         IReadOnlyList<string> parentColumns = [];
+        IReadOnlyList<SqlToken>? parentTokens = null;
         if (_lexer.Current.Kind == TokenKind.LeftParen)
-            parentColumns = ParseForeignKeyColumns();
+            parentColumns = ParseForeignKeyColumns(out parentTokens);
 
         var onDelete = ForeignKeyAction.NoAction;
         var onUpdate = ForeignKeyAction.NoAction;
@@ -806,7 +1068,7 @@ internal sealed class SqlParser
             break;
         }
 
-        return new ForeignKeyDefinition(
+        var definition = new ForeignKeyDefinition(
             childColumns,
             parentTable,
             parentColumns,
@@ -815,6 +1077,19 @@ internal sealed class SqlParser
             match,
             deferral,
             constraintName);
+
+        if (_spans is not null)
+        {
+            _spans.RecordName(definition, parentTableToken);
+
+            if (childTokens is { Count: > 0 })
+                _spans.RecordList(definition, childTokens);
+
+            if (parentTokens is { Count: > 0 })
+                _spans.RecordQualifierList(definition, parentTokens);
+        }
+
+        return definition;
     }
 
     private ForeignKeyAction ParseForeignKeyAction()
@@ -849,9 +1124,9 @@ internal sealed class SqlParser
             ifNotExists = true;
         }
 
-        var name = ParseSchemaQualifiedName();
+        var name = ParseSchemaQualifiedName(out var indexNameToken, out var indexSchemaToken);
         ExpectKeyword("ON");
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var tableNameToken);
         Expect(TokenKind.LeftParen);
         var columns = new List<IndexedColumnDefinition>();
         do
@@ -872,7 +1147,9 @@ internal sealed class SqlParser
                 throw Error("Partial index WHERE clause requires an expression.");
         }
 
-        return new CreateIndexStatement(name, tableName, columns, unique, ifNotExists, where, whereSql);
+        var createIndex = new CreateIndexStatement(name, tableName, columns, unique, ifNotExists, where, whereSql, NormalizeObjectSql(unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ", indexNameToken));
+        _spans?.RecordQualifier(createIndex, tableNameToken);
+        return createIndex;
     }
 
     private IndexedColumnDefinition ParseIndexedColumn()
@@ -890,15 +1167,24 @@ internal sealed class SqlParser
         if (_lexer.Current.Kind is not TokenKind.Comma and not TokenKind.RightParen)
             throw Error("Unexpected token in index expression.");
 
+        // Nested COLLATE wrappers peel down to the bare operand; like SQLite (and
+        // Turso's extract_collation), the outermost collation wins.
         string? collation = null;
-        if (expression is CollationExpression collated)
+        while (expression is CollationExpression collated)
         {
-            collation = collated.Name;
+            collation ??= collated.Name;
             expression = collated.Expression;
         }
 
         if (expression is ColumnExpression { Qualifier: null } column)
-            return new IndexedColumnDefinition(column.Name, collation, descending);
+        {
+            var definition = new IndexedColumnDefinition(column.Name, collation, descending);
+            var columnSpan = _spans?.GetName(column);
+            if (columnSpan is not null)
+                _spans!.RecordName(definition, columnSpan.Value);
+
+            return definition;
+        }
 
         return new IndexedColumnDefinition(
             Name: null,
@@ -915,7 +1201,10 @@ internal sealed class SqlParser
         if (ConsumeKeyword("ADD"))
         {
             ConsumeKeyword("COLUMN");
-            return new AlterTableAddColumnStatement(tableName, ParseColumnDefinition());
+            var definitionStart = _lexer.Current.Offset;
+            var column = ParseColumnDefinition();
+            var columnSql = _sql[definitionStart.._lexer.Current.Offset].Trim();
+            return new AlterTableAddColumnStatement(tableName, column, columnSql.Length > 0 ? columnSql : null);
         }
         if (ConsumeKeyword("RENAME"))
         {
@@ -997,7 +1286,7 @@ internal sealed class SqlParser
     private ParsedStatement ParseCreateView(bool temporary)
     {
         var ifNotExists = ParseIfNotExists();
-        var name = ParseSchemaQualifiedName();
+        var name = ParseSchemaQualifiedName(out var viewNameToken, out var viewSchemaToken);
         if (temporary
             && ManagedSchemaName.TrySplit(name, out var viewSchema, out _)
             && !viewSchema.Equals("temp", StringComparison.OrdinalIgnoreCase))
@@ -1017,13 +1306,13 @@ internal sealed class SqlParser
             throw Error("Expected a SELECT query in the view definition.");
 
         var query = ParseQuery();
-        return new CreateViewStatement(name, columns, query, NormalizeObjectSql(), ifNotExists, temporary);
+        return new CreateViewStatement(name, columns, query, NormalizeObjectSql("CREATE VIEW ", viewNameToken), ifNotExists, temporary);
     }
 
     private ParsedStatement ParseCreateTrigger(bool temporary)
     {
         var ifNotExists = ParseIfNotExists();
-        var name = ParseSchemaQualifiedName();
+        var name = ParseSchemaQualifiedName(out var triggerNameToken, out var triggerSchemaToken);
         if (temporary && ManagedSchemaName.TrySplit(name, out _, out _))
             throw Error("temporary trigger may not have qualified name");
 
@@ -1040,7 +1329,7 @@ internal sealed class SqlParser
 
         var (triggerEvent, updateOfColumns) = ParseTriggerEvent();
         ExpectKeyword("ON");
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var triggerTableToken);
 
         _inTriggerBody = true;
         try
@@ -1077,11 +1366,12 @@ internal sealed class SqlParser
                 tableName,
                 when,
                 body,
-                NormalizeObjectSql(),
+                NormalizeObjectSql("CREATE TRIGGER ", triggerNameToken),
                 ifNotExists,
                 temporary);
             if (_spans is not null && _pendingUpdateOfTokens is not null)
                 _spans.RecordList(trigger, _pendingUpdateOfTokens);
+            _spans?.RecordQualifier(trigger, triggerTableToken);
 
             return trigger;
         }
@@ -1161,32 +1451,26 @@ internal sealed class SqlParser
         return true;
     }
 
-    // Views and triggers have no AST-to-SQL printer, so sqlite_master exposes the original
-    // statement text with trailing terminators trimmed to match SQLite's stored schema.
-    // SQLite also drops the TEMP keyword from the definition it records in sqlite_temp_schema.
-    private string NormalizeObjectSql()
+    // SQLite reconstructs the text it stores in sqlite_schema.sql: the leading CREATE prefix is
+    // rebuilt from canonical uppercase keywords (CREATE TABLE / CREATE [UNIQUE] INDEX /
+    // CREATE VIEW / CREATE TRIGGER), while everything from the object name token onward is
+    // preserved verbatim — lowercase keywords, spacing, and comments survive. TEMP|TEMPORARY,
+    // IF NOT EXISTS, the schema qualifier, and leading whitespace/comments precede the object
+    // name and therefore disappear (verified against sqlite3 3.53.4).
+    private string NormalizeObjectSql(string prefix, SqlToken nameToken)
     {
-        var text = _sql;
-        if (_temporaryKeywordSpan is { } keyword)
-        {
-            var end = keyword.Offset + keyword.Length;
-            while (end < text.Length && char.IsWhiteSpace(text[end]))
-                end++;
-            text = text.Remove(keyword.Offset, end - keyword.Offset);
-        }
+        var tail = _sql[nameToken.Offset..].TrimEnd();
+        while (tail.EndsWith(';'))
+            tail = tail[..^1].TrimEnd();
 
-        text = text.Trim();
-        while (text.EndsWith(';'))
-            text = text[..^1].TrimEnd();
-
-        return text;
+        return prefix + tail;
     }
 
     private ParsedStatement ParseInsert(InsertConflictAlgorithm? impliedConflictAlgorithm = null)
     {
         var conflictAlgorithm = impliedConflictAlgorithm ?? ParseInsertConflictAlgorithm();
         ExpectKeyword("INTO");
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var insertTableToken);
         RejectQualifiedTriggerDmlTarget(tableName);
         string[]? columns = null;
         IReadOnlyList<SqlToken>? columnTokens = null;
@@ -1241,6 +1525,7 @@ internal sealed class SqlParser
             ParseReturning(),
             upsert,
             conflictAlgorithm);
+        _spans?.RecordName(insert, insertTableToken);
         if (_spans is not null && columnTokens is not null)
             _spans.RecordList(insert, columnTokens);
 
@@ -1322,10 +1607,10 @@ internal sealed class SqlParser
     private ParsedStatement ParseUpdate()
     {
         var conflictAlgorithm = ParseInsertConflictAlgorithm();
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var updateTableToken);
         RejectQualifiedTriggerDmlTarget(tableName);
         var alias = ParseDmlTargetAlias();
-        RejectUnsupportedDmlTargetSuffix("UPDATE");
+        var indexDirective = ParseTableIndexDirective();
         ExpectKeyword("SET");
         var assignments = ParseAssignments();
 
@@ -1344,7 +1629,7 @@ internal sealed class SqlParser
         if (from is not null && limit is not null)
             throw Error("LIMIT is not supported on UPDATE ... FROM.");
 
-        return new UpdateStatement(
+        var update = new UpdateStatement(
             tableName,
             assignments,
             where,
@@ -1354,7 +1639,10 @@ internal sealed class SqlParser
             offset,
             alias,
             from,
-            conflictAlgorithm);
+            conflictAlgorithm,
+            indexDirective);
+        _spans?.RecordName(update, updateTableToken);
+        return update;
     }
 
     private IReadOnlyList<ColumnAssignment> ParseAssignments()
@@ -1397,29 +1685,25 @@ internal sealed class SqlParser
     private ParsedStatement ParseDelete()
     {
         ExpectKeyword("FROM");
-        var tableName = ParseSchemaQualifiedName();
+        var tableName = ParseSchemaQualifiedName(out var deleteTableToken);
         RejectQualifiedTriggerDmlTarget(tableName);
         var alias = ParseDmlTargetAlias();
-        RejectUnsupportedDmlTargetSuffix("DELETE");
+        var indexDirective = ParseTableIndexDirective();
         Expression? where = null;
         if (ConsumeKeyword("WHERE"))
             where = ParseExpression();
 
         var returning = ParseReturning();
         var (orderBy, limit, offset) = ParseLimitedDmlTail("DELETE");
-        return new DeleteStatement(tableName, where, returning, orderBy, limit, offset, alias);
+        var delete = new DeleteStatement(tableName, where, returning, orderBy, limit, offset, alias, indexDirective);
+        _spans?.RecordName(delete, deleteTableToken);
+        return delete;
     }
 
     // SQLite's qualified-table-name allows an alias on UPDATE and DELETE targets. Only the
     // explicit AS form is accepted so a bare identifier cannot silently swallow SET or WHERE.
     private string? ParseDmlTargetAlias()
         => ConsumeKeyword("AS") ? ExpectIdentifier() : null;
-
-    private void RejectUnsupportedDmlTargetSuffix(string statementKind)
-    {
-        if (CurrentIsKeyword("INDEXED") || CurrentIsKeyword("NOT"))
-            throw Error($"Managed {statementKind} does not support INDEXED BY or NOT INDEXED.");
-    }
 
     private void RejectQualifiedTriggerDmlTarget(string tableName)
     {
@@ -1579,9 +1863,14 @@ internal sealed class SqlParser
         // which treats the keyword as optional.
         ConsumeKeyword("RECURSIVE");
         var commonTableExpressions = new List<CommonTableExpression>();
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         do
         {
             var name = ExpectIdentifier();
+            // SQLite rejects duplicate WITH names at parse time, so this fires even
+            // inside CREATE VIEW/TRIGGER bodies whose resolution is otherwise deferred.
+            if (!names.Add(name))
+                throw Error($"duplicate WITH table name: {name}");
             IReadOnlyList<string>? columns = null;
             if (Consume(TokenKind.LeftParen))
             {
@@ -1736,13 +2025,28 @@ internal sealed class SqlParser
 
     private static long? TryParseOrderByOrdinal(ReadOnlySpan<char> expression)
     {
-        var collation = expression.IndexOf("COLLATE", StringComparison.OrdinalIgnoreCase);
-        if (collation >= 0)
-            expression = expression[..collation];
-
+        // Parentheses must be stripped before cutting a COLLATE clause: a COLLATE inside
+        // the parentheses (as in "(1 COLLATE NOCASE)") would otherwise leave an unbalanced
+        // "(1" behind. Both transforms repeat because they can expose each other.
         expression = expression.Trim();
-        while (TryStripOuterParentheses(ref expression))
-            expression = expression.Trim();
+        bool reshaped;
+        do
+        {
+            reshaped = false;
+            while (TryStripOuterParentheses(ref expression))
+            {
+                expression = expression.Trim();
+                reshaped = true;
+            }
+
+            var collation = expression.IndexOf("COLLATE", StringComparison.OrdinalIgnoreCase);
+            if (collation >= 0)
+            {
+                expression = expression[..collation].Trim();
+                reshaped = true;
+            }
+        }
+        while (reshaped);
 
         var sign = '\0';
         if (!expression.IsEmpty && expression[0] is '+' or '-')
@@ -1751,6 +2055,15 @@ internal sealed class SqlParser
             expression = expression[1..].Trim();
             while (TryStripOuterParentheses(ref expression))
                 expression = expression.Trim();
+        }
+
+        if (expression.IndexOf('_') >= 0)
+        {
+            var normalized = NormalizeOrdinalDigitSeparators(expression);
+            if (normalized is null)
+                return null;
+
+            expression = normalized.AsSpan();
         }
 
         if (expression.IsEmpty || expression.IndexOfAnyExceptInRange('0', '9') >= 0)
@@ -1762,6 +2075,39 @@ internal sealed class SqlParser
         return long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ordinal)
             ? ordinal
             : null;
+    }
+
+    /// <summary>
+    /// Strips SQLite 3.47 digit separators from an ORDER BY ordinal candidate
+    /// (<c>ORDER BY 1_0</c> names the tenth output column), returning null when an
+    /// underscore is not placed between two digits.
+    /// </summary>
+    private static string? NormalizeOrdinalDigitSeparators(ReadOnlySpan<char> expression)
+    {
+        var builder = new System.Text.StringBuilder(expression.Length);
+        var lastWasDigit = false;
+        for (var index = 0; index < expression.Length; index++)
+        {
+            var current = expression[index];
+            if (char.IsAsciiDigit(current))
+            {
+                builder.Append(current);
+                lastWasDigit = true;
+                continue;
+            }
+
+            if (current != '_'
+                || !lastWasDigit
+                || index + 1 >= expression.Length
+                || !char.IsAsciiDigit(expression[index + 1]))
+            {
+                return null;
+            }
+
+            lastWasDigit = false;
+        }
+
+        return builder.ToString();
     }
 
     private static bool TryStripOuterParentheses(ref ReadOnlySpan<char> expression)
@@ -1799,23 +2145,146 @@ internal sealed class SqlParser
         if (_lexer.Current.Kind == TokenKind.Identifier)
         {
             var snapshot = _lexer.Snapshot();
-            var qualifier = _lexer.Current.Text;
+            var qualifierToken = _lexer.Current;
+            var qualifier = qualifierToken.Text;
             _lexer.Next();
             if (Consume(TokenKind.Dot) && _lexer.Current.Kind == TokenKind.Asterisk)
             {
                 _lexer.Next();
-                return new Projection(new QualifiedStarExpression(qualifier), null);
+                var qualifiedStar = new QualifiedStarExpression(qualifier);
+                _spans?.RecordQualifier(qualifiedStar, qualifierToken);
+                return new Projection(qualifiedStar, null);
             }
 
             _lexer.Restore(snapshot);
         }
 
+        var startOffset = _lexer.Current.Offset;
         var expression = ParseExpression();
+        var sourceText = ExtractProjectionSourceText(startOffset, _lexer.Current.Offset);
         string? alias = null;
         if (ConsumeKeyword("AS"))
-            alias = ExpectIdentifier();
+            alias = ParseAliasName();
+        else
+            alias = TryParseElidedAlias();
 
-        return new Projection(expression, alias);
+        return new Projection(expression, alias, sourceText);
+    }
+
+    /// <summary>
+    /// SQLite names an aliased-less result column after the verbatim source span of its
+    /// expression. A trailing COLLATE clause is excluded: <c>a COLLATE BINARY</c> is named
+    /// <c>a</c>, matching SQLite's TK_COLLATE span behavior (verified against sqlite3).
+    /// </summary>
+    private string ExtractProjectionSourceText(int startOffset, int endOffset)
+    {
+        var text = _sql[startOffset..endOffset].Trim();
+        while (true)
+        {
+            var match = TrailingCollateClause.Match(text);
+            if (!match.Success)
+                return text;
+
+            text = text[..match.Index].TrimEnd();
+        }
+    }
+
+    private static readonly Regex TrailingCollateClause = new(
+        @"\s+COLLATE\s+(?:""[^""]*""|'[^']*'|`[^`]*`|\[[^\]]*\]|[A-Za-z_][\w$]*)\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Unquoted keywords SQLite refuses to demote into an elided result-column alias,
+    /// verified empirically against SQLite 3.45 (<c>SELECT 1 &lt;word&gt;</c> for each).
+    /// <c>ISNULL</c>/<c>NOTNULL</c> are postfix operators after an expression, and the
+    /// structural keywords end the projection list. Every other keyword — including
+    /// <c>END</c>, <c>OVER</c>, <c>WINDOW</c>, and <c>WITH</c> — aliases in SQLite.
+    /// </summary>
+    private static readonly HashSet<string> ReservedProjectionKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ADD", "ALL", "ALTER", "AND", "AS", "AUTOINCREMENT", "BETWEEN", "CHECK", "COLLATE",
+        "COMMIT", "CONSTRAINT", "CREATE", "CROSS", "DEFAULT", "DEFERRABLE", "DELETE",
+        "DISTINCT", "DROP", "ELSE", "ESCAPE", "EXCEPT", "EXISTS", "FOREIGN", "FROM", "FULL",
+        "GLOB", "GROUP", "HAVING", "IN", "INDEX", "INDEXED", "INNER", "INSERT", "INTERSECT",
+        "INTO", "IS", "ISNULL", "JOIN", "LEFT", "LIKE", "LIMIT", "MATCH", "NATURAL", "NOT",
+        "NOTNULL", "NOTHING", "NULL", "ON", "OR", "ORDER", "OUTER", "PRIMARY", "REFERENCES",
+        "REGEXP", "RETURNING", "RIGHT", "SELECT", "SET", "TABLE", "THEN", "TO",
+        "TRANSACTION", "UNION", "UNIQUE", "UPDATE", "USING", "VALUES", "WHEN", "WHERE",
+    };
+
+    // SQLite accepts `expr AS name` and the elided `expr name`; in both spellings the
+    // name may also be a string literal. Quoted identifiers are always names.
+    private string ParseAliasName()
+    {
+        if (_lexer.Current.Kind == TokenKind.String)
+        {
+            var value = _lexer.Current.Text;
+            _lexer.Next();
+            return value;
+        }
+
+        return ExpectIdentifier();
+    }
+
+    private string? TryParseElidedAlias()
+    {
+        var token = _lexer.Current;
+        if (token.Kind == TokenKind.String)
+        {
+            _lexer.Next();
+            return token.Text;
+        }
+
+        if (token.Kind != TokenKind.Identifier)
+            return null;
+
+        if (!token.IsQuoted)
+        {
+            // SQLite's tokenizer rejects a numeric literal glued to identifier text
+            // (`SELECT 12a3`, `SELECT 0xFF__FF` are "unrecognized token"), so such
+            // spellings must surface a syntax error instead of aliasing. Unquoted
+            // identifiers cannot glue to each other, quotes end in quote characters,
+            // and parentheses end in themselves, so a glued unquoted alias can only
+            // follow a numeric literal (`1.` forms included).
+            if (token.Offset > 0)
+            {
+                var previous = _sql[token.Offset - 1];
+                if (char.IsAsciiLetterOrDigit(previous) || previous is '_' or '$')
+                    return null;
+                if (previous == '.' && token.Offset > 1 && char.IsAsciiDigit(_sql[token.Offset - 2]))
+                    return null;
+            }
+
+            if (ReservedProjectionKeywords.Contains(token.Text))
+                return null;
+
+            // SQLite keeps `WINDOW` as the window-clause keyword when a window
+            // definition follows (`SELECT row_number() OVER w WINDOW w AS (...)`),
+            // but treats it as a plain alias otherwise (`SELECT 1 window`).
+            if (string.Equals(token.Text, "WINDOW", StringComparison.OrdinalIgnoreCase)
+                && LookaheadIsWindowDefinition())
+            {
+                return null;
+            }
+        }
+
+        _lexer.Next();
+        return token.Text;
+    }
+
+    private bool LookaheadIsWindowDefinition()
+    {
+        var snapshot = _lexer.Snapshot();
+        _lexer.Next(); // WINDOW
+        var isDefinition = _lexer.Current.Kind == TokenKind.Identifier;
+        if (isDefinition)
+        {
+            _lexer.Next();
+            isDefinition = CurrentIsKeyword("AS");
+        }
+
+        _lexer.Restore(snapshot);
+        return isDefinition;
     }
 
     private Expression? ParseFilter()
@@ -2089,11 +2558,13 @@ internal sealed class SqlParser
             return inner;
         }
 
-        var name = ParseSchemaQualifiedName();
+        var name = ParseSchemaQualifiedName(out var tableSourceToken);
         if (_lexer.Current.Kind != TokenKind.LeftParen)
         {
             var alias = ParseTableAlias();
-            return new NamedTableSource(name, alias, ParseTableIndexDirective());
+            var namedSource = new NamedTableSource(name, alias, ParseTableIndexDirective());
+            _spans?.RecordName(namedSource, tableSourceToken);
+            return namedSource;
         }
 
         var qualified = ManagedSchemaName.TrySplit(name, out var schema, out var functionName);
@@ -2251,6 +2722,23 @@ internal sealed class SqlParser
                     ParseIsRightOperand());
                 continue;
             }
+            // Postfix ISNULL / NOTNULL are spellings of IS NULL / IS NOT NULL.
+            if (ConsumeKeyword("ISNULL"))
+            {
+                expression = new BinaryExpression(
+                    expression,
+                    BinaryOperator.Is,
+                    new LiteralExpression(SqlValue.Null));
+                continue;
+            }
+            if (ConsumeKeyword("NOTNULL"))
+            {
+                expression = new BinaryExpression(
+                    expression,
+                    BinaryOperator.IsNot,
+                    new LiteralExpression(SqlValue.Null));
+                continue;
+            }
             var negated = ConsumeKeyword("NOT");
             if (ConsumeKeyword("BETWEEN"))
             {
@@ -2310,8 +2798,17 @@ internal sealed class SqlParser
                     : function;
                 continue;
             }
+            // Postfix NOT NULL is the third spelling of IS NOT NULL.
+            if (negated && ConsumeKeyword("NULL"))
+            {
+                expression = new BinaryExpression(
+                    expression,
+                    BinaryOperator.IsNot,
+                    new LiteralExpression(SqlValue.Null));
+                continue;
+            }
             if (negated)
-                throw Error("Expected BETWEEN, IN, LIKE, GLOB, REGEXP, or MATCH after NOT.");
+                throw Error("Expected BETWEEN, IN, LIKE, GLOB, REGEXP, MATCH, or NULL after NOT.");
             if (!TryParseEqualityOperator(out var operation))
                 return expression;
 
@@ -2633,19 +3130,32 @@ internal sealed class SqlParser
             return new RaiseExpression(RaiseAction.Ignore, null);
         }
 
-        var action = ConsumeKeyword("ROLLBACK")
-            ? RaiseAction.Rollback
-            : ConsumeKeyword("ABORT")
-                ? RaiseAction.Abort
-                : ConsumeKeyword("FAIL")
-                    ? RaiseAction.Fail
-                    : throw Error("Expected ROLLBACK, ABORT, FAIL, or IGNORE in RAISE().");
-        Expect(TokenKind.Comma);
-        if (_lexer.Current.Kind != TokenKind.String)
-            throw Error("RAISE() error messages must be string literals.");
+        // SQLite accepts both the shorthand RAISE('message') — an implicit ABORT with no
+        // comma — and the full RAISE(action, message) form (Turso parser.rs:1808-1836).
+        var shorthand = false;
+        RaiseAction action;
+        if (_lexer.Current.Kind == TokenKind.String)
+        {
+            action = RaiseAction.Abort;
+            shorthand = true;
+        }
+        else
+        {
+            action = ConsumeKeyword("ROLLBACK")
+                ? RaiseAction.Rollback
+                : ConsumeKeyword("ABORT")
+                    ? RaiseAction.Abort
+                    : ConsumeKeyword("FAIL")
+                        ? RaiseAction.Fail
+                        : throw Error("Expected ROLLBACK, ABORT, FAIL, or IGNORE in RAISE().");
+        }
 
-        var message = _lexer.Current.Text;
-        _lexer.Next();
+        if (!shorthand)
+            Expect(TokenKind.Comma);
+
+        // The message is an arbitrary expression (e.g. 'bad: ' || NEW.a); it is evaluated
+        // when the RAISE fires, not at parse time.
+        var message = ParseExpression();
         Expect(TokenKind.RightParen);
         return new RaiseExpression(action, message);
     }
@@ -2766,7 +3276,8 @@ internal sealed class SqlParser
 
     private EmbeddedColumn ParseColumnDefinition()
     {
-        var name = ExpectIdentifier();
+        var nameToken = ExpectIdentifierToken();
+        var name = nameToken.Text;
         var declaredType = ParseDeclaredType();
 
         var primaryKey = false;
@@ -2780,6 +3291,7 @@ internal sealed class SqlParser
         string? collation = null;
         Expression? generationExpression = null;
         var generatedStored = false;
+        var generationVirtualSpelled = false;
         string? generationSql = null;
         var foreignKeys = new List<ForeignKeyDefinition>();
         var checks = new List<CheckConstraint>();
@@ -2885,7 +3397,7 @@ internal sealed class SqlParser
             {
                 ExpectKeyword("ALWAYS");
                 ExpectKeyword("AS");
-                (generationExpression, generationSql, generatedStored) = ParseGenerationClause();
+                (generationExpression, generationSql, generatedStored, generationVirtualSpelled) = ParseGenerationClause();
                 generationAlways = true;
                 generationConstraintName = pendingConstraintName;
                 pendingConstraintName = null;
@@ -2893,7 +3405,7 @@ internal sealed class SqlParser
             }
             if (ConsumeKeyword("AS"))
             {
-                (generationExpression, generationSql, generatedStored) = ParseGenerationClause();
+                (generationExpression, generationSql, generatedStored, generationVirtualSpelled) = ParseGenerationClause();
                 generationConstraintName = pendingConstraintName;
                 pendingConstraintName = null;
                 continue;
@@ -2920,7 +3432,7 @@ internal sealed class SqlParser
         if (pendingConstraintName is not null)
             throw Error($"Expected a constraint after CONSTRAINT {pendingConstraintName}.");
 
-        return new EmbeddedColumn(
+        var column = new EmbeddedColumn(
             name,
             declaredType,
             primaryKey,
@@ -2951,7 +3463,10 @@ internal sealed class SqlParser
             autoIncrement,
             foreignKeys.Skip(1).ToArray(),
             primaryKeyDeclarationOrder,
-            uniqueDeclarationOrder);
+            uniqueDeclarationOrder,
+            GenerationVirtualSpelled: generationVirtualSpelled);
+        _spans?.RecordName(column, nameToken);
+        return column;
     }
 
     private string? ParseDeclaredType()
@@ -3018,8 +3533,10 @@ internal sealed class SqlParser
 
     // Parses the "(expr) [STORED|VIRTUAL]" body shared by GENERATED ALWAYS AS and the bare
     // AS shorthand. The raw expression source between the parentheses is captured so the
-    // generated column can be regenerated verbatim; VIRTUAL is the SQLite default.
-    private (Expression Expression, string Sql, bool Stored) ParseGenerationClause()
+    // generated column can be regenerated verbatim; VIRTUAL is the SQLite default. Also
+    // reports whether VIRTUAL was spelled out, because SQLite preserves the original
+    // spelling and schema regeneration must not add a VIRTUAL keyword that was not written.
+    private (Expression Expression, string Sql, bool Stored, bool VirtualSpelled) ParseGenerationClause()
     {
         Expect(TokenKind.LeftParen);
         var startOffset = _lexer.Current.Offset;
@@ -3029,12 +3546,13 @@ internal sealed class SqlParser
         var rawSql = _sql[startOffset..endOffset].Trim();
 
         var stored = false;
+        var virtualSpelled = false;
         if (ConsumeKeyword("STORED"))
             stored = true;
         else
-            ConsumeKeyword("VIRTUAL");
+            virtualSpelled = ConsumeKeyword("VIRTUAL");
 
-        return (expression, rawSql, stored);
+        return (expression, rawSql, stored, virtualSpelled);
     }
 
     private bool IsTableConstraintStart()
@@ -3167,16 +3685,28 @@ internal sealed class SqlParser
     }
 
     private string ParseSchemaQualifiedName()
-    {
-        var schemaOrName = ExpectIdentifier();
-        if (!Consume(TokenKind.Dot))
-            return schemaOrName;
+        => ParseSchemaQualifiedName(out _);
 
-        var name = ExpectIdentifier();
+    private string ParseSchemaQualifiedName(out SqlToken nameToken)
+        => ParseSchemaQualifiedName(out nameToken, out _);
+
+    private string ParseSchemaQualifiedName(out SqlToken nameToken, out SqlToken? schemaToken)
+    {
+        var schemaOrName = ExpectIdentifierToken();
+        if (!Consume(TokenKind.Dot))
+        {
+            nameToken = schemaOrName;
+            schemaToken = null;
+            return schemaOrName.Text;
+        }
+
+        var name = ExpectIdentifierToken();
         if (_lexer.Current.Kind == TokenKind.Dot)
             throw Error("Only one schema qualifier is supported for database objects.");
 
-        return ManagedSchemaName.Create(schemaOrName, name);
+        nameToken = name;
+        schemaToken = schemaOrName;
+        return ManagedSchemaName.Create(schemaOrName.Text, name.Text);
     }
 
     private string ParsePragmaQualifiedName()
@@ -3215,6 +3745,16 @@ internal sealed class SqlParser
     {
         if (!Consume(kind))
             throw Error($"Expected {kind}.");
+    }
+
+    private SqlToken ExpectToken(TokenKind kind)
+    {
+        if (_lexer.Current.Kind != kind)
+            throw Error($"Expected {kind}.");
+
+        var token = _lexer.Current;
+        _lexer.Next();
+        return token;
     }
 
     private EmbeddedSqlException Error(string message)

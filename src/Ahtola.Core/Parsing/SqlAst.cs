@@ -19,7 +19,8 @@ internal sealed record CreateTableStatement(
     int? PrimaryKeyDeclarationOrder = null,
     IReadOnlyList<ForeignKeyDefinition>? TableForeignKeys = null,
     bool Strict = false,
-    IReadOnlyList<SqlValue[]>? InitialRows = null) : ParsedStatement;
+    IReadOnlyList<SqlValue[]>? InitialRows = null,
+    string? Sql = null) : ParsedStatement;
 
 internal sealed record CreateTableAsSelectStatement(
     string Name,
@@ -36,7 +37,8 @@ internal sealed record CreateIndexStatement(
     bool Unique,
     bool IfNotExists,
     Expression? Where = null,
-    string? WhereSql = null) : ParsedStatement;
+    string? WhereSql = null,
+    string? Sql = null) : ParsedStatement;
 
 internal sealed record DropIndexStatement(string Name, bool IfExists) : ParsedStatement;
 
@@ -141,7 +143,7 @@ internal static class ManagedSchemaName
         => TrySplit(value, out var schema, out var name) ? schema + "." + name : value;
 }
 
-internal sealed record AlterTableAddColumnStatement(string TableName, EmbeddedColumn Column) : ParsedStatement;
+internal sealed record AlterTableAddColumnStatement(string TableName, EmbeddedColumn Column, string? ColumnSql = null) : ParsedStatement;
 
 internal sealed record AlterTableRenameStatement(string TableName, string NewName) : ParsedStatement;
 
@@ -210,7 +212,8 @@ internal sealed record UpdateStatement(
     Expression? Offset = null,
     string? Alias = null,
     TableSource? From = null,
-    InsertConflictAlgorithm? ConflictAlgorithm = null) : ParsedStatement
+    InsertConflictAlgorithm? ConflictAlgorithm = null,
+    TableIndexDirective? IndexDirective = null) : ParsedStatement
 {
     public IReadOnlyList<OrderByTerm> EffectiveOrderBy => OrderBy ?? [];
 
@@ -228,7 +231,8 @@ internal sealed record DeleteStatement(
     IReadOnlyList<OrderByTerm>? OrderBy = null,
     Expression? Limit = null,
     Expression? Offset = null,
-    string? Alias = null) : ParsedStatement
+    string? Alias = null,
+    TableIndexDirective? IndexDirective = null) : ParsedStatement
 {
     public IReadOnlyList<OrderByTerm> EffectiveOrderBy => OrderBy ?? [];
 
@@ -246,7 +250,7 @@ internal sealed record PragmaIndexInfoStatement(string IndexName) : ParsedStatem
 
 internal sealed record PragmaIndexXInfoStatement(string IndexName) : ParsedStatement;
 
-internal sealed record PragmaForeignKeyListStatement(string TableName) : ParsedStatement;
+internal sealed record PragmaForeignKeyListStatement(string? TableName) : ParsedStatement;
 
 internal sealed record PragmaForeignKeyCheckStatement(
     string? TableName,
@@ -263,7 +267,7 @@ internal sealed record PragmaIntegrityCheckStatement(
     string? TableName,
     string? Schema = null) : ParsedStatement;
 
-internal sealed record PragmaTableListStatement(string? Schema = null) : ParsedStatement;
+internal sealed record PragmaTableListStatement(string? Schema = null, string? Filter = null) : ParsedStatement;
 
 internal sealed record PragmaDatabaseListStatement(string? Schema = null) : ParsedStatement;
 
@@ -292,6 +296,29 @@ internal sealed record PragmaHeaderIntegerStatement(
 internal sealed record PragmaJournalModeStatement(string? Mode, string? Schema = null) : ParsedStatement;
 
 internal sealed record PragmaPageSizeStatement(int? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaCacheSizeStatement(long? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaCacheSpillStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaMaxPageCountStatement(long? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaIgnoreCheckConstraintsStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaRequireWhereStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaTempStoreStatement(int? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaWalCheckpointStatement(string? Mode, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaBusyTimeoutStatement(long? Value, string? Schema = null) : ParsedStatement;
+
+/// <summary>
+/// An unrecognized pragma: SQLite silently ignores unknown pragmas (Turso's
+/// translate/pragma.rs falls through without emitting anything), so the engine executes
+/// these as a no-op instead of rejecting them at prepare time.
+/// </summary>
+internal sealed record PragmaNoOpStatement(string Name, string? Schema = null) : ParsedStatement;
 
 internal sealed record PragmaPageCountStatement(string? Schema = null) : ParsedStatement;
 
@@ -450,7 +477,14 @@ internal enum CompoundOperator
     Except,
 }
 
-internal sealed record Projection(Expression Expression, string? Alias);
+internal sealed record Projection(
+    Expression Expression,
+    string? Alias,
+    // SQLite names a result column that has no alias after the exact source text of the
+    // expression that produced it (so `a + 1`, `count(*)`, `'text'`), including the
+    // parentheses of a parenthesized expression. The parser captures the expression span;
+    // when it is absent (rewritten projections), callers fall back to structural names.
+    string? SourceText = null);
 
 internal enum NullPlacement
 {
@@ -545,7 +579,8 @@ internal sealed record EmbeddedColumn(
     IReadOnlyList<ForeignKeyDefinition>? AdditionalForeignKeys = null,
     int? PrimaryKeyDeclarationOrder = null,
     int? UniqueDeclarationOrder = null,
-    bool StrictAny = false)
+    bool StrictAny = false,
+    bool GenerationVirtualSpelled = false)
 {
     // A column is generated when it carries a computed AS (...) expression. Generated
     // columns are materialized at write time; VIRTUAL and STORED differ only in whether
@@ -607,7 +642,8 @@ internal sealed record EmbeddedColumn(
             additionalForeignKeys,
             PrimaryKeyDeclarationOrder,
             UniqueDeclarationOrder,
-            StrictAny);
+            StrictAny,
+            GenerationVirtualSpelled);
 }
 
 // A column participating in a table-level PRIMARY KEY(...) clause, preserving the
@@ -683,7 +719,8 @@ internal sealed record EmbeddedIndex(
     InsertConflictAlgorithm? ConflictAlgorithm = null,
     Expression? Where = null,
     string? WhereSql = null,
-    int? ConstraintOrdinal = null)
+    int? ConstraintOrdinal = null,
+    string? Sql = null)
 {
     public bool IsPartial => Where is not null;
 }
@@ -711,7 +748,13 @@ internal enum RaiseAction
     Fail,
 }
 
-internal sealed record RaiseExpression(RaiseAction Action, string? Message) : Expression;
+/// <summary>
+/// A <c>RAISE(...)</c> call inside a trigger body. <see cref="Message"/> is an arbitrary
+/// expression (SQLite allows any expression, e.g. <c>RAISE(ABORT, 'bad: ' || NEW.a)</c>),
+/// or <c>null</c> for <c>RAISE(IGNORE)</c> and for the <c>RAISE('msg')</c> shorthand whose
+/// message is a plain string literal still represented as a <see cref="LiteralExpression"/>.
+/// </summary>
+internal sealed record RaiseExpression(RaiseAction Action, Expression? Message) : Expression;
 
 internal sealed record RowValueExpression(IReadOnlyList<Expression> Values) : Expression;
 

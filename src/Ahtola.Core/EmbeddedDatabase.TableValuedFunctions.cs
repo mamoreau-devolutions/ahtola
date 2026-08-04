@@ -32,7 +32,8 @@ public sealed partial class EmbeddedDatabase
                     new Dictionary<string, TriggerDefinition>(
                         context.Triggers ?? new Dictionary<string, TriggerDefinition>(),
                         StringComparer.OrdinalIgnoreCase)),
-                tableList.Schema ?? "main"),
+                tableList.Schema ?? "main",
+                tableList.Filter),
             _ => throw new EmbeddedSqlException(
                 $"Unsupported introspection pragma {statement.GetType().Name}."),
         };

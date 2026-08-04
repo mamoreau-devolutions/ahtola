@@ -24,7 +24,8 @@ public sealed partial class EmbeddedDatabase
         string[] Columns,
         SqlValue[] Values,
         bool HasRowid,
-        long RowId)
+        long RowId,
+        int RowidAliasColumnIndex = -1)
     {
         public SqlValue GetValue(string name)
         {
@@ -38,6 +39,25 @@ public sealed partial class EmbeddedDatabase
                 return SqlValue.Integer(RowId);
 
             throw new EmbeddedSqlException($"no such column: {name}");
+        }
+
+        // NEW/OLD columns carry no comparison affinity; only the rowid and rowid aliases
+        // keep INTEGER affinity (https://www.sqlite.org/forum/forumpost/819f2d6627; Turso
+        // translate/trigger_exec.rs populate_trigger_row_register_affinities).
+        public ColumnAffinity? GetComparisonAffinity(string name)
+        {
+            for (var index = 0; index < Columns.Length; index++)
+            {
+                if (!string.Equals(Columns[index], name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                return index == RowidAliasColumnIndex ? ColumnAffinity.Integer : null;
+            }
+
+            if (HasRowid && EmbeddedTable.IsRowidAliasName(name))
+                return ColumnAffinity.Integer;
+
+            return null;
         }
     }
 
@@ -94,6 +114,19 @@ public sealed partial class EmbeddedDatabase
             return image?.GetValue(name)
                 ?? throw new EmbeddedSqlException($"no such column: {column.Name}");
         }
+
+        public ColumnAffinity? GetComparisonAffinity(ColumnExpression column)
+        {
+            var image = string.Equals(column.Qualifier, "OLD", StringComparison.OrdinalIgnoreCase)
+                ? Old
+                : string.Equals(column.Qualifier, "NEW", StringComparison.OrdinalIgnoreCase)
+                    ? New
+                    : null;
+            if (image is null)
+                return null;
+
+            return image.GetComparisonAffinity(column.UnqualifiedName ?? column.Name);
+        }
     }
 
     private bool FireRowTriggers(
@@ -122,6 +155,10 @@ public sealed partial class EmbeddedDatabase
             var state = context.TriggerState
                 ?? throw new InvalidOperationException("Row trigger execution lost its statement state.");
             var savedLastInsertRowId = state.LiveLastInsertRowId;
+            // The connection-level changes() value is saved when a trigger fires and restored
+            // when the trigger returns. Trigger-body statements temporarily replace it (see the
+            // flush below), mirroring Turso's saved_changes_value around a trigger subprogram.
+            var savedChanges = _changes;
             var triggerContext = context with
             {
                 CommonTableExpressions = new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
@@ -156,6 +193,13 @@ public sealed partial class EmbeddedDatabase
                     state.Changed |= result.Changed;
                     if (result.LastInsertRowId is { } insertedRowId)
                         state.LiveLastInsertRowId = insertedRowId;
+                    // A trigger-body INSERT/UPDATE/DELETE replaces the changes() value visible to
+                    // subsequent body statements and counts toward total_changes(), per SQLite.
+                    if (bodyStatement is InsertStatement or UpdateStatement or DeleteStatement)
+                    {
+                        _changes = result.RowsAffected;
+                        _totalChanges += result.RowsAffected;
+                    }
                 }
             }
             catch (EmbeddedConflictFailException exception)
@@ -173,6 +217,9 @@ public sealed partial class EmbeddedDatabase
             finally
             {
                 state.LiveLastInsertRowId = savedLastInsertRowId;
+                // Restore the caller's changes() value; total_changes() is intentionally not
+                // restored so trigger-body rows remain counted.
+                _changes = savedChanges;
             }
         }
 
@@ -650,6 +697,7 @@ public sealed partial class EmbeddedDatabase
                 parameters,
                 context,
                 validateCheckConstraints: false,
+                enforceGeneratedNotNull: false,
                 evaluationRow: evaluationRow);
             var frame = new TriggerRowFrame(
                 CreateTriggerRowImage(table, original, oldRowId),
@@ -665,6 +713,9 @@ public sealed partial class EmbeddedDatabase
             try
             {
                 ResolveNotNullReplaceDefaults(context.ConflictAlgorithmOverride, table, updated, context);
+                // Deferred from BuildUpdatedRow so a BEFORE UPDATE trigger can observe/suppress
+                // the row first; RAISE(IGNORE) skips the update and the check entirely.
+                EnforceGeneratedNotNullConstraints(table, statement.TableName, updated);
                 ValidateCheckConstraints(statement.TableName, table, updated, newRowId, parameters, context);
                 if (context.ConflictAlgorithmOverride == InsertConflictAlgorithm.Replace)
                 {
@@ -1071,7 +1122,12 @@ public sealed partial class EmbeddedDatabase
         EmbeddedTable table,
         SqlValue[] row,
         long rowId)
-        => new(table.Columns, row.ToArray(), table.HasRowid, rowId);
+        => new(
+            table.Columns,
+            row.ToArray(),
+            table.HasRowid,
+            rowId,
+            table.RowidAliasColumnIndex);
 
     private TriggerRowImage CreateBeforeInsertImage(
         EmbeddedTable table,
@@ -1088,7 +1144,12 @@ public sealed partial class EmbeddedDatabase
         if (table.RowidAliasColumnIndex >= 0)
             values[table.RowidAliasColumnIndex] = SqlValue.Integer(-1);
         ComputeGeneratedColumns(table, table.Name, values, parameters, context);
-        return new TriggerRowImage(table.Columns, values, HasRowid: true, RowId: -1);
+        return new TriggerRowImage(
+            table.Columns,
+            values,
+            HasRowid: true,
+            RowId: -1,
+            RowidAliasColumnIndex: table.RowidAliasColumnIndex);
     }
 
     private static bool UsesAutomaticRowId(

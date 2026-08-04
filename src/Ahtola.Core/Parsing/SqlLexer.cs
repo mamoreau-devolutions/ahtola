@@ -341,6 +341,7 @@ internal sealed class SqlLexer
 
     private SqlToken ReadNumber(int start, bool startsWithDecimalPoint = false)
     {
+        var sawSeparator = false;
         if (!startsWithDecimalPoint
             && _sql[start] == '0'
             && _offset + 1 < _sql.Length
@@ -348,21 +349,18 @@ internal sealed class SqlLexer
             && char.IsAsciiHexDigit(_sql[_offset + 1]))
         {
             _offset++;
-            while (_offset < _sql.Length && char.IsAsciiHexDigit(_sql[_offset]))
-                _offset++;
-            return new SqlToken(TokenKind.Integer, _sql[start.._offset], start);
+            ConsumeDigitRun(hex: true, hasPrecedingDigit: false, ref sawSeparator);
+            return new SqlToken(TokenKind.Integer, NumericLiteralText(start, sawSeparator), start);
         }
 
-        while (_offset < _sql.Length && char.IsAsciiDigit(_sql[_offset]))
-            _offset++;
+        ConsumeDigitRun(hex: false, hasPrecedingDigit: true, ref sawSeparator);
 
         var isReal = startsWithDecimalPoint;
         if (!startsWithDecimalPoint && _offset < _sql.Length && _sql[_offset] == '.')
         {
             isReal = true;
             _offset++;
-            while (_offset < _sql.Length && char.IsAsciiDigit(_sql[_offset]))
-                _offset++;
+            ConsumeDigitRun(hex: false, hasPrecedingDigit: false, ref sawSeparator);
         }
 
         if (_offset < _sql.Length && _sql[_offset] is 'e' or 'E')
@@ -374,15 +372,58 @@ internal sealed class SqlLexer
             {
                 isReal = true;
                 _offset = exponentStart + 1;
-                while (_offset < _sql.Length && char.IsAsciiDigit(_sql[_offset]))
-                    _offset++;
+                ConsumeDigitRun(hex: false, hasPrecedingDigit: true, ref sawSeparator);
             }
         }
 
         return new SqlToken(
             isReal ? TokenKind.Real : TokenKind.Integer,
-            _sql[start.._offset],
+            NumericLiteralText(start, sawSeparator),
             start);
+    }
+
+    private string NumericLiteralText(int start, bool sawSeparator)
+    {
+        var text = _sql[start.._offset];
+        return sawSeparator ? text.Replace("_", string.Empty) : text;
+    }
+
+    /// <summary>
+    /// Consumes a run of digits that may contain SQLite 3.47 digit separators — single
+    /// underscores placed between two digits of the run — mirroring Turso's
+    /// <c>eat_while_number_digit</c>/<c>eat_while_number_hexdigit</c>
+    /// (sqlite/parser/src/lexer.rs). A separator without a digit on either side makes
+    /// the literal malformed (<c>1__2</c>, <c>0xFF_</c>), which throws instead of ending
+    /// the scan so the spelling surfaces as a tokenization error rather than turning the
+    /// trailing text into an identifier.
+    /// </summary>
+    private void ConsumeDigitRun(bool hex, bool hasPrecedingDigit, ref bool sawSeparator)
+    {
+        var lastWasDigit = hasPrecedingDigit;
+        while (_offset < _sql.Length)
+        {
+            var current = _sql[_offset];
+            var isDigit = hex ? char.IsAsciiHexDigit(current) : char.IsAsciiDigit(current);
+            if (isDigit)
+            {
+                _offset++;
+                lastWasDigit = true;
+                continue;
+            }
+
+            if (current != '_')
+                return;
+
+            var nextOffset = _offset + 1;
+            var nextIsDigit = nextOffset < _sql.Length
+                && (hex ? char.IsAsciiHexDigit(_sql[nextOffset]) : char.IsAsciiDigit(_sql[nextOffset]));
+            if (!lastWasDigit || !nextIsDigit)
+                throw new EmbeddedSqlException($"Invalid digit separator in numeric literal at offset {_offset}.");
+
+            _offset++;
+            sawSeparator = true;
+            lastWasDigit = false;
+        }
     }
 
     private SqlToken ReadIdentifier(int start)
@@ -445,9 +486,12 @@ internal sealed class SqlLexer
         return true;
     }
 
-    private static bool IsIdentifierStart(char value) => char.IsAsciiLetter(value) || value == '_';
+    // SQLite's tokenizer treats every non-ASCII character (byte >= 0x80) as an
+    // identifier character, so 'Café' is a plain identifier; case folding stays
+    // ASCII-only at name-resolution time.
+    private static bool IsIdentifierStart(char value) => char.IsAsciiLetter(value) || value == '_' || value >= 0x80;
 
-    private static bool IsIdentifierContinue(char value) => char.IsAsciiLetterOrDigit(value) || value is '_' or '$';
+    private static bool IsIdentifierContinue(char value) => char.IsAsciiLetterOrDigit(value) || value is '_' or '$' || value >= 0x80;
 }
 
 /// <summary>

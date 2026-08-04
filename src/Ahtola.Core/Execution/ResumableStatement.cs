@@ -1904,23 +1904,23 @@ public sealed class ResumableStatement : IDisposable
                     stream.Write(header);
                     break;
                 case SqlValueKind.Text:
-                {
-                    var bytes = Encoding.UTF8.GetBytes(value.AsText());
-                    stream.WriteByte(value.IsJson ? (byte)0x83 : (byte)0x03);
-                    BinaryPrimitives.WriteInt32LittleEndian(header, bytes.Length);
-                    stream.Write(header[..4]);
-                    stream.Write(bytes);
-                    break;
-                }
+                    {
+                        var bytes = Encoding.UTF8.GetBytes(value.AsText());
+                        stream.WriteByte(value.IsJson ? (byte)0x83 : (byte)0x03);
+                        BinaryPrimitives.WriteInt32LittleEndian(header, bytes.Length);
+                        stream.Write(header[..4]);
+                        stream.Write(bytes);
+                        break;
+                    }
                 case SqlValueKind.Blob:
-                {
-                    var bytes = value.AsBlob().ToArray();
-                    stream.WriteByte(0x04);
-                    BinaryPrimitives.WriteInt32LittleEndian(header, bytes.Length);
-                    stream.Write(header[..4]);
-                    stream.Write(bytes);
-                    break;
-                }
+                    {
+                        var bytes = value.AsBlob().ToArray();
+                        stream.WriteByte(0x04);
+                        BinaryPrimitives.WriteInt32LittleEndian(header, bytes.Length);
+                        stream.Write(header[..4]);
+                        stream.Write(bytes);
+                        break;
+                    }
                 default:
                     throw new InvalidOperationException($"Unknown SQL value kind {value.Kind}.");
             }

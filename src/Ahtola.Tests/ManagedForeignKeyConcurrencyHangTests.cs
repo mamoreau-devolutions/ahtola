@@ -10,7 +10,12 @@ using Ahtola.Data.Sqlite;
 // cooperatively cancels a token the test must observe — a true deadlock is a
 // blocked thread that never reaches a token check, so CancelAfter cannot
 // break it. Thread-abort is the intended forceful stop for a hang watchdog,
-// so suppress the obsoletion here.
+// so suppress the obsoletion here. The watchdog budget must cover the WHOLE
+// test — including the ~4,310-statement preseed phase — on slow CI runners,
+// so it is deliberately far larger than the measured-append budget asserted
+// inside the test. A genuinely quadratic engine spins for minutes in either
+// phase and still trips the watchdog; the quantitative detector is the
+// timed assertion, not the watchdog.
 #pragma warning disable CS0618
 
 namespace Ahtola.Tests;
@@ -37,8 +42,13 @@ public sealed class ManagedForeignKeyConcurrencyHangTests
     [TearDown]
     public void TearDown() => SqliteConnection.ClearAllPools();
 
+    // Watchdog only: bounds the whole test (schema + ~4,310 preseed statements +
+    // timed append) so a genuine FK-collection hang cannot stall the runner.
+    // Slow GitHub-hosted windows-latest runners legitimately need ~20-40s for the
+    // preseed alone, so this must stay far above the 15s budget of the timed
+    // assertion below — that assertion is the actual quadratic detector.
     [Test]
-    [Timeout(15_000)]
+    [Timeout(180_000)]
     public void ForeignKeyValidationIsNotQuadraticInTableRowCount()
     {
         var name = $"fkquad-{Guid.NewGuid():N}";

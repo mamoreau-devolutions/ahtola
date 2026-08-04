@@ -37,6 +37,28 @@ internal static class EmbeddedIndexFactory
 
             var expression = term.Expression
                 ?? throw new EmbeddedSqlException($"Index '{statement.Name}' has an invalid expression term.");
+
+            // SQLite/Turso backwards-compat quirk: a standalone string literal as an index
+            // term is interpreted as a column name, not a string constant (turso-src
+            // core/translate/index.rs resolve_index_column). Parentheses are already peeled
+            // at parse time, so a deeply wrapped literal still lands here.
+            if (expression is LiteralExpression { Value.Kind: SqlValueKind.Text } literal)
+            {
+                var literalColumn = literal.Value.AsText();
+                var literalColumnIndex = Array.FindIndex(
+                    table.Columns,
+                    candidate => string.Equals(candidate, literalColumn, StringComparison.OrdinalIgnoreCase));
+                if (literalColumnIndex < 0)
+                    throw new EmbeddedSqlException($"no such column: {literalColumn}");
+
+                columns[position] = new EmbeddedIndexColumn(
+                    table.Columns[literalColumnIndex],
+                    literalColumnIndex,
+                    term.Collation ?? table.ColumnDefinitions[literalColumnIndex].Collation,
+                    term.Descending);
+                continue;
+            }
+
             var expressionSql = term.ExpressionSql;
             if (string.IsNullOrWhiteSpace(expressionSql))
                 throw new EmbeddedSqlException($"Index '{statement.Name}' has an unreconstructable expression term.");
@@ -55,7 +77,8 @@ internal static class EmbeddedIndexFactory
             statement.Unique,
             columns,
             Where: statement.Where,
-            WhereSql: statement.WhereSql);
+            WhereSql: statement.WhereSql,
+            Sql: statement.Sql);
         IndexExpressionSemantics.ValidateDefinition(tableName, table, definition);
         return definition;
     }
@@ -71,7 +94,7 @@ internal static class IndexSqlFormatter
                 ? term.ExpressionSql
                     ?? throw new EmbeddedSqlException(
                         $"Index '{index.Name}' has an unreconstructable expression term.")
-                : QuoteIdentifier(term.Name);
+                : SqlIdentifierFormatter.QuoteIfNeeded(term.Name);
             if (!term.IsExpression && term.Collation is { } collation)
                 definition += " COLLATE " + FormatIdentifier(collation);
             if (term.Descending)
@@ -84,7 +107,7 @@ internal static class IndexSqlFormatter
             : " WHERE " + (index.WhereSql
                 ?? throw new EmbeddedSqlException(
                     $"Partial index '{index.Name}' has an unreconstructable WHERE predicate."));
-        return $"CREATE {unique}INDEX {QuoteIdentifier(index.Name)} ON {QuoteIdentifier(tableName)} "
+        return $"CREATE {unique}INDEX {SqlIdentifierFormatter.QuoteIfNeeded(index.Name)} ON {SqlIdentifierFormatter.QuoteIfNeeded(tableName)} "
             + $"({string.Join(", ", terms)}){where}";
     }
 
@@ -514,17 +537,22 @@ internal static class IndexExpressionSemantics
         }
     }
 
+    // Mirrors Turso's registry-driven check (Func::resolve_function(name, argc)
+    // .is_deterministic()): an index-expression call is usable when it resolves to
+    // a built-in *scalar* implementation that is deterministic. Aggregate and
+    // window implementations never qualify (MIN/MAX resolve to scalars only with
+    // two or more arguments), and the non-deterministic built-in set is excluded
+    // by the registry lookup.
     private static bool IsDeterministicBuiltin(FunctionExpression function)
     {
-        var name = function.Name.ToUpperInvariant();
-        if (name is "MIN" or "MAX")
-            return function.Arguments.Count >= 2;
+        if (EmbeddedDatabase.IsBuiltInAggregate(function)
+            || EmbeddedDatabase.IsManagedPercentileAggregate(function.Name)
+            || SqliteBuiltinFunctions.IsWindowOnly(function.Name))
+        {
+            return false;
+        }
 
-        return name is "ABS" or "COALESCE" or "FORMAT" or "GLOB" or "HEX" or "IFNULL"
-            or "INSTR" or "JSON" or "JSON_ARRAY" or "JSON_ARRAY_LENGTH" or "JSON_ERROR_POSITION"
-            or "JSON_EXTRACT" or "JSON_INSERT" or "JSON_OBJECT" or "JSON_PATCH" or "JSON_QUOTE"
-            or "JSON_REMOVE" or "JSON_REPLACE" or "JSON_SET" or "JSON_TYPE" or "JSON_VALID"
-            or "LENGTH" or "LIKE" or "LOWER" or "NULLIF" or "PRINTF" or "TYPEOF" or "UPPER";
+        return SqliteBuiltinFunctions.IsDeterministic(function.Name);
     }
 
     private static void ValidateCollation(string indexName, string name)

@@ -221,14 +221,13 @@ public class GeneratedColumnsTests
     [Test]
     public void NonDeterministicFunctionInGenerationIsRejectedByManagedEngine()
     {
-        // random() is outside the deterministic allow-list. SQLite rejects it too (as a
-        // non-deterministic function), but the managed message is the engine's own, so it
-        // is asserted directly rather than differentially.
+        // random() is non-deterministic. SQLite rejects it too, and the managed engine now
+        // uses SQLite's exact diagnostic.
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
 
         var act = () => Execute(connection, "CREATE TABLE t(a INT, v AS (random()))");
-        act.Should().Throw<EmbeddedSqlException>().WithMessage("*not allowed in a generated column*");
+        act.Should().Throw<EmbeddedSqlException>().WithMessage("non-deterministic functions prohibited in generated columns");
     }
 
     [Test]
@@ -246,7 +245,7 @@ public class GeneratedColumnsTests
             statement.Bind(1, SqlValue.Integer(1));
             statement.Step();
         };
-        act.Should().Throw<EmbeddedSqlException>().WithMessage("*bound parameter*");
+        act.Should().Throw<EmbeddedSqlException>().WithMessage("bind parameters prohibited in generated columns");
     }
 
     [Test]
@@ -389,9 +388,9 @@ public class GeneratedColumnsTests
             Scalar(sqlite, "SELECT hidden FROM pragma_table_xinfo('t') WHERE name = 'b';").Should().Be(2L);
             Scalar(sqlite, "SELECT sql FROM sqlite_schema WHERE name = 't';")
                 .Should().BeOfType<string>()
-                .Which.Should().Contain("CONSTRAINT \"generated_c\" GENERATED ALWAYS AS (b + 1) VIRTUAL")
-                .And.Contain("CONSTRAINT \"positive_c\" CHECK (c > 0)")
-                .And.Contain("UNIQUE (\"c\") ON CONFLICT IGNORE");
+                .Which.Should().Contain("CONSTRAINT generated_c GENERATED ALWAYS AS (b + 1) VIRTUAL")
+                .And.Contain("CONSTRAINT positive_c CHECK (c > 0)")
+                .And.Contain("UNIQUE(c) ON CONFLICT IGNORE");
         }
         finally
         {

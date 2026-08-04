@@ -217,12 +217,13 @@ public sealed class ManagedBackupSnapshotTests
             using var reopened = OpenManagedConnection(destinationPath);
             var schemaSql = reopened.ExecuteScalar<string>(
                 "SELECT sql FROM sqlite_master WHERE name = 'constrained';");
-            schemaSql.Should().Contain("CONSTRAINT \"uq_code\" UNIQUE ON CONFLICT IGNORE")
-                .And.Contain("CONSTRAINT \"nn_required\" NOT NULL ON CONFLICT REPLACE DEFAULT (2 + 3)")
+            // Backups copy the stored CREATE text verbatim, including the original quoting.
+            schemaSql.Should().Contain("CONSTRAINT uq_code UNIQUE ON CONFLICT IGNORE")
+                .And.Contain("CONSTRAINT nn_required NOT NULL ON CONFLICT REPLACE DEFAULT (2 + 3)")
                 .And.Contain("DOUBLE PRECISION DEFAULT (abs(-4) + 1)")
                 .And.Contain("CHARACTER VARYING(20)")
-                .And.Contain("CONSTRAINT \"positive\" CHECK (amount > 0)")
-                .And.Contain("CONSTRAINT \"metric_value\" UNIQUE (\"label\", \"amount\") ON CONFLICT IGNORE");
+                .And.Contain("CONSTRAINT positive CHECK (amount > 0)")
+                .And.Contain("CONSTRAINT metric_value UNIQUE (label, amount) ON CONFLICT IGNORE");
 
             reopened.ExecuteScalar<long>(
                 "SELECT required FROM constrained WHERE id = 1;").Should().Be(5);
@@ -244,8 +245,8 @@ public sealed class ManagedBackupSnapshotTests
                 "SELECT amount FROM constrained WHERE id = 2;").Should().Be(5);
             var generatedSchema = reopened.ExecuteScalar<string>(
                 "SELECT sql FROM sqlite_master WHERE name = 'generated_key';");
-            generatedSchema.Should().Contain("\"doubled\" INTEGER AS (base * 2) STORED")
-                .And.Contain("PRIMARY KEY (\"tenant\", \"sequence\")");
+            generatedSchema.Should().Contain("doubled INTEGER AS (base * 2) STORED")
+                .And.Contain("PRIMARY KEY(tenant, sequence)");
             reopened.ExecuteScalar<long>(
                 "SELECT doubled FROM generated_key WHERE tenant = 'tenant' AND sequence = 1;").Should().Be(14);
             reopened.Invoking(connection => connection.ExecuteNonQuery(

@@ -343,15 +343,11 @@ public sealed class ExtendedDmlGrammarSqlRoutingTests
             """
             CREATE TABLE t(id INTEGER, value INTEGER);
             CREATE TABLE source(id INTEGER, value INTEGER);
-            CREATE INDEX t_value ON t(value);
             INSERT INTO t VALUES (1, 10);
             INSERT INTO source VALUES (1, 99);
             """);
         var cases = new[]
         {
-            ("UPDATE t INDEXED BY t_value SET value = 20;", "INDEXED BY"),
-            ("UPDATE t NOT INDEXED SET value = 20;", "NOT INDEXED"),
-            ("DELETE FROM t INDEXED BY t_value WHERE id = 1;", "INDEXED BY"),
             ("UPDATE t SET value = 20 ORDER BY id;", "ORDER BY without LIMIT"),
             ("DELETE FROM t ORDER BY id;", "ORDER BY without LIMIT"),
 

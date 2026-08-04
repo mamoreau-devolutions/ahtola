@@ -332,7 +332,7 @@ public sealed class ManagedSchemaOverflowStorageTests
                 Execute(connection, "PRAGMA foreign_keys=ON;");
                 ScalarText(connection, "SELECT sql FROM sqlite_schema WHERE name='parent';")
                     .Should().Contain("COLLATE NOCASE")
-                    .And.Contain("\"sequence\" DESC")
+                    .And.Contain("sequence DESC")
                     .And.Contain("STORED")
                     .And.Contain(payload);
                 ScalarText(connection, "SELECT sql FROM sqlite_schema WHERE name='child';")

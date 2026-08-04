@@ -92,7 +92,7 @@ public class CompiledJoinVdbeSqlRoutingTests
     }
 
     [Test]
-    public void UsingAndNaturalJoinsProduceCoalescedOutputsOnTheEvaluator()
+    public void NaturalJoinCoalescesWhileFullJoinUsingIsRejected()
     {
         using var connection = new EmbeddedDatabase().Connect();
         Execute(connection, "CREATE TABLE l(id INTEGER, tag TEXT);");
@@ -100,20 +100,17 @@ public class CompiledJoinVdbeSqlRoutingTests
         Execute(connection, "INSERT INTO l VALUES (1, 'l1'), (2, 'l2');");
         Execute(connection, "INSERT INTO r VALUES (2, 'r2'), (3, 'r3');");
 
-        var usingRows = ReadRows(connection, "SELECT * FROM l FULL JOIN r USING (id);");
-        usingRows.Should().HaveCount(3);
-        usingRows[0].Should().Equal(SqlValue.Integer(1), SqlValue.Text("l1"), SqlValue.Null);
-        usingRows[1].Should().Equal(SqlValue.Integer(2), SqlValue.Text("l2"), SqlValue.Text("r2"));
-        usingRows[2].Should().Equal(SqlValue.Integer(3), SqlValue.Null, SqlValue.Text("r3"));
+        // Turso cannot express coalesced USING output in its full-join planner, so FULL
+        // OUTER JOIN ... USING errors (turso-src/core/translate/optimizer/join.rs).
+        Assert.Throws<EmbeddedSqlException>(
+            () => ReadRows(connection, "SELECT * FROM l FULL JOIN r USING (id);"))!
+            .Message.Should().Contain("FULL OUTER JOIN requires an equality condition");
 
         var natural = ReadRows(connection, "SELECT id, tag, note FROM l NATURAL LEFT JOIN r;");
         natural.Should().HaveCount(2);
         natural[0].Should().Equal(SqlValue.Integer(1), SqlValue.Text("l1"), SqlValue.Null);
         natural[1].Should().Equal(SqlValue.Integer(2), SqlValue.Text("l2"), SqlValue.Text("r2"));
 
-        // A star projection consumes the join's already-coalesced output columns, so it lowers.
-        Opcodes(connection, "EXPLAIN SELECT * FROM l FULL JOIN r USING (id);")
-            .Should().Contain("OpenJoinCursor").And.Contain("ProjectRegisters");
         // Naming the coalesced column explicitly needs the unqualified-column resolver, which the
         // compiled join builder cannot model, so that shape stays on the evaluator.
         AssertEvaluatorOwned(connection, "SELECT id, tag, note FROM l NATURAL LEFT JOIN r;");
@@ -473,7 +470,7 @@ public class CompiledJoinVdbeSqlRoutingTests
     }
 
     [Test]
-    public void NWayOuterUsingResultsMatchSqlite()
+    public void NWayOuterUsingChainsAreRejectedLikeTurso()
     {
         string[] setup =
         [
@@ -484,21 +481,20 @@ public class CompiledJoinVdbeSqlRoutingTests
             "INSERT INTO b VALUES (2, 'b2'), (3, 'b3'), (4, 'b4'), (6, 'b6');",
             "INSERT INTO c VALUES (2, 'c2'), (3, 'c3'), (5, 'c5');",
         ];
-        const string sql = """
-            SELECT id, av, bv, cv
-            FROM a FULL JOIN b USING (id)
-            FULL JOIN c USING (id)
-            ORDER BY id;
-            """;
-
-        AssertMatchesSqlite(setup, sql);
-        AssertMatchesSqlite(
-            setup,
-            "SELECT a.*, b.* FROM a FULL JOIN b USING (id);");
         using var connection = OpenManaged(setup);
-        // Coalesced USING outputs are not representable in the compiled join builder, so the
-        // whole statement stays on the evaluator while still matching SQLite.
-        AssertEvaluatorOwned(connection, sql);
+
+        // SQLite executes FULL OUTER JOIN ... USING chains, but Turso cannot plan them, so
+        // Ahtola mirrors Turso's rejection instead of matching SQLite.
+        Assert.Throws<EmbeddedSqlException>(() => ReadRows(connection, """
+                SELECT id, av, bv, cv
+                FROM a FULL JOIN b USING (id)
+                FULL JOIN c USING (id)
+                ORDER BY id;
+                """))!
+            .Message.Should().Contain("FULL OUTER JOIN chaining is not yet supported");
+        Assert.Throws<EmbeddedSqlException>(
+            () => ReadRows(connection, "SELECT a.*, b.* FROM a FULL JOIN b USING (id);"))!
+            .Message.Should().Contain("FULL OUTER JOIN requires an equality condition");
     }
 
     [Test]

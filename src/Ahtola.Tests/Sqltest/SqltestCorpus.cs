@@ -204,9 +204,15 @@ internal static class SqltestCorpus
         foreach (var root in Ancestors(TestContext.CurrentContext.TestDirectory)
                      .Concat(Ancestors(Directory.GetCurrentDirectory())))
         {
-            var candidate = Path.Combine(root.FullName, "bindings", "dotnet", "src", "Ahtola.Tests");
-            if (Directory.Exists(candidate))
-                return candidate;
+            foreach (var layout in new[]
+                     {
+                         Path.Combine(root.FullName, "src", "Ahtola.Tests"),
+                         Path.Combine(root.FullName, "bindings", "dotnet", "src", "Ahtola.Tests"),
+                     })
+            {
+                if (Directory.Exists(layout))
+                    return layout;
+            }
         }
 
         throw new DirectoryNotFoundException("Could not locate the Ahtola.Tests project directory.");

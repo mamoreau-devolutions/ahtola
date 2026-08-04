@@ -1753,8 +1753,6 @@ public sealed class ManagedTriggerRowSemanticsTests
             "CREATE TRIGGER bad AFTER INSERT ON data BEGIN INSERT INTO trace VALUES (?); END",
             "CREATE TRIGGER bad AFTER INSERT ON data BEGIN CREATE TABLE nested(id); END",
             "CREATE TRIGGER bad AFTER INSERT ON data BEGIN PRAGMA foreign_keys; END",
-            "CREATE TRIGGER bad AFTER INSERT ON data BEGIN "
-                + "SELECT RAISE(FAIL, 'dynamic-' || NEW.id); END",
         };
         foreach (var sql in rejected)
         {
@@ -2003,7 +2001,7 @@ public sealed class ManagedTriggerRowSemanticsTests
     }
 
     [Test]
-    public void TriggerDependentColumnRenamesRewriteBodiesAndTableRenamesStayRejected()
+    public void TriggerDependentColumnAndTableRenamesRewriteBodies()
     {
         using var database = new EmbeddedDatabase();
         using var connection = database.Connect();
@@ -2014,16 +2012,20 @@ public sealed class ManagedTriggerRowSemanticsTests
             "CREATE TRIGGER data_after AFTER INSERT ON data "
                 + "BEGIN INSERT INTO trace VALUES (NEW.id); END");
 
-        // RENAME TABLE still cannot rewrite trigger bodies, so it must keep rejecting.
-        Assert.Throws<EmbeddedSqlException>(() => Execute(connection, "ALTER TABLE data RENAME TO renamed"));
-
-        Execute(connection, "ALTER TABLE data RENAME COLUMN id TO value");
+        // RENAME TABLE rewrites trigger bodies, so it succeeds and keeps firing.
+        Execute(connection, "ALTER TABLE data RENAME TO renamed");
         ReadRows(connection, "SELECT sql FROM sqlite_schema WHERE name='data_after'").Single()[0].AsText()
             .Should().Be(
-                "CREATE TRIGGER data_after AFTER INSERT ON data "
+                "CREATE TRIGGER data_after AFTER INSERT ON renamed "
+                    + "BEGIN INSERT INTO trace VALUES (NEW.id); END");
+
+        Execute(connection, "ALTER TABLE renamed RENAME COLUMN id TO value");
+        ReadRows(connection, "SELECT sql FROM sqlite_schema WHERE name='data_after'").Single()[0].AsText()
+            .Should().Be(
+                "CREATE TRIGGER data_after AFTER INSERT ON renamed "
                     + "BEGIN INSERT INTO trace VALUES (NEW.value); END");
 
-        Execute(connection, "INSERT INTO data VALUES (1)");
+        Execute(connection, "INSERT INTO renamed VALUES (1)");
         ReadRows(connection, "SELECT id FROM trace").Should().ContainSingle()
             .Which[0].Should().Be(SqlValue.Integer(1));
     }

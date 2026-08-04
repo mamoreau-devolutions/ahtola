@@ -807,7 +807,7 @@ public class EmbeddedEngineTests
         statement.Step().Should().Be(StatementStepResult.Row);
         statement.GetValue(0).Should().Be(SqlValue.Text("users"));
         statement.GetValue(1).Should().Be(SqlValue.Text("table"));
-        statement.GetValue(2).AsText().Should().Contain("CREATE TABLE \"users\"");
+        statement.GetValue(2).AsText().Should().Contain("CREATE TABLE users");
         statement.Step().Should().Be(StatementStepResult.Done);
     }
 
@@ -1658,10 +1658,10 @@ public class EmbeddedEngineTests
             master.GetValue(0).Should().Be(SqlValue.Text("index"));
             master.GetValue(1).Should().Be(SqlValue.Text("idx_a"));
             master.GetValue(2).Should().Be(SqlValue.Text("t"));
-            master.GetValue(3).AsText().Should().Be("CREATE INDEX \"idx_a\" ON \"t\" (\"a\")");
+            master.GetValue(3).AsText().Should().Be("CREATE INDEX idx_a ON t(a)");
             master.Step().Should().Be(StatementStepResult.Row);
             master.GetValue(1).Should().Be(SqlValue.Text("idx_bc"));
-            master.GetValue(3).AsText().Should().Be("CREATE UNIQUE INDEX \"idx_bc\" ON \"t\" (\"b\", \"c\" DESC)");
+            master.GetValue(3).AsText().Should().Be("CREATE UNIQUE INDEX idx_bc ON t(b, c DESC)");
             master.Step().Should().Be(StatementStepResult.Done);
         }
 
@@ -1846,7 +1846,7 @@ public class EmbeddedEngineTests
         using var schema = connection.Prepare("SELECT sql FROM sqlite_schema WHERE name = 'idx';");
         schema.Step().Should().Be(StatementStepResult.Row);
         schema.GetValue(0).AsText().Should().Be(
-            "CREATE UNIQUE INDEX \"idx\" ON \"t\" (lower(a) COLLATE NOCASE DESC) WHERE active = 1");
+            "CREATE UNIQUE INDEX idx ON t(lower(a) COLLATE NOCASE DESC) WHERE active = 1");
     }
 
     [Test]
@@ -1928,7 +1928,7 @@ public class EmbeddedEngineTests
         {
             master.Step().Should().Be(StatementStepResult.Row);
             master.GetValue(0).Should().Be(SqlValue.Text("renamed"));
-            master.GetValue(1).AsText().Should().Be("CREATE INDEX \"idx_ab\" ON \"renamed\" (\"id\", \"b\")");
+            master.GetValue(1).AsText().Should().Be("CREATE INDEX idx_ab ON \"renamed\"(id, b)");
             master.Step().Should().Be(StatementStepResult.Done);
         }
 
@@ -2202,7 +2202,7 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void FullJoinUsingCoalescesFromWhicheverSideSurvives()
+    public void FullJoinUsingIsRejectedLikeTurso()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
@@ -2211,11 +2211,11 @@ public class EmbeddedEngineTests
         Execute(connection, "INSERT INTO t1 VALUES (1, 'b1'), (3, 'b3');");
         Execute(connection, "INSERT INTO t2 VALUES (1, 'c1'), (4, 'c4');");
 
-        var rows = ReadRows(connection, "SELECT a, b, c FROM t1 FULL JOIN t2 USING(a);");
-        rows.Should().HaveCount(3);
-        rows[0].Should().Equal(SqlValue.Integer(1), SqlValue.Text("b1"), SqlValue.Text("c1"));
-        rows[1].Should().Equal(SqlValue.Integer(3), SqlValue.Text("b3"), SqlValue.Null);
-        rows[2].Should().Equal(SqlValue.Integer(4), SqlValue.Null, SqlValue.Text("c4"));
+        // Turso's full-join planner cannot express coalesced USING output, so it rejects the
+        // shape; Ahtola mirrors the rejection (turso-src/core/translate/optimizer/join.rs).
+        Assert.Throws<EmbeddedSqlException>(
+            () => ReadRows(connection, "SELECT a, b, c FROM t1 FULL JOIN t2 USING(a);"))!
+            .Message.Should().StartWith("FULL OUTER JOIN requires an equality condition");
     }
 
     [Test]
@@ -2486,14 +2486,16 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void ViewExplicitColumnCountMismatchIsRejected()
+    public void ViewExplicitColumnCountMismatchIsRejectedAtQueryTime()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
         Execute(connection, "CREATE TABLE t(a INTEGER, b INTEGER);");
 
-        Assert.Throws<EmbeddedSqlException>(
-            () => Execute(connection, "CREATE VIEW v(only_one) AS SELECT a, b FROM t;"));
+        // SQLite defers column-arity validation to query time, so CREATE succeeds.
+        Execute(connection, "CREATE VIEW v(only_one) AS SELECT a, b FROM t;");
+        var error = Assert.Throws<EmbeddedSqlException>(() => ReadRows(connection, "SELECT * FROM v;"));
+        error!.Message.Should().Contain("columns for v");
     }
 
     [Test]
@@ -2553,15 +2555,17 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void SelfReferentialViewIsRejectedAsCircular()
+    public void SelfReferentialViewIsRejectedAsCircularAtQueryTime()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
 
-        var error = Assert.Throws<EmbeddedSqlException>(
-            () => Execute(connection, "CREATE VIEW v AS SELECT * FROM v;"));
+        // SQLite defers view-body validation to query time, so CREATE succeeds and the
+        // circular definition is reported when the view is queried.
+        Execute(connection, "CREATE VIEW v AS SELECT * FROM v;");
+        var error = Assert.Throws<EmbeddedSqlException>(() => ReadRows(connection, "SELECT * FROM v;"));
         error!.Message.Should().Contain("circularly defined");
-        AssertCount(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view';", 0);
+        AssertCount(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view';", 1);
     }
 
     [Test]
