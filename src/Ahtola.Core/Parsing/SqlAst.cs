@@ -250,7 +250,7 @@ internal sealed record PragmaIndexInfoStatement(string IndexName) : ParsedStatem
 
 internal sealed record PragmaIndexXInfoStatement(string IndexName) : ParsedStatement;
 
-internal sealed record PragmaForeignKeyListStatement(string TableName) : ParsedStatement;
+internal sealed record PragmaForeignKeyListStatement(string? TableName) : ParsedStatement;
 
 internal sealed record PragmaForeignKeyCheckStatement(
     string? TableName,
@@ -267,7 +267,7 @@ internal sealed record PragmaIntegrityCheckStatement(
     string? TableName,
     string? Schema = null) : ParsedStatement;
 
-internal sealed record PragmaTableListStatement(string? Schema = null) : ParsedStatement;
+internal sealed record PragmaTableListStatement(string? Schema = null, string? Filter = null) : ParsedStatement;
 
 internal sealed record PragmaDatabaseListStatement(string? Schema = null) : ParsedStatement;
 
@@ -296,6 +296,10 @@ internal sealed record PragmaHeaderIntegerStatement(
 internal sealed record PragmaJournalModeStatement(string? Mode, string? Schema = null) : ParsedStatement;
 
 internal sealed record PragmaPageSizeStatement(int? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaCacheSizeStatement(long? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaCacheSpillStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
 
 internal sealed record PragmaPageCountStatement(string? Schema = null) : ParsedStatement;
 

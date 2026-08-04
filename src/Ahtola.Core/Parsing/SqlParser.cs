@@ -226,15 +226,17 @@ internal sealed class SqlParser
         if (name.Equals("index_xinfo", StringComparison.OrdinalIgnoreCase))
             return new PragmaIndexXInfoStatement(ParsePragmaObjectName(schema));
         if (name.Equals("foreign_key_list", StringComparison.OrdinalIgnoreCase))
-            return new PragmaForeignKeyListStatement(ParsePragmaObjectName(schema));
+            return new PragmaForeignKeyListStatement(ParseOptionalPragmaObjectName(name, schema));
         if (name.Equals("foreign_key_check", StringComparison.OrdinalIgnoreCase))
             return new PragmaForeignKeyCheckStatement(
                 ParseOptionalPragmaObjectName(name, schema),
                 schema);
         if (name.Equals("table_list", StringComparison.OrdinalIgnoreCase))
         {
-            RequireReadOnlyPragma(name);
-            return new PragmaTableListStatement(schema);
+            var filter = _lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End
+                ? null
+                : ParsePragmaTableListFilter();
+            return new PragmaTableListStatement(schema, filter);
         }
         if (name.Equals("database_list", StringComparison.OrdinalIgnoreCase))
         {
@@ -279,6 +281,10 @@ internal sealed class SqlParser
             return new PragmaJournalModeStatement(ParseOptionalPragmaMode(name), schema);
         if (name.Equals("page_size", StringComparison.OrdinalIgnoreCase))
             return new PragmaPageSizeStatement(ParseOptionalPragmaInteger(name), schema);
+        if (name.Equals("cache_size", StringComparison.OrdinalIgnoreCase))
+            return new PragmaCacheSizeStatement(ParseOptionalPragmaLong(name), schema);
+        if (name.Equals("cache_spill", StringComparison.OrdinalIgnoreCase))
+            return new PragmaCacheSpillStatement(ParseOptionalPragmaBoolean(name), schema);
         if (name.Equals("page_count", StringComparison.OrdinalIgnoreCase))
         {
             RequireReadOnlyPragma(name);
@@ -334,9 +340,20 @@ internal sealed class SqlParser
 
     private string ParsePragmaObjectName(string? pragmaSchema)
     {
-        Expect(TokenKind.LeftParen);
-        var objectName = ParsePragmaQualifiedName();
-        Expect(TokenKind.RightParen);
+        // SQLite accepts both the parenthesized form (PRAGMA table_info('t')) and the
+        // equals form (PRAGMA table_info=t) for object-name pragmas.
+        string objectName;
+        if (Consume(TokenKind.Equal))
+        {
+            objectName = ParsePragmaQualifiedName();
+        }
+        else
+        {
+            Expect(TokenKind.LeftParen);
+            objectName = ParsePragmaQualifiedName();
+            Expect(TokenKind.RightParen);
+        }
+
         if (ManagedSchemaName.TrySplit(objectName, out var objectSchema, out var localName))
         {
             if (pragmaSchema is not null
@@ -353,11 +370,34 @@ internal sealed class SqlParser
             : ManagedSchemaName.Create(pragmaSchema, localName);
     }
 
+    /// <summary>
+    /// Parses the optional filter argument of <c>PRAGMA table_list</c>. The schema is carried
+    /// by the pragma prefix (<c>main.table_list</c>), so only the local table name is kept.
+    /// </summary>
+    private string ParsePragmaTableListFilter()
+    {
+        string objectName;
+        if (Consume(TokenKind.Equal))
+        {
+            objectName = ParsePragmaQualifiedName();
+        }
+        else
+        {
+            Expect(TokenKind.LeftParen);
+            objectName = ParsePragmaQualifiedName();
+            Expect(TokenKind.RightParen);
+        }
+
+        return ManagedSchemaName.TrySplit(objectName, out _, out var localName)
+            ? localName
+            : objectName;
+    }
+
     private string? ParseOptionalPragmaObjectName(string name, string? pragmaSchema)
     {
         if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
             return null;
-        if (_lexer.Current.Kind != TokenKind.LeftParen)
+        if (_lexer.Current.Kind is not (TokenKind.LeftParen or TokenKind.Equal))
             throw Error($"PRAGMA {name} requires a parenthesized table name.");
         return ParsePragmaObjectName(pragmaSchema);
     }
@@ -469,6 +509,59 @@ internal sealed class SqlParser
             && double.IsFinite(real)
             && real is >= int.MinValue and <= int.MaxValue
             ? (int)real
+            : 0;
+    }
+
+    private long? ParseOptionalPragmaLong(string name)
+    {
+        if (Consume(TokenKind.Equal))
+            return ParsePragmaLong(name);
+
+        if (Consume(TokenKind.LeftParen))
+        {
+            var value = ParsePragmaLong(name);
+            Expect(TokenKind.RightParen);
+            return value;
+        }
+
+        if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
+            return null;
+
+        throw Error($"PRAGMA {name} requires '=' or a parenthesized value.");
+    }
+
+    private long ParsePragmaLong(string name)
+    {
+        var sign = string.Empty;
+        if (Consume(TokenKind.Minus))
+            sign = "-";
+        else if (Consume(TokenKind.Plus))
+            sign = "+";
+
+        var token = _lexer.Current;
+        _lexer.Next();
+        return token.Kind switch
+        {
+            TokenKind.Integer => ParsePragmaLongText(sign + token.Text),
+            TokenKind.Real => ParsePragmaLongReal(sign + token.Text),
+            TokenKind.Identifier or TokenKind.String when sign.Length == 0 => ParsePragmaLongText(token.Text),
+            _ => throw Error($"Invalid value for PRAGMA {name}."),
+        };
+    }
+
+    private static long ParsePragmaLongText(string value)
+    {
+        return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer)
+            ? integer
+            : 0;
+    }
+
+    private static long ParsePragmaLongReal(string value)
+    {
+        return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var real)
+            && double.IsFinite(real)
+            && real is >= long.MinValue and <= long.MaxValue
+            ? (long)real
             : 0;
     }
 

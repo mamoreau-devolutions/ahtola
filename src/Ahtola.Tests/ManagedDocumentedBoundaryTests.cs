@@ -15,7 +15,6 @@ public sealed class ManagedDocumentedBoundaryTests
 {
     private static readonly string[] UnsupportedPragmas =
     [
-        "PRAGMA cache_size = 100",
         "PRAGMA synchronous = FULL",
         "PRAGMA locking_mode = EXCLUSIVE",
         "PRAGMA busy_timeout = 100",

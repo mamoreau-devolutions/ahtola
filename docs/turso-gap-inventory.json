@@ -881,8 +881,8 @@
       "id": "compile-pragma-cache-size-unsupported",
       "layer": "compilation",
       "kind": "missing",
-      "turso_ref": "turso-src/core/translate/pragma.rs (PRAGMA cache_size)",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/translate/pragma.rs (PRAGMA cache_size / cache_spill; update_cache_size at pragma.rs:1775)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (ParsePragma cache_size/cache_spill arms, ParseOptionalPragmaLong), src/Ahtola.Core/EmbeddedDatabase.cs (ExecutePragmaCacheSize + NormalizeCacheSize + ExecutePragmaCacheSpill)",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
@@ -892,8 +892,8 @@
         "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-no-index",
         "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-multi-index"
       ],
-      "notes": "`PRAGMA cache_size = N` is rejected outright (\"Unsupported PRAGMA cache_size\") rather than being accepted and either applied or silently ignored/no-op'd the way Turso/SQLite do; this blocks an entire family of cache-spill conformance tests that otherwise only depend on the PRAGMA being accepted, not its effect.",
-      "status": "open"
+      "notes": "Closed 2026-08-06 (wave F2.8). `PRAGMA cache_size` and `PRAGMA cache_spill` are now parsed (long-valued, = or parenthesized form, schema-qualifiable) and executed: the stored value follows Turso's update_cache_size clamping exactly (negative = KiB budget converted to pages via Int128 to survive KiB*1024 overflow, > MAX_SAFE 2147450880 collapses to 0, below MINIMUM_PAGE_CACHE_SIZE_IN_PAGES 200 clamps to 200, default -2000) so callers get SQLite's read-back contract; the managed pager does not evict on this bound yet (the value is a connection-scoped hint), which is exactly what the cache-spill conformance family needed — they only depend on the PRAGMA being accepted, not its effect. All 5 linked keys plus pragma-cache-size-default/pragma-set-cache-size/pragma-cache-size/pragma-cache-spill-off (pragma/memory.sqltest) and 10 more cache_size-parse-blocked keys (index-cursor-record-after-overflow-update::rowid-after-overflow-update, 5x savepoint.sqltest overflow/cache-spill issue-6351/6352) now pass.",
+      "status": "closed"
     },
     {
       "id": "compile-scalar-function-infinity-literal-not-parsed",
@@ -1252,9 +1252,6 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
-        "pragma/memory.sqltest::pragma-cache-size-default",
-        "pragma/memory.sqltest::pragma-set-cache-size",
-        "pragma/memory.sqltest::pragma-cache-spill-off",
         "pragma/memory.sqltest::pragma-max-page-count-default",
         "temp_tables.sqltest::temp-store-memory-still-supports-temp-tables",
         "delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows",
@@ -1264,10 +1261,9 @@
         "pragma-unknown-no-op.sqltest::unknown-pragma-legacy-alter-table",
         "pragma/require_where.sqltest::pragma-require-where-alias",
         "pragma/require_where.sqltest::pragma-require-where-delete-with-where-ok",
-        "pragma_vdbe_trace.sqltest::pragma-vdbe-trace",
-        "savepoint.sqltest::savepoint-rollback-overflow-issue-6352"
+        "pragma_vdbe_trace.sqltest::pragma-vdbe-trace"
       ],
-      "notes": "The turso-parser grammar's `Stmt::Pragma` accepts *any* identifier as `name`, with an arbitrary optional body (`= value`, `(value)`, or none); SQLite's own behavior for a genuinely unrecognized pragma name is a silent no-op, not a parse or runtime error (this is exactly what pragma-unknown-no-op.sqltest asserts: `PRAGMA reverse_unordered_selects=1`/`PRAGMA legacy_alter_table=1` succeed as no-ops). Ahtola's ParsePragma is a closed if/else-if ladder over ~23 hard-coded names (table_info, index_list, journal_mode, page_size, integrity_check, etc.) and throws for anything else, so it can never even produce an AST node for cache_size, cache_spill, temp_store, wal_checkpoint, max_page_count, ignore_check_constraints, capture_data_changes_conn (Turso CDC), require_where/i_am_a_dummy (Turso extension), or vdbe_trace (Turso debug pragma) — 41 distinct conformance cases fail this way. This is the single highest-leverage parser fix: add a generic/catch-all PragmaStatement(name, rawBody) AST node so unrecognized-but-syntactically-valid PRAGMAs parse (letting the compiler layer decide no-op vs. real effect) instead of being rejected at the grammar level.",
+      "notes": "The turso-parser grammar's `Stmt::Pragma` accepts *any* identifier as `name`, with an arbitrary optional body (`= value`, `(value)`, or none); SQLite's own behavior for a genuinely unrecognized pragma name is a silent no-op, not a parse or runtime error (this is exactly what pragma-unknown-no-op.sqltest asserts: `PRAGMA reverse_unordered_selects=1`/`PRAGMA legacy_alter_table=1` succeed as no-ops). Ahtola's ParsePragma is a closed if/else-if ladder over ~25 hard-coded names (table_info, index_list, journal_mode, page_size, integrity_check, cache_size, cache_spill, etc. — cache_size and cache_spill were added in wave F2.8, clearing their linked keys here) and throws for anything else, so it can never even produce an AST node for temp_store, wal_checkpoint, max_page_count, ignore_check_constraints, capture_data_changes_conn (Turso CDC), require_where/i_am_a_dummy (Turso extension), or vdbe_trace (Turso debug pragma). This is the single highest-leverage remaining parser fix: add a generic/catch-all PragmaStatement(name, rawBody) AST node so unrecognized-but-syntactically-valid PRAGMAs parse (letting the compiler layer decide no-op vs. real effect) instead of being rejected at the grammar level.",
       "status": "open"
     },
     {
@@ -1275,7 +1271,7 @@
       "layer": "parser",
       "kind": "partial",
       "turso_ref": "turso-src/sqlite/parser/src/parser.rs::pragma_value (`= value` and `(value)` both legal for a single-arg pragma)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePragmaObjectName / ParseOptionalPragmaObjectName (lines 315-343)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePragmaObjectName / ParsePragmaTableListFilter / ParseOptionalPragmaObjectName",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
@@ -1287,8 +1283,8 @@
         "pragma/table_list.sqltest::pragma-table-list-equals-syntax",
         "pragma/table_list.sqltest::pragma-table-list-attached-database"
       ],
-      "notes": "Even for the PRAGMAs Ahtola *does* recognize, the object-name argument grammar is incomplete in two ways. (1) `ParsePragmaObjectName` (line 317) unconditionally does `Expect(TokenKind.LeftParen)`, so it only accepts `PRAGMA foreign_key_list(t1)` style and rejects the equally-legal `PRAGMA foreign_key_list = t1` equals-form that real SQLite's pragma grammar allows for any single-value pragma. (2) `PRAGMA table_list` is coded via `RequireReadOnlyPragma` to reject *any* argument at all ('PRAGMA table_list does not accept a value'), but SQLite's actual table_list pragma accepts an optional table-name filter argument (`PRAGMA table_list('t1')` / `PRAGMA table_list=t1`) — Ahtola's grammar for this pragma is simply wrong, not just stricter.",
-      "status": "open"
+      "notes": "Closed 2026-08-06 (wave F2.8). (1) ParsePragmaObjectName now accepts both `PRAGMA x(t1)` and `PRAGMA x=t1` (schema-qualification validated against the pragma prefix, 'PRAGMA database qualifiers do not match'). (2) `PRAGMA table_list` accepts the optional filter argument via a dedicated ParsePragmaTableListFilter (strips schema qualification — the schema is carried by the pragma prefix), threaded as PragmaTableListStatement.Filter through the dispatch/catalog/instance/TVF routes and applied as an exact OrdinalIgnoreCase name match to every emitted row, sqlite_schema header included. (3) Bonus: PRAGMA foreign_key_list's argument became optional (null or nonexistent table -> empty result, SQLite semantics), closing pragma-foreign-key-list-empty-results. All 7 linked keys pass except pragma-table-list-attached-database, which redistributed to the ATTACH gap (memory primary cannot ATTACH; the parse layer is fixed — it now fails only with 'Managed ATTACH requires a file-backed managed primary database'). The explicit-main-vs-temp and the three view/strict/nonexistent table_list keys also cleared.",
+      "status": "closed"
     },
     {
       "id": "parser-create-virtual-table-not-parsed",
@@ -1467,16 +1463,15 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/core/dialect/ (pragma table covers ~60 names: synchronous, mmap_size, busy_timeout, auto_vacuum, secure_delete, threads, soft_heap_limit, wal_autocheckpoint, compile_options, collation_list, function_list, module_list, pragma_list, data_version, journal_size_limit, writable_schema, case_sensitive_like, trusted_schema, stats, lock_status, shrink_memory, optimize, hard_heap_limit, ...)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePragma (23 names total: table_info, table_xinfo, index_list, index_info, index_xinfo, foreign_key_list, foreign_key_check, table_list, database_list, encoding, query_only, foreign_keys, defer_foreign_keys, recursive_triggers, schema_version, user_version, application_id, journal_mode, page_size, page_count, freelist_count, integrity_check, quick_check)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePragma (25 names total: table_info, table_xinfo, index_list, index_info, index_xinfo, foreign_key_list, foreign_key_check, table_list, database_list, encoding, query_only, foreign_keys, defer_foreign_keys, recursive_triggers, schema_version, user_version, application_id, journal_mode, page_size, page_count, freelist_count, integrity_check, quick_check, cache_size, cache_spill)",
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [
-        "pragma/memory.sqltest::pragma-cache-size-default",
         "temp_tables.sqltest::temp-store-memory-still-supports-temp-tables",
         "check_constraint.sqltest::check_constraint_pragma_ignore",
         "pragma-unknown-no-op.sqltest::unknown-pragma-legacy-alter-table"
       ],
-      "notes": "Beyond the generic-catch-all fix in parser-pragma-unrecognized-name-hard-rejection, this entry tracks the raw enumeration gap for readers doing a family-by-family audit: of SQLite's roughly 60 recognized pragma names, Ahtola's grammar recognizes 23 (all schema-introspection/read-only or transaction-control pragmas). The largest missing families are cache/memory tuning (cache_size, cache_spill, mmap_size, soft_heap_limit, shrink_memory), storage/durability tuning (synchronous, secure_delete, temp_store, auto_vacuum, wal_autocheckpoint, journal_size_limit, max_page_count), and metadata/introspection (compile_options, collation_list, function_list, module_list, pragma_list, data_version, stats). Whether each should be a real setting or an accepted no-op is a compiler-layer decision; the parser-layer requirement is simply that the grammar accept the name+value syntax at all (see parser-pragma-unrecognized-name-hard-rejection for the concrete fix).",
+      "notes": "Beyond the generic-catch-all fix in parser-pragma-unrecognized-name-hard-rejection, this entry tracks the raw enumeration gap for readers doing a family-by-family audit: of SQLite's roughly 60 recognized pragma names, Ahtola's grammar recognizes 25 (wave F2.8 added cache_size and cache_spill with Turso-faithful value clamping; the rest remain schema-introspection/read-only or transaction-control pragmas). The largest missing families are cache/memory tuning (mmap_size, soft_heap_limit, shrink_memory), storage/durability tuning (synchronous, secure_delete, temp_store, auto_vacuum, wal_autocheckpoint, journal_size_limit, max_page_count), and metadata/introspection (compile_options, collation_list, function_list, module_list, pragma_list, data_version, stats). Whether each should be a real setting or an accepted no-op is a compiler-layer decision; the parser-layer requirement is simply that the grammar accept the name+value syntax at all (see parser-pragma-unrecognized-name-hard-rejection for the concrete fix).",
       "status": "open"
     },
     {

@@ -2704,7 +2704,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 context),
             PragmaTableListStatement tableList => ExecutePragmaTableList(
                 catalog,
-                tableList.Schema ?? "main"),
+                tableList.Schema ?? "main",
+                tableList.Filter),
             PragmaDatabaseListStatement => ExecutePragmaDatabaseList(),
             PragmaEncodingStatement => ExecutePragmaEncoding(),
             PragmaPageCountStatement => ExecutePragmaPageCount(),
@@ -2861,35 +2862,38 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return SqlValue.Null;
     }
 
-    private static ExecutionResult ExecutePragmaTableList(SchemaCatalog catalog, string schema)
+    private static ExecutionResult ExecutePragmaTableList(SchemaCatalog catalog, string schema, string? filter = null)
     {
-        var rows = new List<SqlValue[]>
-        {
-            new[]
-            {
-                SqlValue.Text(schema),
-                SqlValue.Text(
-                    schema.Equals("temp", StringComparison.OrdinalIgnoreCase)
-                        ? "sqlite_temp_schema"
-                        : "sqlite_schema"),
-                SqlValue.Text("table"),
-                SqlValue.Integer(5),
-                SqlValue.Integer(0),
-                SqlValue.Integer(0),
-            },
-        };
+        var rows = new List<SqlValue[]>();
 
-        foreach (var (name, table) in catalog.Tables.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+        void AddRow(string name, string type, int columnCount, int withoutRowid, int strict)
         {
+            if (filter is not null && !name.Equals(filter, StringComparison.OrdinalIgnoreCase))
+                return;
+
             rows.Add(
             [
                 SqlValue.Text(schema),
                 SqlValue.Text(name),
-                SqlValue.Text("table"),
-                SqlValue.Integer(table.ColumnDefinitions.Length),
-                SqlValue.Integer(table.WithoutRowid ? 1 : 0),
-                SqlValue.Integer(table.Strict ? 1 : 0),
+                SqlValue.Text(type),
+                SqlValue.Integer(columnCount),
+                SqlValue.Integer(withoutRowid),
+                SqlValue.Integer(strict),
             ]);
+        }
+
+        AddRow(
+            schema.Equals("temp", StringComparison.OrdinalIgnoreCase)
+                ? "sqlite_temp_schema"
+                : "sqlite_schema",
+            "table",
+            5,
+            0,
+            0);
+
+        foreach (var (name, table) in catalog.Tables.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            AddRow(name, "table", table.ColumnDefinitions.Length, table.WithoutRowid ? 1 : 0, table.Strict ? 1 : 0);
         }
 
         foreach (var (name, view) in catalog.Views.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
@@ -2902,15 +2906,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
                         catalog.Views,
                         catalog.Triggers));
-            rows.Add(
-            [
-                SqlValue.Text(schema),
-                SqlValue.Text(name),
-                SqlValue.Text("view"),
-                SqlValue.Integer(columns.Count),
-                SqlValue.Integer(0),
-                SqlValue.Integer(0),
-            ]);
+            AddRow(name, "view", columns.Count, 0, 0);
         }
 
         return new ExecutionResult(["schema", "name", "type", "ncol", "wr", "strict"], rows.ToArray(), 0);
@@ -3177,7 +3173,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         IReadOnlyDictionary<string, EmbeddedTable> tables)
     {
         var columns = new[] { "id", "seq", "table", "from", "to", "on_update", "on_delete", "match" };
-        if (!tables.TryGetValue(statement.TableName, out var table))
+        if (statement.TableName is null || !tables.TryGetValue(statement.TableName, out var table))
             return new ExecutionResult(columns, [], 0);
 
         var rows = new List<SqlValue[]>();
@@ -34718,6 +34714,8 @@ public sealed class EmbeddedConnection : IDisposable
     private bool _foreignKeys;
     private bool _deferForeignKeys;
     private bool _recursiveTriggers;
+    private long _cacheSize = -2000;
+    private bool _cacheSpill = true;
     private bool _tempInitialized;
     private readonly Dictionary<EmbeddedDatabase, int> _pendingPageSizes = [];
     private readonly ManagedConnectionHooks _hooks = new();
@@ -35535,8 +35533,8 @@ public sealed class EmbeddedConnection : IDisposable
             case PragmaDatabaseListStatement databaseList:
                 ValidatePragmaSchema(databaseList.Schema);
                 return ExecutePragmaDatabaseList();
-            case PragmaTableListStatement { Schema: null }:
-                return ExecutePragmaTableList();
+            case PragmaTableListStatement { Schema: null } tableList:
+                return ExecutePragmaTableList(tableList.Filter);
             case PragmaEncodingStatement encoding:
                 return ExecutePragmaEncoding(encoding);
             case PragmaPageCountStatement pageCount:
@@ -35557,6 +35555,10 @@ public sealed class EmbeddedConnection : IDisposable
                 return ExecutePragmaJournalMode(journalMode);
             case PragmaPageSizeStatement pageSize:
                 return ExecutePragmaPageSize(pageSize);
+            case PragmaCacheSizeStatement cacheSize:
+                return ExecutePragmaCacheSize(cacheSize);
+            case PragmaCacheSpillStatement cacheSpill:
+                return ExecutePragmaCacheSpill(cacheSpill);
             case AnalyzeStatement:
                 throw EmbeddedDatabase.AnalyzeNotSupported();
             case VacuumStatement vacuum:
@@ -36023,13 +36025,13 @@ public sealed class EmbeddedConnection : IDisposable
         return new ExecutionResult(["freelist_count"], [[SqlValue.Integer(database.GetFreelistCount())]], 0);
     }
 
-    private ExecutionResult ExecutePragmaTableList()
+    private ExecutionResult ExecutePragmaTableList(string? filter)
     {
         var rows = new List<SqlValue[]>();
-        AddPragmaTableListRows(rows, _database, "main");
-        AddPragmaTableListRows(rows, _tempDatabase, "temp");
+        AddPragmaTableListRows(rows, _database, "main", filter);
+        AddPragmaTableListRows(rows, _tempDatabase, "temp", filter);
         foreach (var pair in _attachedDatabases.OrderBy(pair => pair.Value.Sequence))
-            AddPragmaTableListRows(rows, pair.Value.Database, pair.Key);
+            AddPragmaTableListRows(rows, pair.Value.Database, pair.Key, filter);
 
         return new ExecutionResult(
             ["schema", "name", "type", "ncol", "wr", "strict"],
@@ -36040,9 +36042,10 @@ public sealed class EmbeddedConnection : IDisposable
     private void AddPragmaTableListRows(
         ICollection<SqlValue[]> rows,
         EmbeddedDatabase database,
-        string schema)
+        string schema,
+        string? filter)
     {
-        var statement = new PragmaTableListStatement(schema);
+        var statement = new PragmaTableListStatement(schema, filter);
         var transactionState = GetTransactionState(database);
         var result = transactionState is null
             ? database.Execute(statement, new SqlValue[1])
@@ -36189,8 +36192,8 @@ public sealed class EmbeddedConnection : IDisposable
             PragmaIndexXInfoStatement indexXInfo => RouteExistingIndexMetadataStatement(
                 indexXInfo.IndexName,
                 name => indexXInfo with { IndexName = name }),
-            PragmaForeignKeyListStatement foreignKeyList => RouteExistingNamedStatement(
-                foreignKeyList.TableName,
+            PragmaForeignKeyListStatement { TableName: { } tableName } foreignKeyList => RouteExistingNamedStatement(
+                tableName,
                 ManagedSchemaObjectKind.Table,
                 name => foreignKeyList with { TableName = name }),
             PragmaForeignKeyCheckStatement { TableName: { } tableName } foreignKeyCheck
@@ -38112,6 +38115,58 @@ public sealed class EmbeddedConnection : IDisposable
         else
             _pendingPageSizes.Remove(database);
         return ExecutionResult.Empty;
+    }
+
+    private ExecutionResult ExecutePragmaCacheSize(PragmaCacheSizeStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Value is { } value)
+        {
+            // Connection-scoped hint; the managed pager does not evict on this bound yet,
+            // but the stored value follows Turso's update_cache_size clamping so callers
+            // can rely on SQLite's read-back contract.
+            _cacheSize = NormalizeCacheSize(value);
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(["cache_size"], [[SqlValue.Integer(_cacheSize)]], 0);
+    }
+
+    private long NormalizeCacheSize(long value)
+    {
+        // Mirrors turso-src/core/translate/pragma.rs update_cache_size: negative values are
+        // KiB budgets converted to pages, > MAX_SAFE collapses to 0, and anything below the
+        // minimum page-cache size clamps to MINIMUM_PAGE_CACHE_SIZE_IN_PAGES.
+        const long maximumSafe = 2147450880;
+        const long minimumPages = 200;
+
+        var pages = value;
+        if (value < 0)
+        {
+            var pageSize = _database.GetPageSize();
+            if (pageSize <= 0)
+                pageSize = 4096;
+            long absoluteKiB = value == long.MinValue ? long.MaxValue : -value;
+            pages = (long)(((Int128)absoluteKiB * 1024) / pageSize);
+        }
+
+        if (pages > maximumSafe || pages < 0)
+            return 0;
+        if (pages < minimumPages)
+            return minimumPages;
+        return value;
+    }
+
+    private ExecutionResult ExecutePragmaCacheSpill(PragmaCacheSpillStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Enabled is { } enabled)
+        {
+            _cacheSpill = enabled;
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(["cache_spill"], [[SqlValue.Integer(_cacheSpill ? 1 : 0)]], 0);
     }
 
     private ExecutionResult ExecuteVacuum(VacuumStatement statement, SqlValue[] parameters)

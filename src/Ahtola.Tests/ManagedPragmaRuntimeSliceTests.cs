@@ -256,12 +256,11 @@ public sealed class ManagedPragmaRuntimeSliceTests
         Execute(connection, "PRAGMA page_size = 8192;");
         ReadValue(connection, "PRAGMA page_size;").Should().Be(SqlValue.Integer(4_096));
 
-        foreach (var pragma in new[] { "cache_size", "synchronous" })
-        {
-            var unsupported = () => connection.Prepare($"PRAGMA {pragma} = 1;");
-            unsupported.Should().Throw<EmbeddedSqlException>()
-                .WithMessage($"Unsupported PRAGMA {pragma}. At SQL offset *");
-        }
+        Execute(connection, "PRAGMA cache_size = 1;");
+        ReadValue(connection, "PRAGMA cache_size;").Should().Be(SqlValue.Integer(200));
+        var unsupportedSynchronous = () => connection.Prepare("PRAGMA synchronous = 1;");
+        unsupportedSynchronous.Should().Throw<EmbeddedSqlException>()
+            .WithMessage("Unsupported PRAGMA synchronous. At SQL offset *");
         Assert.Throws<EmbeddedSqlException>(() => ReadValue(connection, "PRAGMA page_count;"))!
             .Message.Should().Be("Managed PRAGMA page_count requires a file-backed database.");
         Assert.Throws<EmbeddedSqlException>(() => ReadValue(connection, "PRAGMA temp.freelist_count;"))!
