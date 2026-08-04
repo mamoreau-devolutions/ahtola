@@ -96,18 +96,6 @@ foreign_keys.sqltest::fk-self-ipk-text-child-coerces-rowid-ok | expected success
 foreign_keys.sqltest::fk-deferred-update-self-ref-rowid-affinity-one-stmt | expected success but got error: FOREIGN KEY constraint failed
 foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates | expected success but got error: EXPLAIN is only supported for statements lowered to the bytecode compiler.
 foreign_keys.sqltest::fk-alter-table-add-column-enforced | expected success but got error: ALTER TABLE ADD COLUMN with REFERENCES is not supported.
-gencol.sqltest::gencol_alter_add_virtual | expected 2 row(s), got 2 row(s); row 0 expected '5/10' but was '5/'
-gencol.sqltest::gencol_alter_add_virtual_explicit | expected 1 row(s), got 1 row(s); row 0 expected '3/103' but was '3/'
-gencol.sqltest::gencol_alter_add_multiple_virtual | expected 1 row(s), got 1 row(s); row 0 expected '5/10/15' but was '5//'
-gencol.sqltest::gencol_alter_add_virtual_function | expected 1 row(s), got 1 row(s); row 0 expected 'hello/HELLO' but was 'hello/'
-gencol.sqltest::gencol_alter_add_virtual_complex_expr | expected 1 row(s), got 1 row(s); row 0 expected '3/7/10' but was '3/7/'
-gencol.sqltest::gencol_alter_add_column_generated_pk_rejected | error 'Cannot add a PRIMARY KEY or UNIQUE column.' does not match pattern '(Cannot add a PRIMARY KEY column/generated columns cannot be part of the PRIMARY KEY)'
-gencol.sqltest::gencol_alter_add_virtual_not_null_violation | error 'Cannot add a NOT NULL column without a default value.' does not match pattern 'NOT NULL constraint failed'
-gencol.sqltest::gencol_alter_add_virtual_not_null_ok | expected success but got error: Cannot add a NOT NULL column without a default value.
-gencol.sqltest::gencol_alter_add_virtual_check_with_existing_virtual_middle | expected 2 row(s), got 2 row(s); row 0 expected '1/2/10/11' but was '1/2/10/'
-gencol.sqltest::gencol_alter_add_virtual_check_with_existing_virtual_middle_violation | expected an error but the statement succeeded
-gencol.sqltest::gencol_alter_add_virtual_insert_after | expected 2 row(s), got 2 row(s); row 0 expected '1/10' but was '1/'
-gencol.sqltest::gencol_alter_add_virtual_after_add_default_notnull | expected success but got error: Cannot add a NOT NULL column without a default value.
 gencol.sqltest::gencol_alter_add_stored_rejected | expected an error but the statement succeeded
 gencol.sqltest::gencol_error_doubly_qualified | error 'Expected RightParen. At SQL offset 40.' does not match pattern 'the "." operator prohibited in generated columns'
 gencol.sqltest::gencol_stored_rejected | expected an error but the statement succeeded

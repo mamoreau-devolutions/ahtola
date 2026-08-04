@@ -7776,6 +7776,33 @@ public sealed partial class EmbeddedDatabase : IDisposable
             virtualOnly: true);
     }
 
+    // Materializes generated columns for a pre-existing row right after ALTER TABLE ADD COLUMN
+    // appended a generated column: the generation expressions are re-evaluated in dependency
+    // order (the new column's dependencies are all pre-existing, already-materialized values),
+    // applying declared affinity and enforcing NOT NULL exactly like the INSERT path.
+    internal static void ComputeGeneratedColumnsAfterAddColumn(
+        EmbeddedTable table,
+        string tableName,
+        SqlValue[] row)
+    {
+        if (!table.HasGeneratedColumns)
+            return;
+
+        var evaluator = new EmbeddedDatabase();
+        evaluator.ComputeGeneratedColumns(
+            table,
+            tableName,
+            row,
+            [],
+            new QueryContext(
+                new Dictionary<string, EmbeddedTable>(StringComparer.OrdinalIgnoreCase)
+                {
+                    [tableName] = table,
+                },
+                new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase)),
+            virtualOnly: false);
+    }
+
     internal SqlValue EvaluateIndexExpression(
         Expression expression,
         EmbeddedTable table,
@@ -39480,8 +39507,10 @@ internal sealed class EmbeddedTable
     public SqlitePrimaryKeySchema? PrimaryKeySchema { get; private set; }
 
     // Column indices of generated columns in dependency (topological) order, so evaluating
-    // them in sequence always sees the values a later generated column depends on.
-    public IReadOnlyList<int> GeneratedColumnOrder { get; }
+    // them in sequence always sees the values a later generated column depends on. Mutable so
+    // ALTER TABLE ADD COLUMN can append the newly added generated column (its dependencies are
+    // all pre-existing columns, so appending preserves the topological order).
+    public IReadOnlyList<int> GeneratedColumnOrder { get; private set; }
 
     public bool HasGeneratedColumns => GeneratedColumnOrder.Count > 0;
 
@@ -40091,6 +40120,10 @@ internal sealed class EmbeddedTable
             throw new EmbeddedSqlException($"duplicate column name: {column.Name}");
         if (column.ForeignKeyConstraints.Count > 0)
             throw new EmbeddedSqlException("ALTER TABLE ADD COLUMN with REFERENCES is not supported.");
+        // Mirrors SQLite/Turso: the generated-column PRIMARY-KEY prohibition is diagnosed before
+        // the generic ALTER restriction, with its own message.
+        if (column.IsGenerated && column.PrimaryKey)
+            throw new EmbeddedSqlException("generated columns cannot be part of the PRIMARY KEY");
         if (column.PrimaryKey || column.Unique)
             throw new EmbeddedSqlException("Cannot add a PRIMARY KEY or UNIQUE column.");
 
@@ -40124,19 +40157,30 @@ internal sealed class EmbeddedTable
         {
             throw new EmbeddedSqlException("type mismatch on DEFAULT");
         }
-        if (column.NotNull && Rows.Count > 0 && defaultValue.Kind == SqlValueKind.Null)
+        // A generated column always produces a value, so SQLite permits NOT NULL on it and
+        // instead validates the computed value against every pre-existing row (raising
+        // "NOT NULL constraint failed" on the first violation) — the NOT-NULL-needs-default
+        // rejection only applies to ordinary columns.
+        if (column.NotNull && !column.IsGenerated && Rows.Count > 0 && defaultValue.Kind == SqlValueKind.Null)
             throw new EmbeddedSqlException("Cannot add a NOT NULL column without a default value.");
 
         var index = Columns.Length;
         Columns = [.. Columns, column.Name];
         ColumnDefinitions = [.. ColumnDefinitions, column];
         _columnIndices.Add(column.Name, index);
+        if (column.IsGenerated)
+            GeneratedColumnOrder = [.. GeneratedColumnOrder, index];
         for (var rowIndex = 0; rowIndex < Rows.Count; rowIndex++)
         {
             var row = Rows[rowIndex];
             Array.Resize(ref row, index + 1);
             row[index] = defaultValue;
             Rows[rowIndex] = row;
+            // SQLite evaluates the generation expression against pre-existing rows when a
+            // generated column is added; Ahtola materializes generated values, so the backfill
+            // computes and stores the value (and enforces NOT NULL) row by row.
+            if (column.IsGenerated)
+                EmbeddedDatabase.ComputeGeneratedColumnsAfterAddColumn(this, Name, row);
         }
     }
 
