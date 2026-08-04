@@ -7725,7 +7725,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[] row,
         SqlValue[] parameters,
         QueryContext context,
-        bool virtualOnly = false)
+        bool virtualOnly = false,
+        bool enforceNotNull = true)
     {
         if (!table.HasGeneratedColumns)
             return;
@@ -7744,7 +7745,31 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 column,
                 Evaluate(column.GenerationExpression!, parameters, source, context));
             row[columnIndex] = value;
-            if (column.NotNull && value.Kind == SqlValueKind.Null)
+            if (enforceNotNull && column.NotNull && value.Kind == SqlValueKind.Null)
+            {
+                throw new EmbeddedSqlException(
+                    $"NOT NULL constraint failed: {tableName}.{column.Name}",
+                    column.NotNullConflictAlgorithm);
+            }
+        }
+    }
+
+    // SQLite checks NOT NULL on (virtual) generated columns only after BEFORE UPDATE triggers
+    // have run, because a trigger may observe the pre-enforcement value via NEW and suppress
+    // the update with RAISE(IGNORE). The UPDATE-with-triggers path computes the generated
+    // values first, runs the triggers, then calls this to enforce the constraint.
+    private static void EnforceGeneratedNotNullConstraints(
+        EmbeddedTable table,
+        string tableName,
+        SqlValue[] row)
+    {
+        if (!table.HasGeneratedColumns)
+            return;
+
+        foreach (var columnIndex in table.GeneratedColumnOrder)
+        {
+            var column = table.ColumnDefinitions[columnIndex];
+            if (column.NotNull && row[columnIndex].Kind == SqlValueKind.Null)
             {
                 throw new EmbeddedSqlException(
                     $"NOT NULL constraint failed: {tableName}.{column.Name}",
@@ -9446,6 +9471,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[] parameters,
         QueryContext context,
         bool validateCheckConstraints = true,
+        bool enforceGeneratedNotNull = true,
         SourceRow? evaluationRow = null)
     {
         var source = evaluationRow
@@ -9485,7 +9511,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         // Recompute generated columns from the freshly updated base values so a change
         // to any source column is reflected in the stored generated value.
-        ComputeGeneratedColumns(table, statement.TableName, updated, parameters, context);
+        ComputeGeneratedColumns(
+            table,
+            statement.TableName,
+            updated,
+            parameters,
+            context,
+            enforceNotNull: enforceGeneratedNotNull);
         if (validateCheckConstraints)
             ValidateCheckConstraints(statement.TableName, table, updated, newRowid, parameters, context);
 
@@ -9640,6 +9672,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var assignedColumns = plan.ColumnAssignments
             .Select(assignment => assignment.Index)
             .ToHashSet();
+        table.ExpandAssignedColumnsThroughGeneratedColumns(assignedColumns);
         var changedRows = updatedPositions.Select(position => postUpdateRows[position]).ToArray();
         foreach (var foreignKey in table.ForeignKeys.Reverse())
         {
@@ -10151,7 +10184,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 rowId,
                 EmptyParameters,
                 context,
-                validateCheckConstraints: false);
+                validateCheckConstraints: false,
+                enforceGeneratedNotNull: false);
             var frame = new TriggerRowFrame(
                 CreateTriggerRowImage(childTable, original, rowId),
                 CreateTriggerRowImage(childTable, updated, newRowId));
@@ -10161,6 +10195,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             position = FindTriggerRowPosition(childTable, identity);
             if (position < 0)
                 continue;
+            EnforceGeneratedNotNullConstraints(childTable, childTableName, updated);
             ValidateCheckConstraints(
                 childTableName,
                 childTable,
@@ -39516,6 +39551,32 @@ internal sealed class EmbeddedTable
 
     public bool HasVirtualGeneratedColumns => ColumnDefinitions.Any(
         column => column.IsGenerated && !column.GeneratedStored);
+
+    // Generated columns are recomputed whenever any of their (transitive) dependencies is
+    // assigned, so such an UPDATE also affects foreign keys that reference those generated
+    // columns even when the generated column itself is not assigned (SQLite's
+    // columns_affected_by_update semantics). GeneratedColumnOrder is topological, so a single
+    // pass propagates transitive dependents.
+    internal void ExpandAssignedColumnsThroughGeneratedColumns(HashSet<int> assignedColumns)
+    {
+        if (!HasGeneratedColumns)
+            return;
+
+        foreach (var columnIndex in GeneratedColumnOrder)
+        {
+            var referencedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectColumnReferences(ColumnDefinitions[columnIndex].GenerationExpression!, referencedNames);
+            foreach (var name in referencedNames)
+            {
+                if (_columnIndices.TryGetValue(name, out var dependencyIndex)
+                    && assignedColumns.Contains(dependencyIndex))
+                {
+                    assignedColumns.Add(columnIndex);
+                    break;
+                }
+            }
+        }
+    }
 
     public bool HasCheckConstraints => CheckConstraints.Count > 0
         || ColumnDefinitions.Any(column => column.CheckConstraints.Count > 0);

@@ -683,6 +683,7 @@ public sealed partial class EmbeddedDatabase
                 parameters,
                 context,
                 validateCheckConstraints: false,
+                enforceGeneratedNotNull: false,
                 evaluationRow: evaluationRow);
             var frame = new TriggerRowFrame(
                 CreateTriggerRowImage(table, original, oldRowId),
@@ -698,6 +699,9 @@ public sealed partial class EmbeddedDatabase
             try
             {
                 ResolveNotNullReplaceDefaults(context.ConflictAlgorithmOverride, table, updated, context);
+                // Deferred from BuildUpdatedRow so a BEFORE UPDATE trigger can observe/suppress
+                // the row first; RAISE(IGNORE) skips the update and the check entirely.
+                EnforceGeneratedNotNullConstraints(table, statement.TableName, updated);
                 ValidateCheckConstraints(statement.TableName, table, updated, newRowId, parameters, context);
                 if (context.ConflictAlgorithmOverride == InsertConflictAlgorithm.Replace)
                 {

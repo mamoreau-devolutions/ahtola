@@ -14,11 +14,11 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "entry_count": 171,
+    "entry_count": 175,
     "counts": {
       "by_layer": {
         "vdbe": 35,
-        "compilation": 38,
+        "compilation": 42,
         "parser": 22,
         "functions": 24,
         "storage": 20,
@@ -27,25 +27,25 @@
       },
       "by_kind": {
         "missing": 98,
+        "divergent": 43,
         "partial": 25,
-        "divergent": 39,
         "extension": 7,
         "parity": 2
       },
       "by_severity": {
-        "s1-correctness": 19,
-        "s2-capability": 86,
         "s3-perf": 34,
-        "s4-intentional": 32
+        "s2-capability": 88,
+        "s4-intentional": 32,
+        "s1-correctness": 21
       },
       "by_effort": {
-        "S": 63,
         "M": 71,
-        "L": 37
+        "L": 37,
+        "S": 67
       },
       "by_status": {
-        "open": 162,
-        "closed": 9
+        "open": 154,
+        "closed": 21
       }
     },
     "schema": {
@@ -2559,6 +2559,37 @@
         "gencol.sqltest::gencol_alter_add_virtual_after_add_default_notnull"
       ],
       "notes": "ALTER TABLE ADD COLUMN with a VIRTUAL generated column: Ahtola backfilled NULL for existing rows (silently wrong values) and refused NOT NULL generated columns outright. Fixed by materializing the computed value for each existing row through the shared ComputeGeneratedColumns path (dependency order, affinity, NOT NULL enforcement per row, matching Turso/SQLite read-time semantics for deterministic expressions), extending GeneratedColumnOrder so later INSERTs compute the new column, accepting NOT NULL (validated against existing rows), and rejecting generated PK columns with the SQLite message. STORED-generated ADD COLUMN and three-part qualified references remain intentional/known gaps.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-fk-affected-columns-through-generated-columns",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "core/translate/fkeys.rs:672-700,960-991 (FK keys over virtual generated columns recompute column + dependencies via emit_columns_and_dependencies, so a change to a dependency column changes the FK key and the CASCADE comparison sees it)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ValidateForeignKeysAfterUpdate now calls EmbeddedTable.ExpandAssignedColumnsThroughGeneratedColumns to grow the assigned-column set through GeneratedColumnOrder dependencies; ValidateChildrenAfterParentUpdate then re-reads the recomputed parent key and fires ON UPDATE actions)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "gencol.sqltest::fk-gencol-unique-idx-update-cascade"
+      ],
+      "notes": "UPDATE of a base column that a VIRTUAL generated column depends on must count as a change to the generated column for FK purposes. Ahtola built assignedColumns only from the literal SET list, so an FK whose parent key is a generated column (with a unique index) never saw the changed key, CASCADE was skipped, and child rows were left dangling (FOREIGN KEY constraint failed on later checks / stale children). Fixed by expanding the assigned set through generated-column dependencies in topological order before FK validation, mirroring Turso which re-emits generated columns with their dependencies when building FK keys.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-generated-not-null-deferred-until-after-triggers",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "core/translate/update.rs + trigger_exec.rs (BEFORE UPDATE trigger programs run before the row-write constraint checks; a NOT NULL violation on a generated column is raised only when the row is actually written)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ComputeGeneratedColumns enforceNotNull parameter + static EnforceGeneratedNotNullConstraints helper) and EmbeddedDatabase.Triggers.cs (PerformRowTriggeredUpdate defers enforcement until after BEFORE triggers, inside the conflict-resolved try block)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "gencol.sqltest::update-virtual-not-null-deferred-trigger-ignore",
+        "gencol.sqltest::update-virtual-not-null-transitive-deferred-trigger-ignore",
+        "gencol.sqltest::update-virtual-not-null-deferred-trigger-abort",
+        "gencol.sqltest::update-virtual-not-null-transitive-deferred-trigger-abort"
+      ],
+      "notes": "NOT NULL on VIRTUAL generated columns was enforced inside BuildUpdatedRow, before BEFORE UPDATE triggers fired, so RAISE(IGNORE) never got the chance to skip the update and RAISE(ABORT, msg) was masked by the NOT NULL error. Fixed by deferring generated-column NOT NULL enforcement to after BEFORE triggers in the row-triggered UPDATE path (also applied to the FK CASCADE child-update path), while the plain/compiled bulk paths keep immediate enforcement. Sanity preserved: UPDATE without triggers still reports NOT NULL constraint failed.",
       "status": "closed"
     }
   ]

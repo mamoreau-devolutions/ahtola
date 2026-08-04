@@ -101,11 +101,6 @@ gencol.sqltest::gencol_error_doubly_qualified | error 'Expected RightParen. At S
 gencol.sqltest::gencol_stored_rejected | expected an error but the statement succeeded
 gencol.sqltest::gencol_stored_generated_always_rejected | expected an error but the statement succeeded
 gencol.sqltest::gencol_error_nested_doubly_qualified | error 'Expected RightParen. At SQL offset 44.' does not match pattern 'the "." operator prohibited in generated columns'
-gencol.sqltest::fk-gencol-unique-idx-update-cascade | expected success but got error: FOREIGN KEY constraint failed
-gencol.sqltest::update-virtual-not-null-deferred-trigger-ignore | expected success but got error: NOT NULL constraint failed: t.b
-gencol.sqltest::update-virtual-not-null-transitive-deferred-trigger-ignore | expected success but got error: NOT NULL constraint failed: t.c
-gencol.sqltest::update-virtual-not-null-deferred-trigger-abort | error 'NOT NULL constraint failed: t.b' does not match pattern 'trigger rejects null'
-gencol.sqltest::update-virtual-not-null-transitive-deferred-trigger-abort | error 'NOT NULL constraint failed: t.c' does not match pattern 'trigger rejects null'
 glob/memory.sqltest::glob-embedded-nul-1 | expected 1 row(s), got 1 row(s); row 0 expected '0' but was '1'
 glob/memory.sqltest::glob-embedded-nul-2 | expected 1 row(s), got 1 row(s); row 0 expected '0' but was '1'
 groupby/constant-expr.sqltest::group-by-order-by-constant-float | expected success but got error: Unsupported expression type StarExpression.
