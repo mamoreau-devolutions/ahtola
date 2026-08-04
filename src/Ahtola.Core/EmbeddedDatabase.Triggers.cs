@@ -155,6 +155,10 @@ public sealed partial class EmbeddedDatabase
             var state = context.TriggerState
                 ?? throw new InvalidOperationException("Row trigger execution lost its statement state.");
             var savedLastInsertRowId = state.LiveLastInsertRowId;
+            // The connection-level changes() value is saved when a trigger fires and restored
+            // when the trigger returns. Trigger-body statements temporarily replace it (see the
+            // flush below), mirroring Turso's saved_changes_value around a trigger subprogram.
+            var savedChanges = _changes;
             var triggerContext = context with
             {
                 CommonTableExpressions = new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
@@ -189,6 +193,13 @@ public sealed partial class EmbeddedDatabase
                     state.Changed |= result.Changed;
                     if (result.LastInsertRowId is { } insertedRowId)
                         state.LiveLastInsertRowId = insertedRowId;
+                    // A trigger-body INSERT/UPDATE/DELETE replaces the changes() value visible to
+                    // subsequent body statements and counts toward total_changes(), per SQLite.
+                    if (bodyStatement is InsertStatement or UpdateStatement or DeleteStatement)
+                    {
+                        _changes = result.RowsAffected;
+                        _totalChanges += result.RowsAffected;
+                    }
                 }
             }
             catch (EmbeddedConflictFailException exception)
@@ -206,6 +217,9 @@ public sealed partial class EmbeddedDatabase
             finally
             {
                 state.LiveLastInsertRowId = savedLastInsertRowId;
+                // Restore the caller's changes() value; total_changes() is intentionally not
+                // restored so trigger-body rows remain counted.
+                _changes = savedChanges;
             }
         }
 

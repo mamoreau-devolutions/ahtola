@@ -10028,6 +10028,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
             _ = FireRowTriggers(afterTriggers, frame, triggerContext);
         }
 
+        // FK cascade/SET NULL/SET DEFAULT deletes count toward total_changes() but never
+        // toward changes(), which reflects only the top-level statement's own rows.
+        _totalChanges += rowsAffected;
         return new ExecutionResult([], [], rowsAffected, rowsAffected > 0);
     }
 
@@ -10224,6 +10227,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
             _ = FireRowTriggers(afterTriggers, frame, context);
         }
 
+        // FK cascade/SET NULL/SET DEFAULT updates count toward total_changes() but never
+        // toward changes(), which reflects only the top-level statement's own rows.
+        _totalChanges += rowsAffected;
         return new ExecutionResult([], [], rowsAffected, rowsAffected > 0);
     }
 
