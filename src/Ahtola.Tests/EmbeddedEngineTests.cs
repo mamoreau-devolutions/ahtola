@@ -807,7 +807,7 @@ public class EmbeddedEngineTests
         statement.Step().Should().Be(StatementStepResult.Row);
         statement.GetValue(0).Should().Be(SqlValue.Text("users"));
         statement.GetValue(1).Should().Be(SqlValue.Text("table"));
-        statement.GetValue(2).AsText().Should().Contain("CREATE TABLE \"users\"");
+        statement.GetValue(2).AsText().Should().Contain("CREATE TABLE users");
         statement.Step().Should().Be(StatementStepResult.Done);
     }
 
@@ -1658,10 +1658,10 @@ public class EmbeddedEngineTests
             master.GetValue(0).Should().Be(SqlValue.Text("index"));
             master.GetValue(1).Should().Be(SqlValue.Text("idx_a"));
             master.GetValue(2).Should().Be(SqlValue.Text("t"));
-            master.GetValue(3).AsText().Should().Be("CREATE INDEX \"idx_a\" ON \"t\" (\"a\")");
+            master.GetValue(3).AsText().Should().Be("CREATE INDEX idx_a ON t(a)");
             master.Step().Should().Be(StatementStepResult.Row);
             master.GetValue(1).Should().Be(SqlValue.Text("idx_bc"));
-            master.GetValue(3).AsText().Should().Be("CREATE UNIQUE INDEX \"idx_bc\" ON \"t\" (\"b\", \"c\" DESC)");
+            master.GetValue(3).AsText().Should().Be("CREATE UNIQUE INDEX idx_bc ON t(b, c DESC)");
             master.Step().Should().Be(StatementStepResult.Done);
         }
 
@@ -1846,7 +1846,7 @@ public class EmbeddedEngineTests
         using var schema = connection.Prepare("SELECT sql FROM sqlite_schema WHERE name = 'idx';");
         schema.Step().Should().Be(StatementStepResult.Row);
         schema.GetValue(0).AsText().Should().Be(
-            "CREATE UNIQUE INDEX \"idx\" ON \"t\" (lower(a) COLLATE NOCASE DESC) WHERE active = 1");
+            "CREATE UNIQUE INDEX idx ON t(lower(a) COLLATE NOCASE DESC) WHERE active = 1");
     }
 
     [Test]
@@ -1928,7 +1928,7 @@ public class EmbeddedEngineTests
         {
             master.Step().Should().Be(StatementStepResult.Row);
             master.GetValue(0).Should().Be(SqlValue.Text("renamed"));
-            master.GetValue(1).AsText().Should().Be("CREATE INDEX \"idx_ab\" ON \"renamed\" (\"id\", \"b\")");
+            master.GetValue(1).AsText().Should().Be("CREATE INDEX idx_ab ON \"renamed\"(id, b)");
             master.Step().Should().Be(StatementStepResult.Done);
         }
 

@@ -65,20 +65,23 @@ public sealed class ManagedAlterTableRenameColumnTests
             .And.Contain("old.new_col || '->' || new.new_col")
             .And.Contain("'old_col: '");
 
-        // The managed engine regenerates table and index DDL with quoted identifiers, so only the
-        // rewritten expression text is comparable there.
+        // The managed engine performs the same surgical rename edits on the stored CREATE text
+        // that SQLite applies (sqlite3_rename_token), so everything matches byte for byte.
+        SchemaSql(managed, "t").Should().Be(SchemaSql(sqlite, "t"));
+        SchemaSql(managed, "t_old_col").Should().Be(SchemaSql(sqlite, "t_old_col"));
+        SchemaSql(managed, "expr_idx").Should().Be(SchemaSql(sqlite, "expr_idx"));
+        SchemaSql(managed, "sibling").Should().Be(SchemaSql(sqlite, "sibling"));
         SchemaSql(managed, "t").Should()
-            .Contain("CHECK (new_col > 0)")
+            .Contain("CHECK(new_col > 0)")
             .And.Contain("(new_col * 2) STORED")
             .And.Contain("(new_col + 100)")
-            .And.Contain("CHECK (new_col <> 42 AND note <> 'old_col')");
+            .And.Contain("CHECK(new_col <> 42 AND note <> 'old_col')");
         SchemaSql(managed, "expr_idx").Should()
             .Contain("(new_col + 1)")
             .And.Contain("WHERE new_col > 5");
         SchemaSql(managed, "sibling").Should()
-            .Contain("REFERENCES \"t\" (\"new_col\")")
+            .Contain("REFERENCES t(new_col)")
             .And.NotContain("old_col");
-        SchemaSql(sqlite, "sibling").Should().Contain("REFERENCES t(new_col)");
 
         ReadRows(managed, "PRAGMA table_xinfo(t);")
             .Should().Equal(ReadRows(sqlite, "PRAGMA table_xinfo(t);"));
@@ -144,7 +147,7 @@ public sealed class ManagedAlterTableRenameColumnTests
             .And.Contain("SELECT 'b' || new.ab || new.ba");
         SchemaSql(managed, "t").Should()
             .Contain("CHECK (renamed <> 'b' AND ab <> 'b' AND ba IS NOT 'b')");
-        SchemaSql(managed, "other").Should().Contain("\"b\"").And.NotContain("renamed");
+        SchemaSql(managed, "other").Should().Be(SchemaSql(sqlite, "other")).And.NotContain("renamed");
     }
 
     [TestCase("z", "b", "CREATE VIEW v AS SELECT z FROM t WHERE z > 0")]

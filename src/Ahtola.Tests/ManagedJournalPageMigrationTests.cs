@@ -511,14 +511,14 @@ public sealed class ManagedJournalPageMigrationTests
             verification.ExecuteScalar().Should().Be(5L);
             verification.CommandText = "SELECT sql FROM sqlite_schema WHERE name='child'";
             verification.ExecuteScalar()!.ToString().Should()
-                .Contain("REFERENCES \"parent\" (\"id\")")
+                .Contain("REFERENCES parent(id)")
                 .And.Contain("UNIQUE")
                 .And.Contain("DEFAULT (2 + 3)")
-                .And.Contain("CONSTRAINT \"positive\" CHECK (quantity > 0)");
+                .And.Contain("CONSTRAINT positive CHECK (quantity > 0)");
             verification.CommandText = "SELECT sql FROM sqlite_schema WHERE name='generated_key'";
             verification.ExecuteScalar()!.ToString().Should()
-                .Contain("\"doubled\" INTEGER AS (base * 2) STORED")
-                .And.Contain("PRIMARY KEY (\"tenant\", \"sequence\")");
+                .Contain("doubled INTEGER AS (base * 2) STORED")
+                .And.Contain("PRIMARY KEY(tenant, sequence)");
             verification.CommandText =
                 "SELECT doubled FROM generated_key WHERE tenant='tenant' AND sequence=1";
             verification.ExecuteScalar().Should().Be(14L);

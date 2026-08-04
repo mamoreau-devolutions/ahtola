@@ -212,6 +212,7 @@ internal sealed class EmbeddedFileStore : IDisposable
                 create.PrimaryKeyDeclarationOrder,
                 create.TableForeignKeys,
                 create.Strict);
+            table.Sql = create.Sql;
             LoadTableRows(entry.Name, table, entry.RootPage, occupiedBtreePages);
             tables[entry.Name] = table;
             rootPages[entry.Name] = entry.RootPage;
@@ -318,7 +319,7 @@ internal sealed class EmbeddedFileStore : IDisposable
                         trigger.Timing,
                         trigger.Event,
                         trigger.UpdateOfColumns,
-                        trigger.TableName,
+                        LocalTableName(trigger.TableName),
                         trigger.When,
                         trigger.Body,
                         trigger.Sql,
@@ -7919,6 +7920,9 @@ internal sealed class EmbeddedFileStore : IDisposable
         ValidateRuntimeIndependentQuery("view", catalogName, persisted.Query);
     }
 
+    private static string LocalTableName(string name)
+        => ManagedSchemaName.TrySplit(name, out _, out var local) ? local : name;
+
     private static void ValidateTriggerDefinition(
         string catalogName,
         TriggerDefinition trigger,
@@ -7945,7 +7949,7 @@ internal sealed class EmbeddedFileStore : IDisposable
             || persisted.Timing != trigger.Timing
             || persisted.Event != trigger.Event
             || !SameColumnList(persisted.UpdateOfColumns, trigger.UpdateOfColumns)
-            || !string.Equals(persisted.TableName, trigger.TableName, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(LocalTableName(persisted.TableName), trigger.TableName, StringComparison.OrdinalIgnoreCase)
             || (persisted.When is null) != (trigger.When is null)
             || persisted.Body.Count != trigger.Body.Count
             || !HaveSameStatementKinds(persisted.Body, trigger.Body))
@@ -7976,15 +7980,19 @@ internal sealed class EmbeddedFileStore : IDisposable
         IReadOnlyDictionary<string, EmbeddedTable> tables,
         IReadOnlyDictionary<string, ViewDefinition> views)
     {
+        // SQLite keeps ON-clause schema qualifiers verbatim in the stored trigger SQL
+        // (CREATE TRIGGER ... ON main.t ...), so the reparsed target may be qualified while
+        // the catalog keys are local.
+        var targetName = LocalTableName(trigger.TableName);
         if (!string.Equals(trigger.Name, entry.Name, StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(trigger.TableName, entry.TableName, StringComparison.OrdinalIgnoreCase))
+            || !string.Equals(targetName, entry.TableName, StringComparison.OrdinalIgnoreCase))
         {
             throw new EmbeddedSqlException(
                 $"Stored schema entry for trigger '{entry.Name}' does not match its CREATE TRIGGER definition.");
         }
         var targetExists = trigger.Timing == TriggerTiming.InsteadOf
-            ? views.ContainsKey(trigger.TableName)
-            : tables.ContainsKey(trigger.TableName);
+            ? views.ContainsKey(targetName)
+            : tables.ContainsKey(targetName);
         if (!targetExists)
         {
             throw new EmbeddedSqlException(
@@ -7997,7 +8005,7 @@ internal sealed class EmbeddedFileStore : IDisposable
             trigger.Timing,
             trigger.Event,
             trigger.UpdateOfColumns,
-            trigger.TableName,
+            targetName,
             trigger.When,
             trigger.Body,
             trigger.Sql,
@@ -10098,7 +10106,7 @@ internal sealed class EmbeddedFileStore : IDisposable
                 name,
                 name,
                 rootPages[name],
-                EmbeddedDatabase.BuildCreateTableSql(name, tables[name])));
+                tables[name].Sql ?? EmbeddedDatabase.BuildCreateTableSql(name, tables[name])));
         }
 
         foreach (var tableName in tables.Keys.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
@@ -10117,7 +10125,7 @@ internal sealed class EmbeddedFileStore : IDisposable
                     tableName,
                     rootPage,
                     index.Origin == EmbeddedIndexOrigin.Explicit
-                        ? BuildCreateIndexSql(tableName, index)
+                        ? index.Sql ?? BuildCreateIndexSql(tableName, index)
                         : null));
             }
         }

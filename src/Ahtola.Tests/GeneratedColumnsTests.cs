@@ -389,9 +389,9 @@ public class GeneratedColumnsTests
             Scalar(sqlite, "SELECT hidden FROM pragma_table_xinfo('t') WHERE name = 'b';").Should().Be(2L);
             Scalar(sqlite, "SELECT sql FROM sqlite_schema WHERE name = 't';")
                 .Should().BeOfType<string>()
-                .Which.Should().Contain("CONSTRAINT \"generated_c\" GENERATED ALWAYS AS (b + 1) VIRTUAL")
-                .And.Contain("CONSTRAINT \"positive_c\" CHECK (c > 0)")
-                .And.Contain("UNIQUE (\"c\") ON CONFLICT IGNORE");
+                .Which.Should().Contain("CONSTRAINT generated_c GENERATED ALWAYS AS (b + 1) VIRTUAL")
+                .And.Contain("CONSTRAINT positive_c CHECK (c > 0)")
+                .And.Contain("UNIQUE(c) ON CONFLICT IGNORE");
         }
         finally
         {

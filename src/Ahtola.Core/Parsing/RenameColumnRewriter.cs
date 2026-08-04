@@ -108,6 +108,102 @@ internal static class RenameColumnRewriter
     }
 
     /// <summary>
+    /// Rewrites the stored <c>CREATE TABLE</c> text of the renamed column's own table: the
+    /// column definition name, table-level PRIMARY KEY/UNIQUE lists, CHECK and generated-column
+    /// expressions, and any self-referencing FOREIGN KEY parent column lists. Returns
+    /// <see langword="null"/> when the text cannot be reparsed (forcing the caller back onto
+    /// schema regeneration); the column definition name always requires an edit, so a parsed
+    /// table always produces rewritten text.
+    /// </summary>
+    public static string? RewriteCreateTable(
+        string sql,
+        string tableName,
+        IReadOnlyList<string> columns,
+        string oldName,
+        string newName,
+        bool quoteNewName)
+        => RewriteCreateTable(
+            sql,
+            tableName,
+            columns,
+            new RenameColumnSchema(
+                name => string.Equals(name, tableName, StringComparison.OrdinalIgnoreCase) ? columns : null,
+                name => string.Equals(name, tableName, StringComparison.OrdinalIgnoreCase)),
+            oldName,
+            newName,
+            quoteNewName);
+
+    /// <summary>
+    /// Same as <see cref="RewriteCreateTable(string, string, IReadOnlyList{string}, string, string, bool)"/>
+    /// but with an explicit rename schema, used when the edited table is not the rename target
+    /// itself (a child table whose FOREIGN KEY names the renamed parent column).
+    /// </summary>
+    public static string? RewriteCreateTable(
+        string sql,
+        string tableName,
+        IReadOnlyList<string> columns,
+        RenameColumnSchema schema,
+        string oldName,
+        string newName,
+        bool quoteNewName)
+    {
+        ParsedStatement parsed;
+        SqlSourceSpans spans;
+        try
+        {
+            parsed = SqlParser.ParseWithSpans(sql, out spans);
+        }
+        catch (EmbeddedSqlException)
+        {
+            return null;
+        }
+
+        if (parsed is not CreateTableStatement statement)
+            return null;
+
+        var walker = new Walker(spans, oldName, newName, quoteNewName, schema);
+        walker.WalkCreateTable(statement, tableName, columns);
+        return walker.Apply(sql);
+    }
+
+    /// <summary>
+    /// Rewrites the stored <c>CREATE INDEX</c> text of an explicit index over the renamed
+    /// column's table: key column names, key expressions, and the partial-index predicate.
+    /// Returns the rewritten text, or the original text when the index does not reference the
+    /// renamed column; <see langword="null"/> only when the text cannot be reparsed, which
+    /// forces the caller back onto schema regeneration.
+    /// </summary>
+    public static string? RewriteCreateIndex(
+        string sql,
+        string tableName,
+        IReadOnlyList<string> columns,
+        string oldName,
+        string newName,
+        bool quoteNewName)
+    {
+        ParsedStatement parsed;
+        SqlSourceSpans spans;
+        try
+        {
+            parsed = SqlParser.ParseWithSpans(sql, out spans);
+        }
+        catch (EmbeddedSqlException)
+        {
+            return null;
+        }
+
+        if (parsed is not CreateIndexStatement statement)
+            return null;
+
+        var schema = new RenameColumnSchema(
+            name => string.Equals(name, tableName, StringComparison.OrdinalIgnoreCase) ? columns : null,
+            name => string.Equals(name, tableName, StringComparison.OrdinalIgnoreCase));
+        var walker = new Walker(spans, oldName, newName, quoteNewName, schema);
+        walker.WalkCreateIndex(statement, tableName, columns);
+        return walker.Apply(sql) ?? sql;
+    }
+
+    /// <summary>
     /// Applies SQLite's replacement-token rule: the substituted identifier is quoted when the
     /// new name was written quoted in the ALTER statement or when the token being replaced was
     /// itself quoted.
@@ -728,6 +824,115 @@ internal static class RenameColumnRewriter
             {
                 if (projection.Alias is not null)
                     scope.OutputAliases.Add(projection.Alias);
+            }
+        }
+
+        public void WalkCreateTable(CreateTableStatement statement, string tableName, IReadOnlyList<string> columns)
+        {
+            var scope = new Scope(null);
+            scope.Bindings.Add(new Binding(tableName, columns, IsTarget: true, QualifiedOnly: false));
+
+            foreach (var column in statement.Columns)
+            {
+                if (Matches(column.Name))
+                {
+                    var span = spans.GetName(column);
+                    if (span is not null)
+                        _edits.Add(span.Value);
+                }
+
+                if (column.GenerationExpression is not null)
+                    WalkExpression(column.GenerationExpression, scope);
+
+                foreach (var check in column.CheckConstraints)
+                    WalkExpression(check.Expression, scope);
+
+                // A column-level REFERENCES names the parent's column, which is affected when
+                // the referenced table is the rename target itself.
+                foreach (var foreignKey in column.ForeignKeyConstraints)
+                    WalkForeignKeyParentColumns(foreignKey);
+            }
+
+            foreach (var keyColumn in statement.PrimaryKeyColumns ?? [])
+                EditConstraintColumnName(keyColumn);
+
+            foreach (var unique in statement.UniqueConstraints ?? [])
+            {
+                foreach (var keyColumn in unique.Columns)
+                    EditConstraintColumnName(keyColumn);
+            }
+
+            foreach (var check in statement.CheckConstraints ?? [])
+                WalkExpression(check.Expression, scope);
+
+            foreach (var foreignKey in statement.TableForeignKeys ?? [])
+            {
+                WalkForeignKeyChildColumns(foreignKey);
+                WalkForeignKeyParentColumns(foreignKey);
+            }
+        }
+
+        public void WalkCreateIndex(CreateIndexStatement statement, string tableName, IReadOnlyList<string> columns)
+        {
+            var scope = new Scope(null);
+            scope.Bindings.Add(new Binding(tableName, columns, IsTarget: true, QualifiedOnly: false));
+
+            foreach (var keyColumn in statement.Columns)
+            {
+                if (keyColumn.Name is not null)
+                {
+                    if (Matches(keyColumn.Name))
+                    {
+                        var span = spans.GetName(keyColumn);
+                        if (span is not null)
+                            _edits.Add(span.Value);
+                    }
+                }
+                else
+                {
+                    WalkExpression(keyColumn.Expression, scope);
+                }
+            }
+
+            WalkExpression(statement.Where, scope);
+        }
+
+        private void EditConstraintColumnName(TablePrimaryKeyColumn keyColumn)
+        {
+            if (!Matches(keyColumn.Name))
+                return;
+
+            var span = spans.GetName(keyColumn);
+            if (span is not null)
+                _edits.Add(span.Value);
+        }
+
+        private void WalkForeignKeyChildColumns(ForeignKeyDefinition foreignKey)
+        {
+            var childSpans = spans.GetList(foreignKey);
+            for (var index = 0; index < foreignKey.ChildColumns.Count; index++)
+            {
+                if (!Matches(foreignKey.ChildColumns[index]))
+                    continue;
+
+                if (childSpans is not null && index < childSpans.Count)
+                    _edits.Add(childSpans[index]);
+            }
+        }
+
+        private void WalkForeignKeyParentColumns(ForeignKeyDefinition foreignKey)
+        {
+            if (!schema.IsRenameTarget(foreignKey.ParentTable))
+                return;
+
+            var parentSpans = spans.GetQualifierList(foreignKey);
+            for (var index = 0; index < foreignKey.ParentColumns.Count; index++)
+            {
+                if (!Matches(foreignKey.ParentColumns[index]))
+                    continue;
+
+                if (parentSpans is not null && index < parentSpans.Count)
+                    _edits.Add(parentSpans[index]);
             }
         }
 

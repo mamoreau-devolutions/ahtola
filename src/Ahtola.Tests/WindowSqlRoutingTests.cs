@@ -217,15 +217,16 @@ public class WindowSqlRoutingTests
     }
 
     [Test]
-    public void RoutedWindowSelectUsesAliasThenFunctionNameForColumns()
+    public void RoutedWindowSelectUsesAliasThenExpressionTextForColumns()
     {
         using var connection = new EmbeddedDatabase().Connect();
         Execute(connection, "CREATE TABLE t(id INTEGER, v INTEGER);");
 
         ColumnNames(connection, $"SELECT id, sum(v) OVER (ORDER BY id {RunningFrame}) AS running FROM t;")
             .Should().Equal("id", "running");
+        // SQLite labels an unaliased window call with the verbatim expression text.
         ColumnNames(connection, $"SELECT id, sum(v) OVER (ORDER BY id {RunningFrame}) FROM t;")
-            .Should().Equal("id", "SUM");
+            .Should().Equal("id", $"sum(v) OVER (ORDER BY id {RunningFrame})");
     }
 
     // ---- Buffered-window routing (shapes the running-frame builder cannot model) --------------

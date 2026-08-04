@@ -15,38 +15,14 @@ agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_text
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_numeric_column_labels | expected success but got error: no such function: JSONB_GROUP_OBJECT
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_does_not_stringify_value | expected success but got error: no such function: JSONB_ARRAY
 alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message | error 'Expected keyword BEGIN. At SQL offset 48.' does not match pattern 'no such column: main\.t\.b'
-alter-table-quoted-trigger-target.sqltest::drop-column-with-unrelated-quoted-trigger-target | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t2 (id INTEGER PRIMARY KEY, keep_col TEXT)' but was 'CREATE TABLE "t2" ("id" INTEGER PRIMARY KEY, "keep_col" TEXT)'
-alter-table-quoted-trigger-target.sqltest::rename-column-with-unrelated-quoted-trigger-target | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t2 (id INTEGER PRIMARY KEY, d TEXT)' but was 'CREATE TABLE "t2" ("id" INTEGER PRIMARY KEY, "d" TEXT)'
-alter_rename_column_partial_idx.sqltest::rename-column-updates-partial-index-where-clause-sql | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE INDEX idx ON t (b) WHERE a2 = 1' but was 'CREATE INDEX "idx" ON "t" ("b") WHERE a2 = 1'
-alter_rename_column_partial_idx.sqltest::rename-column-partial-index-complex-where | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE INDEX idx ON t (b) WHERE a2 > 0 AND c < 10' but was 'CREATE INDEX "idx" ON "t" ("b") WHERE a2 > 0 AND c < 10'
-alter_rename_column_partial_idx.sqltest::rename-column-partial-index-rename-where-col-only | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE INDEX idx ON t (b) WHERE c = 1' but was 'CREATE INDEX "idx" ON "t" ("b") WHERE c = 1'
-alter_rename_column_partial_idx.sqltest::rename-column-updates-expression-index-key | output does not match pattern 'CREATE INDEX idx ON t\s*\(a2\s*\+\s*1\)'
-alter_rename_column_partial_idx.sqltest::rename-column-updates-expression-index-multi-column | output does not match pattern 'CREATE INDEX idx ON t\s*\(a2\s*\+\s*b\s*\*\s*2\)'
-alter_rename_column_partial_idx.sqltest::rename-column-expression-index-other-col-unchanged | output does not match pattern 'CREATE INDEX idx ON t\s*\(b\s*\+\s*1\)'
-alter_rename_column_partial_idx.sqltest::rename-column-expression-index-then-rename-again | output does not match pattern 'CREATE INDEX idx ON t\s*\(a3\s*\+\s*1\)'
-alter_table.sqltest::alter-table-rename-column | expected 2 row(s), got 2 row(s); row 0 expected 'CREATE TABLE t (b INTEGER)' but was 'CREATE TABLE "t" ("b" INTEGER)'
 alter_table.sqltest::alter-table-rename-column-view-on-view | expected success but got error: error in view v2 after rename: no such column: b
 alter_table.sqltest::alter-table-rename-column-view-tablecall-branch | expected success but got error: no such column: t.b
 alter_table.sqltest::alter-table-rename-column-view-attached-db-qualified | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern 'cannot reference'
 alter_table.sqltest::alter-table-rename-column-trigger-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-alter_table.sqltest::alter-table-rename-column-case-insensitive | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (b INT)' but was 'CREATE TABLE "t" ("b" INT)'
-alter_table.sqltest::alter-table-rename-quoted-column | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t ("ab cd" INTEGER)' but was 'CREATE TABLE "t" ("ab cd" INTEGER)'
-alter_table.sqltest::alter-table-add-column | expected 3 row(s), got 3 row(s); row 1 expected 'CREATE TABLE t (a, b)' but was 'CREATE TABLE "t" ("a", "b")'
-alter_table.sqltest::alter-table-add-column-typed | expected 2 row(s), got 2 row(s); row 0 expected 'CREATE TABLE t (a, b DEFAULT 0)' but was 'CREATE TABLE "t" ("a", "b" DEFAULT 0)'
-alter_table.sqltest::alter-table-add-quoted-column | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE test (a, "b c")' but was 'CREATE TABLE "test" ("a", "b c")'
-alter_table.sqltest::alter-table-add-column-hyphen-digit-schema-sql | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (id INTEGER PRIMARY KEY, "c-39uSrAeJEV" TEXT)' but was 'CREATE TABLE "t" ("id" INTEGER PRIMARY KEY, "c-39uSrAeJEV" TEXT)'
-alter_table.sqltest::alter-table-add-column-keyword-schema-sql | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (id INTEGER PRIMARY KEY, "select" TEXT)' but was 'CREATE TABLE "t" ("id" INTEGER PRIMARY KEY, "select" TEXT)'
 alter_table.sqltest::alter-table-add-column-trailing-named-constraint | expected success but got error: Expected a constraint after CONSTRAINT c. At SQL offset 39.
-alter_table.sqltest::alter-table-drop-column | expected 7 row(s), got 7 row(s); row 3 expected 'CREATE TABLE t (a)' but was 'CREATE TABLE "t" ("a")'
-alter_table.sqltest::alter-table-drop-column-special-name | expected 2 row(s), got 2 row(s); row 1 expected 'CREATE TABLE t (a, "c c")' but was 'CREATE TABLE "t" ("a", "c c")'
-alter_table.sqltest::alter-table-drop-column-unique-special-name-schema-sql | output does not match pattern 'CREATE TABLE t \(a, "c c", UNIQUE\s?\(a, "c c"\)\)'
-alter_table.sqltest::alter-table-rename-to-quoted-identifier | expected 11 row(s), got 11 row(s); row 0 expected 'CREATE TABLE "t t" (a)' but was 'CREATE TABLE "t t" ("a")'
-alter_table.sqltest::alter-table-add-notnull-col | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (a, b NOT NULL)' but was 'CREATE TABLE "t" ("a", "b" NOT NULL)'
-alter_table.sqltest::alter-tbl-regression | expected success but got error: no such table: main.p_ren1
 alter_table.sqltest::alter-add-column-invalid-collation | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel | expected success but got error: non-deterministic functions are prohibited in index expressions
-alter_table.sqltest::alter-table-rename-column-updates-unique-sets | output does not match pattern 'CREATE TABLE t\s*\(a INTEGER, c TEXT, d INTEGER, UNIQUE\s*\(c\)\)'
 alter_table.sqltest::alter-table-rename-trigger-fires-after-rename | expected success but got error: error in trigger trig1 after rename table: no such table: t1
 alter_table.sqltest::alter-table-rename-trigger-body-update | expected success but got error: error in trigger trig1 after rename table: no such table: t1
 alter_table.sqltest::alter-table-rename-trigger-body-delete | expected success but got error: error in trigger trig1 after rename table: no such table: t2
@@ -70,7 +46,6 @@ alter_table.sqltest::alter-rename-col-schema-update-cmd-from | expected success 
 alter_table.sqltest::fail-drop-column-cross-table-trigger-update-where-expr | error 'error in trigger trg after drop column: table has no column named m' does not match pattern 'error in trigger trg after drop column: no such column: m'
 alter_table.sqltest::drop-column-cross-table-trigger-insert-col-list-deferred | expected success but got error: error in trigger trg after drop column: table has no column named m
 alter_table.sqltest::drop-column-cross-table-trigger-set-target-deferred | expected success but got error: error in trigger trg after drop column: table has no column named m
-alter_table.sqltest::drop-column-cross-table-trigger-unreferenced | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t1 (m TEXT, d REAL)' but was 'CREATE TABLE "t1" ("m" TEXT, "d" REAL)'
 alter_table.sqltest::drop-column-other-table-trigger-insert-col-deferred | expected success but got error: error in trigger tu after drop column: table has no column named zer
 alter_table.sqltest::drop-column-owning-table-trigger-insert-col-deferred | expected success but got error: error in trigger tu after drop column: table has no column named x
 alter_table.sqltest::drop-column-owning-table-trigger-update-set-deferred | expected success but got error: error in trigger tu after drop column: table has no column named x
@@ -89,8 +64,6 @@ changes.sqltest::changes-delete-trigger-body-reset-count | expected 8 row(s), go
 char.sqltest::char-non-integer | expected 1 row(s), got 1 row(s); row 0 expected '' but was ' '
 check_constraint.sqltest::check_constraint_pragma_ignore | expected success but got error: Unsupported PRAGMA ignore_check_constraints. At SQL offset 32.
 check_constraint.sqltest::check_constraint_rename_table_qualified_ref | expected success but got error: ALTER TABLE RENAME cannot rewrite table-qualified CHECK expressions until managed schema token rewriting is implemented.
-check_constraint.sqltest::check_constraint_ddl_column_level_preserved | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
-check_constraint.sqltest::check_constraint_inline_rename_then_drop_keeps_renamed_ref | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
 check_constraint.sqltest::check_constraint_update_only_checks_changed_columns | expected success but got error: Unsupported PRAGMA ignore_check_constraints. At SQL offset 32.
 check_constraint.sqltest::check_constraint_update_table_level_multi_column | expected success but got error: Unsupported PRAGMA ignore_check_constraints. At SQL offset 32.
 check_constraint.sqltest::check_constraint_integrity_check_detects_real_violation | expected success but got error: Unsupported PRAGMA ignore_check_constraints. At SQL offset 32.
@@ -111,15 +84,6 @@ create_table.sqltest::create_table_trailing_named_column_constraint_primary_key_
 create_table.sqltest::create_table_primary_key_nulls_last_rejected | error 'Expected RightParen. At SQL offset 40.' does not match pattern 'NULLS'
 create_table.sqltest::create_table_unique_nulls_first_rejected | error 'Expected RightParen. At SQL offset 35.' does not match pattern 'NULLS'
 create_table.sqltest::create_table_unique_desc_nulls_first_rejected | error 'Expected RightParen. At SQL offset 41.' does not match pattern 'NULLS'
-create_table_as_select.sqltest::ctas_schema_sql | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(id INT,name TEXT)' but was 'CREATE TABLE "dst" ("id" INT, "name" TEXT)'
-create_table_as_select.sqltest::ctas_schema_sql_expression_columns | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst("a + 1","count(*)")' but was 'CREATE TABLE "dst" ("BinaryExpression { Left = ColumnExpression { Name = a, Qualifier = , UnqualifiedNam
-create_table_as_select.sqltest::ctas_schema_sql_mixed_alias_expr | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(id INT,"b // c","length(b)")' but was 'CREATE TABLE "dst" ("id" INT, "BinaryExpression { Left = ColumnExpression { Name = b, Qualifier
-create_table_as_select.sqltest::ctas_schema_sql_literals | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst("1","'text'","3.14","NULL")' but was 'CREATE TABLE "dst" ("LiteralExpression { Value = Ahtola.Core.SqlValue }", "LiteralExpression { V
-create_table_as_select.sqltest::ctas_schema_sql_quoted_source_col | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst("weird col" TEXT)' but was 'CREATE TABLE "dst" ("weird col" TEXT)'
-create_table_as_select.sqltest::ctas_schema_expr_reparseable | expected success but got error: no such column: a + 1
-create_table_as_select.sqltest::ctas_duplicate_column_names | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(id INT,"id:1" INT,name TEXT,value TEXT)' but was 'CREATE TABLE "dst" ("id" INT, "id:1" INT, "name" TEXT, "value" TEXT)'
-create_table_as_select.sqltest::ctas_triple_duplicate_columns | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(x INT,"x:1" INT,"x:2" INT)' but was 'CREATE TABLE "dst" ("x" INT, "x:1" INT, "x:2" INT)'
-create_table_as_select.sqltest::ctas_compound_select_column_names | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE dst(a INT,b TEXT)' but was 'CREATE TABLE "dst" ("a" INT, "b" TEXT)'
 cte.sqltest::cte-update-direct-ref-keyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
 cte.sqltest::cte-update-direct-ref-nonkeyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
 cte.sqltest::cte-unreferenced-column-mismatch-delete | expected success but got error: Managed CTE DML requires every CTE to contribute to the DML statement; cte is unused.
@@ -162,10 +126,6 @@ gencol.sqltest::gencol_alter_add_virtual_check_with_existing_virtual_middle_viol
 gencol.sqltest::gencol_alter_add_virtual_insert_after | expected 2 row(s), got 2 row(s); row 0 expected '1/10' but was '1/'
 gencol.sqltest::gencol_alter_add_virtual_after_add_default_notnull | expected success but got error: Cannot add a NOT NULL column without a default value.
 gencol.sqltest::gencol_alter_add_stored_rejected | expected an error but the statement succeeded
-gencol.sqltest::gencol_rename_column_updates_expression | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t1 (c TEXT, b TEXT AS (c))' but was 'CREATE TABLE "t1" ("c" TEXT, "b" TEXT AS (c) VIRTUAL)'
-gencol.sqltest::gencol_rename_column_other_table_unaffected | output does not match pattern '^CREATE TABLE t2 ?\(c, othername, extra AS \(c \+ 1\)\)$'
-gencol.sqltest::gencol_rename_column_other_table_matching_name_unaffected | output does not match pattern '^CREATE TABLE t2 ?\(a, z AS \(a \+ 1\)\)$'
-gencol.sqltest::rename_then_drop_keeps_renamed_column | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (a REAL AS (ee), c INTEGER, f INTEGER AS (c * ee), ee REAL)' but was 'CREATE TABLE "t" ("a" REAL AS (ee) VIRTUAL, "c" INTEGER, "f" INTEG
 gencol.sqltest::gencol_error_subquery | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
 gencol.sqltest::gencol_error_in_select | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
 gencol.sqltest::gencol_error_exists | error 'subqueries are not allowed in a generated column' does not match pattern 'subqueries prohibited in generated columns'
@@ -310,10 +270,6 @@ returning.sqltest::delete-returning-target-selfread-correlated-group-count | exp
 returning.sqltest::insert-returning-last-insert-rowid | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
 returning.sqltest::insert-returning-target-selfread-reruns-per-row | expected 2 row(s), got 2 row(s); row 0 expected '2/2' but was '2/3'
 rollback.sqltest::schema-change-rollback-2-2 | expected 2 row(s), got 2 row(s); row 0 expected 'before' but was 'after'
-rollback.sqltest::schema-alter-rollback | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (x)' but was 'CREATE TABLE "t" ("x")'
-rollback.sqltest::schema-alter-rollback-and-repeat | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (x, y)' but was 'CREATE TABLE "t" ("x", "y")'
-rollback.sqltest::schema-create-index-rollback | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (x)' but was 'CREATE TABLE "t" ("x")'
-rollback.sqltest::schema-drop-table-rollback | expected 1 row(s), got 1 row(s); row 0 expected 'CREATE TABLE t (x)' but was 'CREATE TABLE "t" ("x")'
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery | expected success but got error: managed execution exceeded 30 seconds

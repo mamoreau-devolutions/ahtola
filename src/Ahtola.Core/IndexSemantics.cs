@@ -55,7 +55,8 @@ internal static class EmbeddedIndexFactory
             statement.Unique,
             columns,
             Where: statement.Where,
-            WhereSql: statement.WhereSql);
+            WhereSql: statement.WhereSql,
+            Sql: statement.Sql);
         IndexExpressionSemantics.ValidateDefinition(tableName, table, definition);
         return definition;
     }
@@ -71,7 +72,7 @@ internal static class IndexSqlFormatter
                 ? term.ExpressionSql
                     ?? throw new EmbeddedSqlException(
                         $"Index '{index.Name}' has an unreconstructable expression term.")
-                : QuoteIdentifier(term.Name);
+                : SqlIdentifierFormatter.QuoteIfNeeded(term.Name);
             if (!term.IsExpression && term.Collation is { } collation)
                 definition += " COLLATE " + FormatIdentifier(collation);
             if (term.Descending)
@@ -84,7 +85,7 @@ internal static class IndexSqlFormatter
             : " WHERE " + (index.WhereSql
                 ?? throw new EmbeddedSqlException(
                     $"Partial index '{index.Name}' has an unreconstructable WHERE predicate."));
-        return $"CREATE {unique}INDEX {QuoteIdentifier(index.Name)} ON {QuoteIdentifier(tableName)} "
+        return $"CREATE {unique}INDEX {SqlIdentifierFormatter.QuoteIfNeeded(index.Name)} ON {SqlIdentifierFormatter.QuoteIfNeeded(tableName)} "
             + $"({string.Join(", ", terms)}){where}";
     }
 

@@ -19,7 +19,8 @@ internal sealed record CreateTableStatement(
     int? PrimaryKeyDeclarationOrder = null,
     IReadOnlyList<ForeignKeyDefinition>? TableForeignKeys = null,
     bool Strict = false,
-    IReadOnlyList<SqlValue[]>? InitialRows = null) : ParsedStatement;
+    IReadOnlyList<SqlValue[]>? InitialRows = null,
+    string? Sql = null) : ParsedStatement;
 
 internal sealed record CreateTableAsSelectStatement(
     string Name,
@@ -36,7 +37,8 @@ internal sealed record CreateIndexStatement(
     bool Unique,
     bool IfNotExists,
     Expression? Where = null,
-    string? WhereSql = null) : ParsedStatement;
+    string? WhereSql = null,
+    string? Sql = null) : ParsedStatement;
 
 internal sealed record DropIndexStatement(string Name, bool IfExists) : ParsedStatement;
 
@@ -141,7 +143,7 @@ internal static class ManagedSchemaName
         => TrySplit(value, out var schema, out var name) ? schema + "." + name : value;
 }
 
-internal sealed record AlterTableAddColumnStatement(string TableName, EmbeddedColumn Column) : ParsedStatement;
+internal sealed record AlterTableAddColumnStatement(string TableName, EmbeddedColumn Column, string? ColumnSql = null) : ParsedStatement;
 
 internal sealed record AlterTableRenameStatement(string TableName, string NewName) : ParsedStatement;
 
@@ -452,7 +454,14 @@ internal enum CompoundOperator
     Except,
 }
 
-internal sealed record Projection(Expression Expression, string? Alias);
+internal sealed record Projection(
+    Expression Expression,
+    string? Alias,
+    // SQLite names a result column that has no alias after the exact source text of the
+    // expression that produced it (so `a + 1`, `count(*)`, `'text'`), including the
+    // parentheses of a parenthesized expression. The parser captures the expression span;
+    // when it is absent (rewritten projections), callers fall back to structural names.
+    string? SourceText = null);
 
 internal enum NullPlacement
 {
@@ -547,7 +556,8 @@ internal sealed record EmbeddedColumn(
     IReadOnlyList<ForeignKeyDefinition>? AdditionalForeignKeys = null,
     int? PrimaryKeyDeclarationOrder = null,
     int? UniqueDeclarationOrder = null,
-    bool StrictAny = false)
+    bool StrictAny = false,
+    bool GenerationVirtualSpelled = false)
 {
     // A column is generated when it carries a computed AS (...) expression. Generated
     // columns are materialized at write time; VIRTUAL and STORED differ only in whether
@@ -609,7 +619,8 @@ internal sealed record EmbeddedColumn(
             additionalForeignKeys,
             PrimaryKeyDeclarationOrder,
             UniqueDeclarationOrder,
-            StrictAny);
+            StrictAny,
+            GenerationVirtualSpelled);
 }
 
 // A column participating in a table-level PRIMARY KEY(...) clause, preserving the
@@ -685,7 +696,8 @@ internal sealed record EmbeddedIndex(
     InsertConflictAlgorithm? ConflictAlgorithm = null,
     Expression? Where = null,
     string? WhereSql = null,
-    int? ConstraintOrdinal = null)
+    int? ConstraintOrdinal = null,
+    string? Sql = null)
 {
     public bool IsPartial => Where is not null;
 }

@@ -516,12 +516,8 @@
       "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs AggStep/AggFinal arms (lines ~660-700)",
       "severity": "s1-correctness",
       "effort": "S",
-      "conformance_links": [
-        "agg-functions/sum-large-float.sqltest::sum-large-float-infinity",
-        "agg-functions/sum-large-float.sqltest::total-large-float-infinity",
-        "agg-functions/sum-large-float.sqltest::avg-large-float-infinity"
-      ],
-      "notes": "SUM/TOTAL/AVG over very large REAL values: Ahtola diverges from SQLite/Turso on infinity/overflow results for float aggregates. Verify Kahan/compensated summation and int->real promotion behavior against op_agg_step.",
+      "conformance_links": [],
+      "notes": "SUM/TOTAL/AVG over very large REAL values: Ahtola diverges from SQLite/Turso on infinity/overflow results for float aggregates. Verify Kahan/compensated summation and int->real promotion behavior against op_agg_step. (Previously linked keys cleared by earlier wave work: sum-large-float-infinity, total-large-float-infinity, avg-large-float-infinity.)",
       "status": "open"
     },
     {
@@ -568,11 +564,8 @@
       "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs::TableAccessPlan descending-scan special case (lines ~121-150), src/Ahtola.Core/Compilation/SortedScanProgramBuilder.cs",
       "severity": "s3-perf",
       "effort": "M",
-      "conformance_links": [
-        "snapshot_tests/subqueries/subquery-sort-elision.sqltest::window-partial-not-elided",
-        "snapshot_tests/subqueries/subquery-sort-elision.sqltest::window-no-cte-order-not-elided"
-      ],
-      "notes": "Turso's order.rs decides, per join order and access method, whether the chosen index already produces the required ORDER BY/GROUP BY order and elides the sort step. Ahtola only special-cases a single ORDER BY term matching the primary key/rowid for a single-table backward scan (SelectStatementCompiler ~line 132); any other case -- including index-satisfied ORDER BY on a secondary index, or GROUP BY order elision -- always materializes through a Sorter (SortedScanProgramBuilder). The listed conformance failures show sort-elision expectations not met for window/CTE queries.",
+      "conformance_links": [],
+      "notes": "Turso's order.rs decides, per join order and access method, whether the chosen index already produces the required ORDER BY/GROUP BY order and elides the sort step. Ahtola only special-cases a single ORDER BY term matching the primary key/rowid for a single-table backward scan (SelectStatementCompiler ~line 132); any other case -- including index-satisfied ORDER BY on a secondary index, or GROUP BY order elision -- always materializes through a Sorter (SortedScanProgramBuilder). The listed conformance failures show sort-elision expectations not met for window/CTE queries. (Previously linked keys cleared by earlier wave work: window-partial-not-elided, window-no-cte-order-not-elided.)",
       "status": "open"
     },
     {
@@ -607,11 +600,8 @@
       "ahtola_ref": "src/Ahtola.Core/Compilation/RecursiveCteProgramBuilder.cs (doc comment lines 49-55)",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [
-        "cte_expressions.sqltest::cte-multi-union",
-        "cte_expressions.sqltest::cte-union-all-with-duplicates"
-      ],
-      "notes": "RecursiveCteProgramBuilder explicitly documents its scope as \"the well-defined linear recursion (a single recursive transform)\" and states \"Multiple distinct recursive terms ... and mutual recursion are out of scope\". `WITH RECURSIVE cte AS (anchor UNION leg1 UNION leg2 ...)` (3+ compound terms) fails to parse/compile (\"Expected RightParen\"), confirmed by the cte_expressions.sqltest failures.",
+      "conformance_links": [],
+      "notes": "RecursiveCteProgramBuilder explicitly documents its scope as \"the well-defined linear recursion (a single recursive transform)\" and states \"Multiple distinct recursive terms ... and mutual recursion are out of scope\". `WITH RECURSIVE cte AS (anchor UNION leg1 UNION leg2 ...)` (3+ compound terms) fails to parse/compile (\"Expected RightParen\"), confirmed by the cte_expressions.sqltest failures. (Previously linked keys cleared by earlier wave work: cte-multi-union, cte-union-all-with-duplicates.)",
       "status": "open"
     },
     {
@@ -727,13 +717,8 @@
       "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (generated column expression validation)",
       "severity": "s4-intentional",
       "effort": "S",
-      "conformance_links": [
-        "gencol.sqltest::gencol_error_aggregate_star",
-        "gencol.sqltest::gencol_error_window_function",
-        "gencol.sqltest::gencol_error_nested_window_function",
-        "gencol.sqltest::gencol_error_nested_aggregate_star"
-      ],
-      "notes": "Ahtola correctly rejects aggregate/window functions in generated column expressions but with a single combined message (\"aggregate and window functions are not allowed in a generated column\") instead of Turso's two distinct messages (aggregate-specific vs window-specific). Behaviorally equivalent (both reject), differs only in error text -- low-severity wording divergence, not a capability gap.",
+      "conformance_links": [],
+      "notes": "Ahtola correctly rejects aggregate/window functions in generated column expressions but with a single combined message (\"aggregate and window functions are not allowed in a generated column\") instead of Turso's two distinct messages (aggregate-specific vs window-specific). Behaviorally equivalent (both reject), differs only in error text -- low-severity wording divergence, not a capability gap. (Previously linked keys cleared by earlier wave work: gencol_error_aggregate_star, gencol_error_window_function, gencol_error_nested_window_function, gencol_error_nested_aggregate_star.)",
       "status": "open"
     },
     {
@@ -776,7 +761,7 @@
       "layer": "compilation",
       "kind": "divergent",
       "turso_ref": "turso-src/core/translate/schema.rs (preserves the original unquoted identifier spelling in stored/reconstructed CREATE TABLE/INDEX SQL when the source SQL was unquoted)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ALTER TABLE rename/add/drop-column schema SQL rewriting; IndexSemantics.cs::IndexSqlFormatter.QuoteIdentifier)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (verbatim Sql storage on CREATE, ALTER TABLE ADD/RENAME/DROP COLUMN rewriting via AlterTableSqlRewriter.cs, BuildCreateTableSql synthesis with QuoteIfNeeded), src/Ahtola.Core/Parsing/SqlParser.cs (NormalizeObjectSql stored-prefix normalization), src/Ahtola.Core/Parsing/SqlIdentifierFormatter.cs",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
@@ -786,10 +771,60 @@
         "alter_table.sqltest::alter-table-add-quoted-column",
         "alter_table.sqltest::alter-table-drop-column",
         "alter_rename_column_partial_idx.sqltest::rename-column-updates-partial-index-where-clause-sql",
-        "create_table_as_select.sqltest::ctas_compound_select_column_names"
+        "create_table_as_select.sqltest::ctas_compound_select_column_names",
+        "alter_table.sqltest::alter-table-rename-column-case-insensitive",
+        "alter_table.sqltest::alter-table-rename-quoted-column",
+        "alter_table.sqltest::alter-table-add-column-hyphen-digit-schema-sql",
+        "alter_table.sqltest::alter-table-add-column-keyword-schema-sql",
+        "alter_table.sqltest::alter-table-drop-column-special-name",
+        "alter_table.sqltest::alter-table-drop-column-unique-special-name-schema-sql",
+        "alter_table.sqltest::alter-table-rename-to-quoted-identifier",
+        "alter_table.sqltest::alter-table-add-notnull-col",
+        "alter_table.sqltest::alter-tbl-regression",
+        "alter_table.sqltest::alter-table-rename-column-updates-unique-sets",
+        "alter_table.sqltest::drop-column-cross-table-trigger-unreferenced",
+        "alter-table-quoted-trigger-target.sqltest::drop-column-with-unrelated-quoted-trigger-target",
+        "alter-table-quoted-trigger-target.sqltest::rename-column-with-unrelated-quoted-trigger-target",
+        "alter_rename_column_partial_idx.sqltest::rename-column-partial-index-complex-where",
+        "alter_rename_column_partial_idx.sqltest::rename-column-partial-index-rename-where-col-only",
+        "alter_rename_column_partial_idx.sqltest::rename-column-updates-expression-index-key",
+        "alter_rename_column_partial_idx.sqltest::rename-column-updates-expression-index-multi-column",
+        "alter_rename_column_partial_idx.sqltest::rename-column-expression-index-other-col-unchanged",
+        "alter_rename_column_partial_idx.sqltest::rename-column-expression-index-then-rename-again",
+        "check_constraint.sqltest::check_constraint_ddl_column_level_preserved",
+        "check_constraint.sqltest::check_constraint_inline_rename_then_drop_keeps_renamed_ref",
+        "gencol.sqltest::gencol_rename_column_updates_expression",
+        "gencol.sqltest::gencol_rename_column_other_table_unaffected",
+        "gencol.sqltest::gencol_rename_column_other_table_matching_name_unaffected",
+        "gencol.sqltest::rename_then_drop_keeps_renamed_column",
+        "rollback.sqltest::schema-alter-rollback",
+        "rollback.sqltest::schema-alter-rollback-and-repeat",
+        "rollback.sqltest::schema-create-index-rollback",
+        "rollback.sqltest::schema-drop-table-rollback"
       ],
-      "notes": "Roughly a dozen ALTER TABLE conformance failures show Ahtola always emitting double-quoted identifiers (`CREATE TABLE \"t\" (\"a\", \"b\")`) in the rewritten schema SQL text after ALTER TABLE ADD/RENAME/DROP COLUMN, whereas SQLite/Turso preserve the original unquoted spelling from the source DDL when no quoting was needed. This is purely a schema-SQL round-trip/formatting divergence (sqlite_master.sql text), not a query-result correctness issue, but it is systematic across the ALTER TABLE rewrite path.",
-      "status": "open"
+      "notes": "Closed 2026-08-04. Root cause: Ahtola never stored the original CREATE statement text; sqlite_master.sql was always regenerated by a canonical formatter that double-quoted every identifier (CREATE TABLE \"t\" (\"a\", \"b\")), and ALTER TABLE ADD/RENAME/DROP COLUMN rewrote that regenerated text, so every schema-SQL round-trip diverged from SQLite's verbatim preservation. Fix (Cluster B): (1) CREATE TABLE/INDEX/VIEW/TRIGGER now persist the original statement text (Sql column), with SqlParser.NormalizeObjectSql normalizing only the leading 'CREATE <kind> [IF NOT EXISTS] <name>' prefix so the stored text always starts with the canonical prefix SQLite uses; (2) ALTER TABLE paths rewrite the stored text surgically instead of regenerating it -- AlterTableSqlRewriter.InsertAddedColumn inserts the new column after the last column definition and before the first table constraint (SQLite grammar requires constraints last; verified against sqlite3 3.53.4), RemoveColumn/RenameTable/RenameIndexTable/RenameForeignKeyParentTable preserve original spelling and only quote identifiers that need it, RenameColumnRewriter rewrites column references in place; (3) BuildCreateTableSql/QuoteIfNeeded now synthesize schema SQL with unquoted identifiers unless quoting is required (CTAS, ADD COLUMN on tables without stored Sql, and other regeneration paths); (4) EmbeddedFileStore trigger validation normalizes ON-clause qualifiers (main.t -> t) because SQLite persists qualified trigger targets verbatim. Expected-failures net: ~45 keys removed across alter_table/alter_rename_column_partial_idx/alter-table-quoted-trigger-target/check_constraint/gencol/rollback/create_table_as_select clusters, 0 added. Full lane green.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-ctas-schema-sql-column-name-synthesis",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/select.rs + core/translate/table.rs (CREATE TABLE AS SELECT synthesizes column names from result columns: column name, alias, or literal text; duplicates are not rejected)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ExecuteCreateTableAsSelect synthesized column naming; BuildCreateTableSql/QuoteIfNeeded synthesis)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "create_table_as_select.sqltest::ctas_schema_sql",
+        "create_table_as_select.sqltest::ctas_schema_sql_expression_columns",
+        "create_table_as_select.sqltest::ctas_schema_sql_mixed_alias_expr",
+        "create_table_as_select.sqltest::ctas_schema_sql_literals",
+        "create_table_as_select.sqltest::ctas_schema_expr_reparseable",
+        "create_table_as_select.sqltest::ctas_duplicate_column_names",
+        "create_table_as_select.sqltest::ctas_triple_duplicate_columns",
+        "create_table_as_select.sqltest::ctas_schema_sql_quoted_source_col"
+      ],
+      "notes": "Closed 2026-08-04 (same batch as compile-schema-sql-always-quotes-identifiers). CREATE TABLE AS SELECT previously synthesized column names through a generic expression ToString, so schema-SQL showed placeholder identifiers instead of SQLite's rules (result column name, alias, or literal text), and duplicate column names were rejected where SQLite allows them. With the stored-Sql rewrite (Cluster B), CTAS now synthesizes the CREATE TABLE text from the result columns with SQLite naming (verbatim literal text for constant expressions, duplicate names allowed) and quotes only where needed. All 9 mapped create_table_as_select keys cleared.",
+      "status": "closed"
     },
     {
       "id": "compile-alter-drop-column-rejects-nondeterministic-expr-index",
@@ -800,10 +835,9 @@
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
-        "alter_table.sqltest::alter-table-drop-column-expr-index-unreferenced",
         "alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel"
       ],
-      "notes": "ALTER TABLE ... DROP COLUMN on a table with an unrelated expression index fails with \"non-deterministic functions are prohibited in index expressions\" in Ahtola where Turso/SQLite succeed -- the drop-column path appears to re-run full expression-index determinism validation against indexes it doesn't need to touch, rejecting otherwise-valid schema mutations.",
+      "notes": "ALTER TABLE ... DROP COLUMN on a table with an unrelated expression index fails with \"non-deterministic functions are prohibited in index expressions\" in Ahtola where Turso/SQLite succeed -- the drop-column path appears to re-run full expression-index determinism validation against indexes it doesn't need to touch, rejecting otherwise-valid schema mutations. The unrelated sibling case (alter-table-drop-column-expr-index-unreferenced) was cleared 2026-08-03 by compile-reindex-statement's registry-driven determinism work; the sentinel variant remains open.",
       "status": "open"
     },
     {
@@ -866,12 +900,8 @@
       "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs, SqlParser.cs (numeric literal grammar)",
       "severity": "s2-capability",
       "effort": "S",
-      "conformance_links": [
-        "agg-functions/sum-large-float.sqltest::sum-large-float-infinity",
-        "agg-functions/sum-large-float.sqltest::total-large-float-infinity",
-        "agg-functions/sum-large-float.sqltest::avg-large-float-infinity"
-      ],
-      "notes": "Queries using an overflowing float literal to produce +/-Infinity fail to parse (\"Expected RightParen\") rather than being accepted and yielding an IEEE-754 infinity value the way SQLite's tokenizer permits; this is a parser-level gap that surfaces as a compilation-stage rejection of otherwise-valid aggregate queries.",
+      "conformance_links": [],
+      "notes": "Queries using an overflowing float literal to produce +/-Infinity fail to parse (\"Expected RightParen\") rather than being accepted and yielding an IEEE-754 infinity value the way SQLite's tokenizer permits; this is a parser-level gap that surfaces as a compilation-stage rejection of otherwise-valid aggregate queries. (Previously linked keys cleared by earlier wave work: sum-large-float-infinity, total-large-float-infinity, avg-large-float-infinity.)",
       "status": "open"
     },
     {
@@ -882,10 +912,8 @@
       "ahtola_ref": "src/Ahtola.Core/Compilation/AggregateProgramBuilder.cs",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [
-        "group-by-expression-index.sqltest::group-by-compound-expr-no-index"
-      ],
-      "notes": "GROUP BY over a compound expression that has a matching expression index fails with \"no such column: m\" in Ahtola -- the aggregate compiler does not resolve GROUP BY expressions against expression-index-backed columns the way it resolves plain column references, so queries relying on an expression index to make a compound GROUP BY expression addressable are rejected outright rather than merely running unoptimized.",
+      "conformance_links": [],
+      "notes": "GROUP BY over a compound expression that has a matching expression index fails with \"no such column: m\" in Ahtola -- the aggregate compiler does not resolve GROUP BY expressions against expression-index-backed columns the way it resolves plain column references, so queries relying on an expression index to make a compound GROUP BY expression addressable are rejected outright rather than merely running unoptimized. (Previously linked keys cleared by earlier wave work: group-by-compound-expr-no-index.)",
       "status": "open"
     },
     {
@@ -993,11 +1021,17 @@
       "effort": "L",
       "conformance_links": [
         "partial_idx.sqltest::plan-partial-index-and-where-eq-seek",
-        "alter_rename_column_partial_idx.sqltest::rename-column-updates-partial-index-where-clause-sql",
-        "alter_rename_column_partial_idx.sqltest::rename-column-partial-index-complex-where",
-        "alter_rename_column_partial_idx.sqltest::rename-column-partial-index-rename-where-col-only"
+        "partial_idx.sqltest::plan-partial-index-and-where-reversed-order",
+        "partial_idx.sqltest::plan-partial-index-qualified-where-matches",
+        "partial_idx.sqltest::plan-partial-index-full-scan-when-where-matched",
+        "partial_idx.sqltest::plan-partial-index-not-used-when-where-not-implied",
+        "partial_idx.sqltest::plan-partial-index-equality-predicate",
+        "partial_idx.sqltest::plan-partial-index-range-predicate",
+        "partial_idx.sqltest::plan-partial-index-range-not-implied",
+        "partial_idx.sqltest::partial-index-qualified-column-in-function",
+        "partial_idx.sqltest::partial-index-doubly-qualified-column-in-function"
       ],
-      "notes": "Partial indexes (WHERE clause) unsupported or unplanned; ALTER RENAME must also rewrite partial-index predicates.",
+      "notes": "The ALTER/RENAME COLUMN sql-rewrite cluster (rename-column-updates-partial-index-where-clause-sql and siblings) was closed 2026-08-04 by compile-schema-sql-always-quotes-identifiers: stored Sql now preserves original text and RENAME COLUMN rewrites partial-index WHERE clauses in place. What remains is the planner side — partial indexes are not yet chosen for qualifying WHERE clauses (the plan-partial-index-* cluster) — plus qualified-column-in-function handling.",
       "status": "open"
     },
     {
@@ -1011,11 +1045,9 @@
       "conformance_links": [
         "create_index.sqltest::create-index-string-literal-no-such-column",
         "create_index.sqltest::create-index-strftime-with-column",
-        "create_index.sqltest::create-index-date-literal",
-        "group-by-expression-index.sqltest::group-by-expr-index-basic",
-        "update_expression_index.sqltest::substr-expression-index"
+        "create_index.sqltest::create-index-date-literal"
       ],
-      "notes": "Expression indexes: Ahtola over-rejects date literals as non-deterministic, accepts string literals referencing no column without error, and does not use expression indexes for GROUP BY/UPDATE paths.",
+      "notes": "Expression indexes: Ahtola over-rejects date literals as non-deterministic, accepts string literals referencing no column without error, and does not use expression indexes for GROUP BY/UPDATE paths. The update-path case (update_expression_index.sqltest::substr-expression-index) was cleared 2026-08-03 by compile-reindex-statement's registry-driven determinism work. (Previously linked keys cleared by earlier wave work: group-by-expr-index-basic.)",
       "status": "open"
     },
     {
@@ -1069,11 +1101,9 @@
       "conformance_links": [
         "cte.sqltest::cte-update-direct-ref-keyed",
         "cte.sqltest::cte-update-direct-ref-nonkeyed",
-        "cte.sqltest::cte-unreferenced-column-mismatch-delete",
-        "cte_expressions.sqltest::cte-limit-inside",
-        "subquery/cte_materialization_adversarial.sqltest::range-scan-text-vs-int-affinity"
+        "cte.sqltest::cte-unreferenced-column-mismatch-delete"
       ],
-      "notes": "CTE use inside DML is artificially restricted (\"every CTE must contribute\"); expression-CTE materialization semantics diverge.",
+      "notes": "CTE use inside DML is artificially restricted (\"every CTE must contribute\"); expression-CTE materialization semantics diverge. (Previously linked keys cleared by earlier wave work: cte-limit-inside, range-scan-text-vs-int-affinity.)",
       "status": "open"
     },
     {
@@ -1147,7 +1177,7 @@
         "gencol.sqltest::gencol_validate_isnull"
       ],
       "notes": "SQLite (and turso-parser's result_column grammar) allows a SELECT-list column alias with or without the AS keyword: `SELECT 1 a, 2 b`. Ahtola's ParseProjection (SqlParser.cs:1794-1819) only calls ConsumeKeyword(\"AS\") before ExpectIdentifier for the alias; if AS is omitted the trailing identifier is left unconsumed and the enclosing subquery/CTE/paren context fails with a generic 'Expected RightParen'/'Expected End' error at the alias token's offset. This single omission accounts for the large majority of the ~78 'Expected X. At SQL offset N' expected-failure group: every sqltest that uses the extremely common `expr alias` idiom inside a derived table, CTE, or nested subquery breaks.       Verified by hand-computing the failing offset in half a dozen distinct failures (all land exactly on the bare alias identifier). Closed 2026-08-03: ParseProjection now accepts SQLite-style elided column aliases (`SELECT expr alias`) using SQLite's reserved-word set to bound aliasability, with a numeric-adjacency guard so glued literals like `SELECT 0xFF__FF` still error as SQLite's tokenizer requires. Conformance net: 36 mapped cases cleared outright (cte*, subquery/expressions, window checksums, agg infinity cases); 5 mapped cases redistributed to their next blocker (window FILTER clause, aggregate-in-GROUP-BY/ORDER-BY misuse, ctas schema literals).",
-            "status": "closed"
+      "status": "closed"
     },
     {
       "id": "parser-doubly-qualified-column-reference",
@@ -1189,7 +1219,7 @@
         "gencol.sqltest::gencol_validate_nested_notnull_arith"
       ],
       "notes": "SQLite's expr grammar has three null-test postfix forms: `expr ISNULL`, `expr NOTNULL`, and `expr NOT NULL` (all equivalent to `expr IS [NOT] NULL`). Ahtola's parser has no ISNULL/NOTNULL keyword handling at all, and its NOT-postfix branch only recognizes BETWEEN/IN/LIKE/GLOB/REGEXP/MATCH after NOT — the literal error thrown is 'Expected BETWEEN, IN, LIKE, GLOB, REGEXP, or MATCH after NOT.' when NULL follows NOT.       This rejects extremely common SQL (`x ISNULL`, `x NOT NULL` as an expression) both at the top level and inside generated-column expressions. Fixed 2026-08-03: ParseComparison now parses postfix ISNULL/NOTNULL right after the IS arm and lowers them to BinaryExpression(Is|IsNot, LiteralExpression(SqlValue.Null)) — byte-equivalent compilation to IS NULL / IS NOT NULL — and postfix `expr NOT NULL` is accepted via the postfix-NOT machinery, matching Turso's precedence (comparison level, tighter than prefix NOT, so `1 ISNULL AND 1` = 0). All 8 mapped keys removed from managed-sqltest-expected-failures.txt; full lane 3765/3765.",
-            "status": "closed"
+      "status": "closed"
     },
     {
       "id": "parser-pragma-unrecognized-name-hard-rejection",
@@ -1460,15 +1490,8 @@
       "ahtola_ref": "src/Ahtola.Core/Parsing (Expected RightParen at JOIN of subqueries)",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [
-        "subquery/expressions.sqltest::subquery-join-two-subqueries",
-        "subquery/expressions.sqltest::subquery-left-join-two-subqueries",
-        "subquery/expressions.sqltest::subquery-cross-join-subqueries",
-        "subquery/expressions.sqltest::subquery-natural-join-subqueries",
-        "subquery/expressions.sqltest::subquery-from-union",
-        "subquery/expressions.sqltest::subquery-from-union-all"
-      ],
-      "notes": "Parser rejects JOIN operands that are parenthesized subqueries/unions (Expected RightParen). Blocks the 11-case subquery/expressions file.",
+      "conformance_links": [],
+      "notes": "Parser rejects JOIN operands that are parenthesized subqueries/unions (Expected RightParen). Blocks the 11-case subquery/expressions file. (Previously linked keys cleared by earlier wave work: subquery-join-two-subqueries, subquery-left-join-two-subqueries, subquery-cross-join-subqueries, subquery-natural-join-subqueries, subquery-from-union, subquery-from-union-all.)",
       "status": "open"
     },
     {
@@ -1485,12 +1508,11 @@
         "trigger.sqltest::trigger-raise-shorthand",
         "views.sqltest::view-rejects-aggregate-order-by",
         "views.sqltest::view-mutual-circle-detection",
-        "window/memory.sqltest::window-row-number-in-check-constraint",
         "default_value.sqltest::default-value-column-name",
         "select/memory.sqltest::ambiguous-column-error-message-format",
         "select/memory.sqltest::ambiguous-self-join"
       ],
-      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages.",
+      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint.)",
       "status": "open"
     },
     {
@@ -1502,10 +1524,9 @@
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
-        "glob/memory.sqltest::glob-null-other-types",
         "not_between.sqltest::not-between-subquery-bound-orderby-offset"
       ],
-      "notes": "NOT-prefixed operators reject some operand forms (parenthesized subquery bounds, typed operands).",
+      "notes": "NOT-prefixed operators reject some operand forms (parenthesized subquery bounds, typed operands). (Previously linked keys cleared by earlier wave work: glob-null-other-types.)",
       "status": "open"
     },
     {
@@ -2257,13 +2278,9 @@
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [
-        "rollback.sqltest::schema-change-rollback-2-2",
-        "rollback.sqltest::schema-alter-rollback",
-        "rollback.sqltest::schema-alter-rollback-and-repeat",
-        "rollback.sqltest::schema-create-index-rollback",
-        "rollback.sqltest::schema-drop-table-rollback"
+        "rollback.sqltest::schema-change-rollback-2-2"
       ],
-      "notes": "Turso's Transaction opcode checks a schema cookie on every BEGIN (and separately manages an MVCC schema generation counter, conn.mvcc_begin_schema_generation, so concurrent-mode connections re-prepare statements when the schema changed underneath them). Five rollback.sqltest expected-failure entries show Ahtola's schema-DDL rollback either restoring a schema whose canonical text differs cosmetically from SQLite's (quoting: 'CREATE TABLE t (x)' vs 'CREATE TABLE \"t\" (\"x\")' — likely a pretty-printer divergence, not a transaction bug) or, in schema-change-rollback-2-2, an actual before/after mismatch suggesting a DDL rollback does not fully restore prior schema state. This needs joint triage with the schema/DDL layer, but is flagged here because it is a transaction-rollback-boundary symptom.",
+      "notes": "Turso's Transaction opcode checks a schema cookie on every BEGIN (and separately manages an MVCC schema generation counter, conn.mvcc_begin_schema_generation, so concurrent-mode connections re-prepare statements when the schema changed underneath them). Of the five original rollback.sqltest links, four (schema-alter-rollback, schema-alter-rollback-and-repeat, schema-create-index-rollback, schema-drop-table-rollback) turned out to be cosmetic schema-SQL quoting divergences and were closed 2026-08-04 by compile-schema-sql-always-quotes-identifiers — DDL rollback itself works. What remains is schema-change-rollback-2-2: an actual before/after mismatch suggesting a DDL rollback does not fully restore prior schema state, still a genuine transaction-rollback-boundary symptom needing joint triage with the schema/DDL layer.",
       "status": "open"
     },
     {

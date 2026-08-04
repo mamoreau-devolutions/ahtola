@@ -27,8 +27,8 @@ public sealed class ManagedForeignKeyFileCatalogDurabilityTests
         using (var connection = reopened.Connect())
         {
             ScalarText(connection, "SELECT sql FROM sqlite_schema WHERE name = 'child';")
-                .Should().Contain("REFERENCES \"parent\" (\"id\")")
-                .And.Contain("REFERENCES \"parent\" (\"code\")");
+                .Should().Contain("REFERENCES parent(id)")
+                .And.Contain("REFERENCES parent(code)");
 
             Execute(connection, "PRAGMA foreign_keys = ON;");
             Execute(connection, "INSERT INTO child VALUES (10, 1, 'one');");
@@ -83,11 +83,11 @@ public sealed class ManagedForeignKeyFileCatalogDurabilityTests
         using (var connection = reopened.Connect())
         {
             var schema = ScalarText(connection, "SELECT sql FROM sqlite_schema WHERE name = 'child';");
-            schema.Should().Contain("FOREIGN KEY (\"a\", \"b\")")
-                .And.Contain("REFERENCES \"parent\"")
+            schema.Should().Contain("FOREIGN KEY(a, b)")
+                .And.Contain("REFERENCES parent")
                 .And.Contain("ON DELETE SET NULL")
                 .And.Contain("ON UPDATE CASCADE")
-                .And.Contain("MATCH \"FULL\"")
+                .And.Contain("MATCH FULL")
                 .And.Contain("DEFERRABLE INITIALLY DEFERRED");
 
             Execute(connection, "PRAGMA foreign_keys = ON;");

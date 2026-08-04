@@ -68,13 +68,14 @@ public class AggregateSqlRoutingTests
     }
 
     [Test]
-    public void ScalarAggregateColumnLabelsUseAliasOrFunctionName()
+    public void ScalarAggregateColumnLabelsUseAliasOrExpressionText()
     {
         using var connection = new EmbeddedDatabase().Connect();
         Execute(connection, "CREATE TABLE t(value INTEGER);");
 
+        // SQLite labels an unaliased aggregate with the verbatim expression text.
         ColumnNames(connection, "SELECT count(*) AS n, sum(value) FROM t;")
-            .Should().Equal("n", "SUM");
+            .Should().Equal("n", "sum(value)");
     }
 
     [Test]

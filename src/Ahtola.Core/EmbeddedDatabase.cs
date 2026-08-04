@@ -3410,6 +3410,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
             statement.Strict);
         if (statement.InitialRows is { } initialRows)
         {
+            // CREATE TABLE AS SELECT stores its schema SQL in compact form (verified
+            // against sqlite3); the catalog dump must reproduce that exact layout.
+            table.SchemaSqlCompact = true;
             for (var rowIndex = 0; rowIndex < initialRows.Count; rowIndex++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -3427,6 +3430,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
         if (table.IsAutoIncrement)
             EnsureSqliteSequenceTable(catalog);
+
+        table.Sql = statement.InitialRows is null
+            ? statement.Sql
+            : BuildCreateTableSql(statement.Name, table);
 
         tables.Add(statement.Name, table);
         return new ExecutionResult([], [], 0, true);
@@ -4079,6 +4086,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 parameters,
                 context);
         }
+        table.Sql = table.Sql is not null && statement.ColumnSql is not null
+            ? AlterTableSqlRewriter.InsertAddedColumn(table.Sql, statement.ColumnSql)
+            : null;
         table.AddColumn(statement.Column);
         return new ExecutionResult([], [], 0, true);
     }
@@ -4130,10 +4140,135 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var previousName = table.Name;
         table.Rename(statement.NewName);
         tables.Add(statement.NewName, table);
+        RewriteRenamedTableSql(tables, table, previousName, statement.NewName);
         if (table.IsAutoIncrement)
             RenameSqliteSequenceRows(tables, previousName, statement.NewName);
         return new ExecutionResult([], [], 0, true);
     }
+
+    /// <summary>
+    /// Mirrors SQLite's RENAME TO text surgery: the renamed table's own CREATE statement, the
+    /// ON-clause of every explicit index on it, and every foreign-key reference to it get their
+    /// table-name token replaced (SQLite always double-quotes the replacement). Objects whose
+    /// stored text cannot be reparsed fall back to regeneration by clearing their Sql.
+    /// </summary>
+    private static void RewriteRenamedTableSql(
+        Dictionary<string, EmbeddedTable> tables,
+        EmbeddedTable table,
+        string previousName,
+        string newName)
+    {
+        if (table.Sql is not null)
+        {
+            var rewritten = AlterTableSqlRewriter.RenameTable(table.Sql, newName);
+            // A table may foreign-key-reference itself; fold that reference into the same edit.
+            rewritten = rewritten is null
+                ? null
+                : AlterTableSqlRewriter.RenameForeignKeyParentTable(rewritten, previousName, newName);
+            table.Sql = rewritten;
+        }
+
+        for (var index = 0; index < table.Indexes.Count; index++)
+        {
+            var entry = table.Indexes[index];
+            if (entry.Sql is null)
+                continue;
+
+            table.Indexes[index] = entry with
+            {
+                Sql = AlterTableSqlRewriter.RenameIndexTable(entry.Sql, newName),
+            };
+        }
+
+        // Foreign-key metadata and stored text of every table that references the old name,
+        // including the renamed table's own self-referencing foreign keys. The metadata must
+        // follow the rename or referential enforcement silently loses the parent.
+        foreach (var subject in tables.Values.ToArray())
+        {
+            if (!HasForeignKeyTo(subject, previousName))
+                continue;
+
+            if (CreateWithRenamedForeignKeyParentTable(subject, previousName, newName) is { } replacement)
+                tables[subject.Name] = replacement;
+        }
+    }
+
+    /// <summary>
+    /// Rebuilds <paramref name="table"/> so every foreign key whose parent table is
+    /// <paramref name="oldParentName"/> points at <paramref name="newParentName"/> instead,
+    /// in both the live metadata and the stored CREATE text. Returns <see langword="null"/>
+    /// when the table carries no such foreign key.
+    /// </summary>
+    private static EmbeddedTable? CreateWithRenamedForeignKeyParentTable(
+        EmbeddedTable table,
+        string oldParentName,
+        string newParentName)
+    {
+        var changed = false;
+        var columns = table.ColumnDefinitions.Select(column =>
+        {
+            var foreignKey = column.ForeignKey is null ? null : Rewrite(column.ForeignKey);
+            var additional = column.AdditionalForeignKeys is { Count: > 0 } keys
+                && keys.Any(key => Rewrite(key) is not null)
+                    ? keys.Select(key => Rewrite(key) ?? key).ToArray()
+                    : null;
+            if (foreignKey is null && additional is null)
+                return column;
+
+            changed = true;
+            return column.WithConstraints(
+                column.Checks,
+                foreignKey ?? column.ForeignKey,
+                additional ?? column.AdditionalForeignKeys);
+        }).ToArray();
+
+        var tableForeignKeys = table.TableForeignKeys.Select(key =>
+        {
+            if (Rewrite(key) is not { } replacementKey)
+                return key;
+
+            changed = true;
+            return replacementKey;
+        }).ToArray();
+
+        if (!changed)
+            return null;
+
+        var replacement = new EmbeddedTable(
+            table.Name,
+            columns,
+            table.WithoutRowid,
+            table.TableLevelPrimaryKey,
+            table.TableUniqueConstraints,
+            table.CheckConstraints,
+            table.TablePrimaryKeyConflictAlgorithm,
+            table.TablePrimaryKeyConstraintName,
+            table.TablePrimaryKeyDeclarationOrder,
+            tableForeignKeys,
+            table.Strict);
+        replacement.SchemaSqlCompact = table.SchemaSqlCompact;
+        replacement.Sql = table.Sql is null
+            ? null
+            : AlterTableSqlRewriter.RenameForeignKeyParentTable(table.Sql, oldParentName, newParentName);
+        foreach (var row in table.Rows)
+            replacement.Rows.Add(row.ToArray());
+
+        replacement.RowIds.AddRange(table.RowIds);
+        replacement.Indexes.AddRange(table.Indexes);
+        return replacement;
+
+        ForeignKeyDefinition? Rewrite(ForeignKeyDefinition foreignKey)
+            => string.Equals(foreignKey.ParentTable, oldParentName, StringComparison.OrdinalIgnoreCase)
+                ? foreignKey with { ParentTable = newParentName }
+                : null;
+    }
+
+    private static bool HasForeignKeyTo(EmbeddedTable child, string parentName)
+        => child.ColumnDefinitions.Any(column =>
+               column.ForeignKeyConstraints.Any(foreignKey =>
+                   string.Equals(foreignKey.ParentTable, parentName, StringComparison.OrdinalIgnoreCase)))
+            || (child.TableForeignKeys?.Any(foreignKey =>
+                   string.Equals(foreignKey.ParentTable, parentName, StringComparison.OrdinalIgnoreCase)) ?? false);
 
     private static void RenameSqliteSequenceRows(
         IReadOnlyDictionary<string, EmbeddedTable> tables,
@@ -4185,7 +4320,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             if (string.Equals(entry.Key, statement.TableName, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            if (CreateWithRenamedForeignKeyParentColumn(entry.Value, table.Name, oldName, newName) is { } rewritten)
+            if (CreateWithRenamedForeignKeyParentColumn(entry.Value, table.Name, oldName, newName, quoteNewName) is { } rewritten)
                 candidateTables[entry.Key] = rewritten;
         }
 
@@ -4327,7 +4462,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         EmbeddedTable table,
         string parentTable,
         string oldName,
-        string newName)
+        string newName,
+        bool quoteNewName)
     {
         var changed = false;
         var columns = table.ColumnDefinitions.Select(column =>
@@ -4371,6 +4507,24 @@ public sealed partial class EmbeddedDatabase : IDisposable
             table.TablePrimaryKeyDeclarationOrder,
             tableForeignKeys,
             table.Strict);
+        replacement.SchemaSqlCompact = table.SchemaSqlCompact;
+        if (table.Sql is not null)
+        {
+            // Only the REFERENCES parent-column tokens follow the rename; this table's own
+            // columns keep their spelling, so the rename target is the parent table.
+            var schema = new RenameColumnSchema(
+                name => string.Equals(name, table.Name, StringComparison.OrdinalIgnoreCase) ? table.Columns : null,
+                name => string.Equals(name, parentTable, StringComparison.OrdinalIgnoreCase));
+            replacement.Sql = RenameColumnRewriter.RewriteCreateTable(
+                table.Sql,
+                table.Name,
+                table.Columns,
+                schema,
+                oldName,
+                newName,
+                quoteNewName);
+        }
+
         foreach (var row in table.Rows)
             replacement.Rows.Add(row.ToArray());
 
@@ -22584,7 +22738,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     SqlValue.Text(entry.Key),
                     SqlValue.Text(entry.Key),
                     SqlValue.Integer(0),
-                    SqlValue.Text(BuildCreateTableSql(entry.Key, entry.Value)),
+                    SqlValue.Text(entry.Value.Sql ?? BuildCreateTableSql(entry.Key, entry.Value)),
                 ],
                 qualifiedColumns,
                 outerRow));
@@ -22599,7 +22753,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         SqlValue.Text(entry.Key),
                         SqlValue.Integer(0),
                         index.Origin == EmbeddedIndexOrigin.Explicit
-                            ? SqlValue.Text(BuildCreateIndexSql(entry.Key, index))
+                            ? SqlValue.Text(index.Sql ?? BuildCreateIndexSql(entry.Key, index))
                             : SqlValue.Null,
                     ],
                     qualifiedColumns,
@@ -22798,7 +22952,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         var columns = table.ColumnDefinitions.Select(column =>
         {
-            var definition = QuoteIdentifier(column.Name);
+            var definition = SqlIdentifierFormatter.QuoteIfNeeded(column.Name);
             if (!string.IsNullOrEmpty(column.DeclaredType))
                 definition += " " + column.DeclaredType;
             if (column.Collation is { } collation)
@@ -22814,8 +22968,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
             {
                 definition += FormatConstraintName(column.GenerationConstraintName)
                     + (column.GenerationAlways ? " GENERATED ALWAYS" : string.Empty)
-                    + $" AS ({column.GenerationSql}) "
-                    + (column.GeneratedStored ? "STORED" : "VIRTUAL");
+                    + $" AS ({column.GenerationSql})";
+                // SQLite preserves the original spelling: a virtual column written without an
+                // explicit VIRTUAL keyword must not gain one during schema regeneration.
+                if (column.GeneratedStored)
+                    definition += " STORED";
+                else if (column.GenerationVirtualSpelled)
+                    definition += " VIRTUAL";
                 if (column.NotNull)
                 {
                     definition += FormatConstraintName(column.NotNullConstraintName)
@@ -22893,7 +23052,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (table.TableLevelPrimaryKey is { } tablePrimaryKey)
         {
             var keyColumns = tablePrimaryKey.Select(keyColumn =>
-                QuoteIdentifier(keyColumn.Name)
+                SqlIdentifierFormatter.QuoteIfNeeded(keyColumn.Name)
                 + (keyColumn.Collation is { } collation ? " COLLATE " + collation : string.Empty)
                 + (keyColumn.Descending ? " DESC" : string.Empty)
                 + (keyColumn.AutoIncrement ? " AUTOINCREMENT" : string.Empty));
@@ -22910,7 +23069,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             var unique = table.TableUniqueConstraints[index];
             var keyColumns = unique.Columns.Select(keyColumn =>
-                QuoteIdentifier(keyColumn.Name)
+                SqlIdentifierFormatter.QuoteIfNeeded(keyColumn.Name)
                 + (keyColumn.Collation is { } collation ? " COLLATE " + collation : string.Empty)
                 + (keyColumn.Descending ? " DESC" : string.Empty));
             tableKeyConstraints.Add((
@@ -22935,7 +23094,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             columns.Add(
                 FormatConstraintName(foreignKey.ConstraintName).TrimStart()
                 + (foreignKey.ConstraintName is null ? string.Empty : " ")
-                + $"FOREIGN KEY ({string.Join(", ", foreignKey.ChildColumns.Select(QuoteIdentifier))})"
+                + $"FOREIGN KEY ({string.Join(", ", foreignKey.ChildColumns.Select(SqlIdentifierFormatter.QuoteIfNeeded))})"
                 + FormatForeignKeyReference(foreignKey));
         }
 
@@ -22946,21 +23105,23 @@ public sealed partial class EmbeddedDatabase : IDisposable
             { Strict: true } => " STRICT",
             _ => string.Empty,
         };
-        return $"CREATE TABLE {QuoteIdentifier(name)} ({string.Join(", ", columns)}){options}";
+        var separator = table.SchemaSqlCompact ? "," : ", ";
+        var openParen = table.SchemaSqlCompact ? "(" : " (";
+        return $"CREATE TABLE {SqlIdentifierFormatter.QuoteIfNeeded(name)}{openParen}{string.Join(separator, columns)}){options}";
     }
 
     private static string FormatForeignKeyReference(ForeignKeyDefinition foreignKey)
     {
         var parentColumns = foreignKey.ParentColumns.Count == 0
             ? string.Empty
-            : $" ({string.Join(", ", foreignKey.ParentColumns.Select(QuoteIdentifier))})";
-        var clause = $" REFERENCES {QuoteIdentifier(foreignKey.ParentTable)}{parentColumns}";
+            : $" ({string.Join(", ", foreignKey.ParentColumns.Select(SqlIdentifierFormatter.QuoteIfNeeded))})";
+        var clause = $" REFERENCES {SqlIdentifierFormatter.QuoteIfNeeded(foreignKey.ParentTable)}{parentColumns}";
         if (foreignKey.OnDelete != ForeignKeyAction.NoAction)
             clause += " ON DELETE " + FormatForeignKeyAction(foreignKey.OnDelete);
         if (foreignKey.OnUpdate != ForeignKeyAction.NoAction)
             clause += " ON UPDATE " + FormatForeignKeyAction(foreignKey.OnUpdate);
         if (foreignKey.Match is { } match)
-            clause += " MATCH " + QuoteIdentifier(match);
+            clause += " MATCH " + SqlIdentifierFormatter.QuoteIfNeeded(match);
         clause += foreignKey.Deferral switch
         {
             ForeignKeyDeferral.NotDeferrable => string.Empty,
@@ -22983,7 +23144,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         };
 
     private static string FormatConstraintName(string? name)
-        => name is null ? string.Empty : " CONSTRAINT " + QuoteIdentifier(name);
+        => name is null ? string.Empty : " CONSTRAINT " + SqlIdentifierFormatter.QuoteIfNeeded(name);
 
     private static string FormatCheckConstraint(CheckConstraint check)
         => FormatConstraintName(check.Name)
@@ -22995,9 +23156,6 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     private static string BuildCreateIndexSql(string tableName, EmbeddedIndex index)
         => IndexSqlFormatter.BuildCreateIndexSql(tableName, index);
-
-    private static string QuoteIdentifier(string identifier)
-        => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
     private static string FormatSqlLiteral(SqlValue value)
     {
@@ -23132,7 +23290,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 continue;
             }
 
-            names.Add(projection.Alias ?? GetExpressionName(projection.Expression));
+            names.Add(GetProjectionName(projection));
         }
 
         return names.ToArray();
@@ -23273,7 +23431,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
             result.Add(new ArmColumn(
                 null,
-                projection.Alias ?? GetExpressionName(projection.Expression),
+                GetProjectionName(projection),
                 GetExpressionAffinity(projection.Expression, output, context, commonTableExpressions),
                 GetExpressionStorageClassMask(projection.Expression, output, context, commonTableExpressions),
                 GetExpressionDeclaredType(projection.Expression, output, context, commonTableExpressions)));
@@ -23839,6 +23997,25 @@ public sealed partial class EmbeddedDatabase : IDisposable
             FunctionExpression function => function.Name,
             _ => expression.ToString() ?? string.Empty,
         };
+    }
+
+    // SQLite names an un-aliased result column after the verbatim source text of its
+    // expression (the span the parser captured) — except a plain column reference
+    // (possibly qualified, possibly COLLATE-wrapped), which keeps the bare column name
+    // (TK_COLUMN rule in SQLite's select.c; verified against sqlite3). Only rewritten
+    // projections without a span fall back to the structural name.
+    private static string GetProjectionName(Projection projection)
+    {
+        if (projection.Alias is { } alias)
+            return alias;
+
+        var expression = projection.Expression;
+        while (expression is CollationExpression collation)
+            expression = collation.Expression;
+        if (expression is ColumnExpression)
+            return GetExpressionName(expression);
+
+        return projection.SourceText ?? GetExpressionName(projection.Expression);
     }
 
     private SqlValue Evaluate(
@@ -36159,14 +36336,9 @@ public sealed class EmbeddedConnection : IDisposable
                 TableName = local,
                 Temporary = temporary,
                 TargetSchema = targetIsForeign ? resolvedTargetSchema : null,
-                // SQLite keeps a written target qualifier in the stored definition but drops the
-                // qualifier from the trigger's own name.
-                Sql = temporary
-                    ? RemoveSchemaQualifier(statement.Sql, homeSchema, hasTriggerSchema ? 1 : 0)
-                    : RemoveSchemaQualifier(
-                        statement.Sql,
-                        homeSchema,
-                        (hasTriggerSchema ? 1 : 0) + (hasTargetSchema ? 1 : 0)),
+                // SQLite stores the ON-clause target qualifier verbatim and drops only the
+                // trigger's own-name qualifier; the parser's stored text already matches that.
+                Sql = statement.Sql,
             });
     }
 
@@ -36206,66 +36378,11 @@ public sealed class EmbeddedConnection : IDisposable
             local => statement with
             {
                 Name = local,
-                Sql = RemoveSchemaQualifier(statement.Sql, homeSchema, hasViewSchema ? 1 : 0),
+                // The parser already strips the view's own-name schema qualifier from
+                // statement.Sql; no further removal is needed here (and counting it again could
+                // over-consume a body identifier spelled like the schema name).
+                Sql = statement.Sql,
             });
-    }
-
-    private static string RemoveSchemaQualifier(string sql, string schema, int qualifiersToRemove)
-    {
-        if (qualifiersToRemove == 0)
-            return sql;
-        var output = new StringBuilder(sql.Length);
-        for (var index = 0; index < sql.Length;)
-        {
-            if (sql[index] == '\'')
-            {
-                var end = CopyQuotedToken(sql, index, '\'', '\'', output);
-                index = end;
-                continue;
-            }
-            if (sql[index] == '-' && index + 1 < sql.Length && sql[index + 1] == '-')
-            {
-                var end = sql.IndexOf('\n', index + 2);
-                if (end < 0)
-                    end = sql.Length;
-                output.Append(sql, index, end - index);
-                index = end;
-                continue;
-            }
-            if (sql[index] == '/' && index + 1 < sql.Length && sql[index + 1] == '*')
-            {
-                var end = sql.IndexOf("*/", index + 2, StringComparison.Ordinal);
-                end = end < 0 ? sql.Length : end + 2;
-                output.Append(sql, index, end - index);
-                index = end;
-                continue;
-            }
-            if (!TryReadSqlIdentifier(sql, index, out var identifierEnd, out var identifier))
-            {
-                output.Append(sql[index++]);
-                continue;
-            }
-
-            var separator = identifierEnd;
-            while (separator < sql.Length && char.IsWhiteSpace(sql[separator]))
-                separator++;
-            if (separator < sql.Length
-                && sql[separator] == '.'
-                && string.Equals(identifier, schema, StringComparison.OrdinalIgnoreCase)
-                && qualifiersToRemove > 0)
-            {
-                qualifiersToRemove--;
-                index = separator + 1;
-                while (index < sql.Length && char.IsWhiteSpace(sql[index]))
-                    index++;
-                continue;
-            }
-
-            output.Append(sql, index, identifierEnd - index);
-            index = identifierEnd;
-        }
-
-        return output.ToString();
     }
 
     private static int CopyQuotedToken(
@@ -39233,6 +39350,19 @@ internal sealed class EmbeddedTable
 
     public bool Strict { get; }
 
+    // SQLite stores the schema SQL of a CREATE TABLE AS SELECT result in compact form
+    // ("CREATE TABLE t(a,b)" — no space before '(' and none after ','). The flag only
+    // affects catalog-regenerated schema text; ALTER TABLE rebuilds preserve it because
+    // SQLite splices added columns into the original statement text.
+    public bool SchemaSqlCompact { get; internal set; }
+
+    // The original CREATE TABLE statement text, stored verbatim (minus the trailing ';')
+    // the way SQLite keeps it in sqlite_schema. Catalog dumps and persistence prefer this
+    // over regenerating from the model, so quote style, keyword case, and internal spacing
+    // round-trip. Null only for tables whose schema was generated internally (CTAS before
+    // regeneration, ALTER rebuilds), in which case the caller regenerates.
+    public string? Sql { get; internal set; }
+
     // The table-level PRIMARY KEY(...) clause as declared, retained so the schema can be
     // regenerated verbatim; null when the primary key (if any) is column-level.
     public IReadOnlyList<TablePrimaryKeyColumn>? TableLevelPrimaryKey { get; }
@@ -39889,6 +40019,8 @@ internal sealed class EmbeddedTable
                 TablePrimaryKeyDeclarationOrder,
                 TableForeignKeys,
                 Strict);
+            replacement.SchemaSqlCompact = SchemaSqlCompact;
+            replacement.Sql = Sql is not null ? AlterTableSqlRewriter.RemoveColumn(Sql, name) : null;
         }
         catch (EmbeddedSqlException exception)
         {
@@ -40103,6 +40235,9 @@ internal sealed class EmbeddedTable
                 TablePrimaryKeyDeclarationOrder,
                 TableForeignKeys.Select(RewriteForeignKey).ToArray(),
                 Strict);
+            replacement.SchemaSqlCompact = SchemaSqlCompact;
+            if (Sql is not null)
+                replacement.Sql = RenameColumnRewriter.RewriteCreateTable(Sql, Name, previousColumns, oldName, newName, quoteNewName);
         }
         catch (EmbeddedSqlException exception)
         {
@@ -40124,6 +40259,14 @@ internal sealed class EmbeddedTable
                 {
                     WhereSql = rewrittenWhere,
                     Where = SqlParser.ParseExpressionWithSpans(rewrittenWhere, out _),
+                };
+            }
+
+            if (index.Sql is not null)
+            {
+                rewritten = rewritten with
+                {
+                    Sql = RenameColumnRewriter.RewriteCreateIndex(index.Sql, Name, previousColumns, oldName, newName, quoteNewName),
                 };
             }
 
@@ -40222,6 +40365,8 @@ internal sealed class EmbeddedTable
             TablePrimaryKeyDeclarationOrder,
             TableForeignKeys,
             Strict);
+        clone.SchemaSqlCompact = SchemaSqlCompact;
+        clone.Sql = Sql;
         foreach (var row in Rows)
             clone.Rows.Add(row.ToArray());
 
@@ -40252,6 +40397,8 @@ internal sealed class EmbeddedTable
             TablePrimaryKeyDeclarationOrder,
             TableForeignKeys,
             Strict);
+        clone.SchemaSqlCompact = SchemaSqlCompact;
+        clone.Sql = Sql;
         foreach (var row in Rows)
             clone.Rows.Add(row);
 

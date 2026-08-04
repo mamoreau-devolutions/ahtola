@@ -112,8 +112,8 @@ public sealed class ManagedConstraintSemanticsTests
             schemaSql.Should().Contain("DOUBLE PRECISION")
                 .And.Contain("CHARACTER VARYING(20)")
                 .And.Contain("DEFAULT (abs(-4) + 1)")
-                .And.Contain("CONSTRAINT \"positive\" CHECK (amount > 0)")
-                .And.Contain("UNIQUE (\"label\", \"amount\") ON CONFLICT IGNORE");
+                .And.Contain("CONSTRAINT positive CHECK (amount > 0)")
+                .And.Contain("UNIQUE (label, amount) ON CONFLICT IGNORE");
         }
         finally
         {
@@ -320,7 +320,7 @@ public sealed class ManagedConstraintSemanticsTests
         // SQLite rewrites the stored CHECK expression and the table-level UNIQUE key in place.
         var schema = ReadRows(connection, "SELECT sql FROM sqlite_schema WHERE name='values_table';")
             .Single()[0].AsText();
-        schema.Should().Contain("CHECK (first < b)").And.Contain("UNIQUE (\"first\", \"b\")")
+        schema.Should().Contain("CHECK(first < b)").And.Contain("UNIQUE(first, b)")
             .And.NotContain("(a ").And.NotContain("\"a\"");
 
         Execute(connection, "INSERT INTO values_table VALUES (1, 2);");
@@ -425,7 +425,7 @@ public sealed class ManagedConstraintSemanticsTests
             sqlite.Open();
             ScalarText(sqlite, "PRAGMA integrity_check;").Should().Be("ok");
             ScalarText(sqlite, "SELECT sql FROM sqlite_schema WHERE name = 'generated_values';")
-                .Should().Contain("CONSTRAINT \"generated_unique\" UNIQUE ON CONFLICT IGNORE");
+                .Should().Contain("CONSTRAINT generated_unique UNIQUE ON CONFLICT IGNORE");
             ScalarInteger(
                 sqlite,
                 "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'sqlite_autoindex_generated_values_1' AND sql IS NULL;")
@@ -484,9 +484,9 @@ public sealed class ManagedConstraintSemanticsTests
             ScalarInteger(sqlite, $"SELECT desc FROM pragma_index_xinfo('{primaryKeyIndex}') WHERE seqno = 1;")
                 .Should().Be(0);
             var schemaSql = ScalarText(sqlite, "SELECT sql FROM sqlite_schema WHERE name = 'keyed';");
-            schemaSql.Should().Contain("CONSTRAINT \"payload_default\" DEFAULT 'ready'")
-                .And.Contain("CONSTRAINT \"positive_sequence\" CHECK (sequence > 0) ON CONFLICT FAIL")
-                .And.Contain("CONSTRAINT \"keyed_pk\" PRIMARY KEY (\"sequence\" DESC, \"tenant\") ON CONFLICT IGNORE");
+            schemaSql.Should().Contain("CONSTRAINT payload_default DEFAULT 'ready'")
+                .And.Contain("CONSTRAINT positive_sequence CHECK (sequence > 0) ON CONFLICT FAIL")
+                .And.Contain("CONSTRAINT keyed_pk PRIMARY KEY(sequence DESC, tenant ASC) ON CONFLICT IGNORE");
             Execute(sqlite, "INSERT INTO keyed(tenant, sequence) VALUES ('d', 4), ('d', 4);");
             ScalarInteger(sqlite, "SELECT COUNT(*) FROM keyed;").Should().Be(4);
         }
@@ -566,10 +566,10 @@ public sealed class ManagedConstraintSemanticsTests
             sqlite.Open();
             ScalarText(sqlite, "PRAGMA integrity_check;").Should().Be("ok");
             ScalarText(sqlite, "SELECT sql FROM sqlite_schema WHERE name = 'detail';")
-                .Should().Contain("CONSTRAINT \"named_null\" NULL")
-                .And.Contain("CONSTRAINT \"named_collation\" COLLATE NOCASE")
-                .And.Contain("CONSTRAINT \"named_default\" DEFAULT 'ready'")
-                .And.Contain("CONSTRAINT \"named_reference\" REFERENCES \"parent\" (\"id\")");
+                .Should().Contain("CONSTRAINT named_null NULL")
+                .And.Contain("CONSTRAINT named_collation COLLATE NOCASE")
+                .And.Contain("CONSTRAINT named_default DEFAULT 'ready'")
+                .And.Contain("CONSTRAINT named_reference REFERENCES parent(id)");
         }
         finally
         {

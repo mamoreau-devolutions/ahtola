@@ -50,7 +50,7 @@ public class PrimaryKeyDescriptorPropagationFileStoreTests
         Scalar(reopenedConnection, "SELECT sql FROM sqlite_master WHERE name = 'keyed';")
             .AsText()
             .Should()
-            .Contain("PRIMARY KEY (\"k\" COLLATE BINARY)");
+            .Contain("PRIMARY KEY(k COLLATE BINARY ASC)");
     }
 
     [TestCase("custom_collation")]

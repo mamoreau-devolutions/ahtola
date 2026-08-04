@@ -62,18 +62,21 @@ public sealed class ManagedAlterTableDropColumnTests
         ReadRows(managed, "PRAGMA index_info(data_score_desc);")
             .Should().Equal(ReadRows(sqlite, "PRAGMA index_info(data_score_desc);"));
 
+        // SQLite keeps the original CREATE text and edits out only the dropped definition
+        // (sqlite3AlterDropColumn), so the stored sql must match byte for byte.
         Scalar<string>(
                 managed,
                 "SELECT sql FROM sqlite_schema WHERE type='table' AND name='data';")
-            .Should().Contain("\"keep\" TEXT")
-            .And.Contain("CONSTRAINT \"keep_default\" DEFAULT 'fallback'")
-            .And.Contain("\"doubled\" INTEGER GENERATED ALWAYS AS (score * 2) STORED")
-            .And.Contain("CONSTRAINT \"unique_keep\" UNIQUE (\"keep\")")
+            .Should().Be(Scalar<string>(sqlite, "SELECT sql FROM sqlite_schema WHERE type='table' AND name='data';"))
+            .And.Contain("keep TEXT COLLATE NOCASE CONSTRAINT keep_default DEFAULT 'fallback'")
+            .And.Contain("doubled INTEGER GENERATED ALWAYS AS (score * 2) STORED")
+            .And.Contain("CONSTRAINT unique_keep UNIQUE(keep)")
             .And.NotContain("removed");
         Scalar<string>(
                 managed,
                 "SELECT sql FROM sqlite_schema WHERE type='index' AND name='data_score_desc';")
-            .Should().Be("CREATE INDEX \"data_score_desc\" ON \"data\" (\"score\" COLLATE NOCASE DESC)");
+            .Should().Be(Scalar<string>(sqlite, "SELECT sql FROM sqlite_schema WHERE type='index' AND name='data_score_desc';"))
+            .And.Be("CREATE INDEX data_score_desc ON data(score COLLATE NOCASE DESC)");
         Scalar<string>(managed, "SELECT sql FROM sqlite_schema WHERE name='data_view';")
             .Should().Contain("SELECT id, keep, score, doubled FROM data");
         Scalar<string>(managed, "SELECT sql FROM sqlite_schema WHERE name='data_star_view';")
@@ -265,9 +268,11 @@ public sealed class ManagedAlterTableDropColumnTests
             .Should().Equal(ReadRows(sqlite, "SELECT * FROM keyed;"));
         ReadRows(managed, "PRAGMA index_info(keyed_value);")
             .Should().Equal(ReadRows(sqlite, "PRAGMA index_info(keyed_value);"));
+        // SQLite's DROP COLUMN edit keeps the original table option text verbatim.
         Scalar<string>(managed, "SELECT sql FROM sqlite_schema WHERE name='keyed';")
-            .Should().Contain("WITHOUT ROWID")
-            .And.Contain("PRIMARY KEY (\"tenant\", \"sequence\" DESC)")
+            .Should().Be(Scalar<string>(sqlite, "SELECT sql FROM sqlite_schema WHERE name='keyed';"))
+            .And.Contain("WITHOUT ROWID")
+            .And.Contain("PRIMARY KEY(tenant, sequence DESC)")
             .And.NotContain("removed");
     }
 

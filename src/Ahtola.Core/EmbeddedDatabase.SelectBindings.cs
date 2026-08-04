@@ -84,7 +84,7 @@ public sealed partial class EmbeddedDatabase
                     break;
                 default:
                     result.Add(new SelectBindingColumn(
-                        projection.Alias ?? GetExpressionName(projection.Expression),
+                        GetProjectionName(projection),
                         projection.Expression));
                     break;
             }
