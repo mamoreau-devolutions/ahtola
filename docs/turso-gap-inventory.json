@@ -14,11 +14,11 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "entry_count": 180,
+    "entry_count": 182,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 45,
+        "compilation": 47,
         "parser": 23,
         "functions": 24,
         "storage": 20,
@@ -27,25 +27,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 46,
-        "partial": 26,
+        "divergent": 47,
+        "partial": 27,
         "extension": 7,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 93,
+        "s2-capability": 94,
         "s4-intentional": 32,
-        "s1-correctness": 21
+        "s1-correctness": 22
       },
       "by_effort": {
         "M": 72,
         "L": 37,
-        "S": 71
+        "S": 73
       },
       "by_status": {
         "open": 150,
-        "closed": 30
+        "closed": 32
       }
     },
     "schema": {
@@ -1045,11 +1045,10 @@
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [
-        "create_index.sqltest::create-index-string-literal-no-such-column",
         "create_index.sqltest::create-index-strftime-with-column",
         "create_index.sqltest::create-index-date-literal"
       ],
-      "notes": "Expression indexes: Ahtola over-rejects date literals as non-deterministic, accepts string literals referencing no column without error, and does not use expression indexes for GROUP BY/UPDATE paths. The update-path case (update_expression_index.sqltest::substr-expression-index) was cleared 2026-08-03 by compile-reindex-statement's registry-driven determinism work. (Previously linked keys cleared by earlier wave work: group-by-expr-index-basic.)",
+      "notes": "Expression indexes: Ahtola over-rejects date literals as non-deterministic and does not use expression indexes for GROUP BY/UPDATE paths. The string-literal-as-column keys (create-index-string-literal-no-such-column and its mixed/parenthesized siblings) were cleared 2026-08-06 by Wave F2.10 Batch 3 (compile-index-string-literal-column-resolution): a bare string literal in an index term is now resolved as a column name per the SQLite/Turso backwards-compat quirk, erroring 'no such column' when absent. The update-path case (update_expression_index.sqltest::substr-expression-index) was cleared 2026-08-03 by compile-reindex-statement's registry-driven determinism work. (Previously linked keys cleared by earlier wave work: group-by-expr-index-basic.)",
       "status": "open"
     },
     {
@@ -2669,6 +2668,37 @@
         "compound-select-orderby.sqltest::union-order-by-expr-no-match"
       ],
       "notes": "Closed 2026-08-06 (Wave F2.10 Batch 2). Out-of-range and no-match ORDER BY ordinal diagnostics diverged from Turso in wording and term numbering. Simple SELECT: an integer-literal ORDER BY term outside [1, result-column count] now throws '1st ORDER BY term out of range - should be between 1 and {count}', matching Turso select.rs:1124's hardcoded '1st' prefix (upstream never pluralizes); in-range ordinals still substitute the result-column expression (re-wrapped in any COLLATE). Compound SELECT: the range message is '{ordinal} ORDER BY term out of range - should be between 1 and {count}' and the no-match message '{OrdinalSuffix(termNumber-1)} ORDER BY term does not match any column in the result set', with 1-based term numbers threaded through SortCompoundRows/ValidateCompoundOrderByCollations; the compound ordinal-literal path is an early pass-through so the rewrite never double-fires. Deliberate non-mirror: Ahtola keeps accepting 'ORDER BY 1 COLLATE NOCASE' on compound SELECTs where Turso rejects it (SQLite-compatible). Oracle 266->260: 6 keys removed, 0 added. orderby_rowid_truncation{,_explicit_rowid} (sub-select 2 columns) and three-way-union-order-by (row order) retained on separate gaps.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-duplicate-primary-key-rejection",
+      "layer": "compilation",
+      "kind": "partial",
+      "turso_ref": "turso-src/core/schema.rs:4369-4373,4593-4598 (rejects a table with more than one PRIMARY KEY regardless of whether the keys are declared column-inline or table-level)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ResolvePrimaryKeyColumns columnLevel.Count > 1 rejection)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "on_conflict_constraint_def.sqltest::ddl-reject-multiple-pk-columns",
+        "create_table.sqltest::create_table_multiple_column_primary_keys"
+      ],
+      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 3). Ahtola rejected a second table-level PRIMARY KEY at parse and an inline+table-level combination at execution, but silently accepted two column-inline PRIMARY KEYs (CREATE TABLE t(a PRIMARY KEY, b PRIMARY KEY)), producing a table with an ambiguous primary key. ResolvePrimaryKeyColumns now throws 'table has more than one primary key' when more than one column-level PRIMARY KEY is collected, matching SQLite/Turso (the message is intentionally nameless like the two pre-existing Ahtola sites, since sqltest matching is substring-based). Oracle 261->256 across the batch: the 2 PK keys here plus the 3 string-literal keys on compile-index-string-literal-column-resolution, 0 added.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-index-string-literal-column-resolution",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/index.rs:968-992 (resolve_index_column treats a Literal(String) index term as a column name after trimming quotes) + turso-src/core/translate/index.rs:1005+ (validate_index_expression rejects a bare string literal that matches no column)",
+      "ahtola_ref": "src/Ahtola.Core/IndexSemantics.cs (EmbeddedIndexFactory.Create string-literal-as-column resolution in the expression branch)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "create_index.sqltest::create-index-string-literal-no-such-column",
+        "create_index.sqltest::create-index-mixed-string-literal-column",
+        "create_index.sqltest::create-index-parenthesized-string-no-such-column"
+      ],
+      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 3). SQLite/Turso treat a standalone single-quoted string in an index column list as a column name (a backwards-compatibility quirk), erroring 'no such column' when it matches no column; Ahtola instead built an expression index on the string literal and silently succeeded. EmbeddedIndexFactory.Create now detects a bare LiteralExpression of SqlValueKind.Text in an index term and resolves AsText() against the table's columns (OrdinalIgnoreCase, COLLATE/parens already peeled by the parser): a match builds a real column index with the term's collation falling back to the column's declared collation; no match throws 'no such column: {name}'. Numeric literals and literals nested in larger expressions are untouched (they remain expression indexes). Oracle: 3 string-literal keys removed, 0 added.",
       "status": "closed"
     }
   ]

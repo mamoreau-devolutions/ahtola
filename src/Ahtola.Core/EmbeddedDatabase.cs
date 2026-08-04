@@ -40475,7 +40475,9 @@ internal sealed class EmbeddedTable
 
     // Resolves the effective primary-key columns. A table-level PRIMARY KEY(...) takes the
     // declared column order; otherwise column-level PRIMARY KEY markers are used. Declaring
-    // both a table-level and column-level primary key is rejected, matching SQLite.
+    // more than one primary key is rejected, matching SQLite/Turso: multiple column-level
+    // markers, or a table-level key alongside any column-level marker (a second table-level
+    // key is rejected earlier in the parser).
     private static IReadOnlyList<(int Index, bool Descending)> ResolvePrimaryKeyColumns(
         IReadOnlyList<EmbeddedColumn> columns,
         IReadOnlyList<TablePrimaryKeyColumn>? tablePrimaryKey,
@@ -40487,6 +40489,9 @@ internal sealed class EmbeddedTable
             if (columns[index].PrimaryKey)
                 columnLevel.Add((index, columns[index].PrimaryKeyDescending));
         }
+
+        if (columnLevel.Count > 1)
+            throw new EmbeddedSqlException("table has more than one primary key");
 
         if (tablePrimaryKey is null)
             return columnLevel;

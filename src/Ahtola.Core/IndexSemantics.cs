@@ -37,6 +37,28 @@ internal static class EmbeddedIndexFactory
 
             var expression = term.Expression
                 ?? throw new EmbeddedSqlException($"Index '{statement.Name}' has an invalid expression term.");
+
+            // SQLite/Turso backwards-compat quirk: a standalone string literal as an index
+            // term is interpreted as a column name, not a string constant (turso-src
+            // core/translate/index.rs resolve_index_column). Parentheses are already peeled
+            // at parse time, so a deeply wrapped literal still lands here.
+            if (expression is LiteralExpression { Value.Kind: SqlValueKind.Text } literal)
+            {
+                var literalColumn = literal.Value.AsText();
+                var literalColumnIndex = Array.FindIndex(
+                    table.Columns,
+                    candidate => string.Equals(candidate, literalColumn, StringComparison.OrdinalIgnoreCase));
+                if (literalColumnIndex < 0)
+                    throw new EmbeddedSqlException($"no such column: {literalColumn}");
+
+                columns[position] = new EmbeddedIndexColumn(
+                    table.Columns[literalColumnIndex],
+                    literalColumnIndex,
+                    term.Collation ?? table.ColumnDefinitions[literalColumnIndex].Collation,
+                    term.Descending);
+                continue;
+            }
+
             var expressionSql = term.ExpressionSql;
             if (string.IsNullOrWhiteSpace(expressionSql))
                 throw new EmbeddedSqlException($"Index '{statement.Name}' has an unreconstructable expression term.");
