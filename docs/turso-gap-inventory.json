@@ -718,8 +718,8 @@
       "severity": "s4-intentional",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Ahtola correctly rejects aggregate/window functions in generated column expressions but with a single combined message (\"aggregate and window functions are not allowed in a generated column\") instead of Turso's two distinct messages (aggregate-specific vs window-specific). Behaviorally equivalent (both reject), differs only in error text -- low-severity wording divergence, not a capability gap. (Previously linked keys cleared by earlier wave work: gencol_error_aggregate_star, gencol_error_window_function, gencol_error_nested_window_function, gencol_error_nested_aggregate_star.)",
-      "status": "open"
+      "notes": "Ahtola correctly rejects aggregate/window functions in generated column expressions but with a single combined message (\"aggregate and window functions are not allowed in a generated column\") instead of Turso's two distinct messages (aggregate-specific vs window-specific). Behaviorally equivalent (both reject), differs only in error text -- low-severity wording divergence, not a capability gap. (Previously linked keys cleared by earlier wave work: gencol_error_aggregate_star, gencol_error_window_function, gencol_error_nested_window_function, gencol_error_nested_aggregate_star.) Closed 2026-08-05 as part of gencol Group A: the whole generated-column diagnostic surface now matches Turso's validate_generated_expr wording exactly (aggregate/window split messages were already aligned in Wave F1; the remaining bind-parameter, subquery, dot-operator, and non-deterministic messages were aligned under compile-generated-column-determinism-validation).",
+      "status": "closed"
     },
     {
       "id": "compile-window-function-tie-break-ordering-diverges",
@@ -1156,10 +1156,29 @@
         "gencol.sqltest::gencol_alter_add_virtual_random_error",
         "gencol.sqltest::gencol_create_current_timestamp_rejected",
         "gencol.sqltest::gencol_create_current_date_rejected",
-        "gencol.sqltest::gencol_alter_add_current_timestamp_rejected"
+        "gencol.sqltest::gencol_create_current_time_rejected",
+        "gencol.sqltest::gencol_create_current_timestamp_nested_rejected",
+        "gencol.sqltest::gencol_alter_add_current_timestamp_rejected",
+        "gencol.sqltest::gencol_error_subquery",
+        "gencol.sqltest::gencol_error_in_select",
+        "gencol.sqltest::gencol_error_exists",
+        "gencol.sqltest::gencol_error_nondeterministic_virtual",
+        "gencol.sqltest::gencol_deterministic_date_function",
+        "gencol.sqltest::gencol_error_nondeterministic_datetime",
+        "gencol.sqltest::gencol_error_nondeterministic_strftime",
+        "gencol.sqltest::gencol_error_nondeterministic_unixepoch",
+        "gencol.sqltest::gencol_error_dot_operator",
+        "gencol.sqltest::gencol_error_bind_parameter",
+        "gencol.sqltest::gencol_error_bind_parameter_unnamed",
+        "gencol.sqltest::gencol_error_nested_subquery_in_func",
+        "gencol.sqltest::gencol_error_nested_nondeterministic",
+        "gencol.sqltest::gencol_error_nested_dot_in_case",
+        "gencol.sqltest::gencol_error_nested_subquery_in_case",
+        "gencol.sqltest::gencol_error_nested_in_select",
+        "gencol.sqltest::gencol_error_nested_exists_in_arith"
       ],
-      "notes": "Determinism validation for generated columns misclassifies deterministic substr() as forbidden while error wording for truly forbidden expressions also diverges.",
-      "status": "open"
+      "notes": "Determinism validation for generated columns misclassifies deterministic substr() as forbidden while error wording for truly forbidden expressions also diverges. Closed 2026-08-05 (gencol Group A): ValidateGenerationExpressionAllowed now (1) rejects qualified ColumnExpression references with 'the \".\" operator prohibited in generated columns'; (2) rejects CURRENT_DATE/CURRENT_TIME/CURRENT_TIMESTAMP CurrentTimeExpression nodes with 'non-deterministic functions prohibited in generated columns'; (3) rejects ParameterExpression with 'bind parameters prohibited in generated columns' and subqueries with 'subqueries prohibited in generated columns'; (4) resolves function determinism via a registry-driven IsDeterministicGenerationFunction instead of a hardcoded allowlist, with SQLite's date/time nuance: DATE/TIME/DATETIME/UNIXEPOCH/JULIANDAY are deterministic iff they have an explicit non-'now' first argument and no 'now'/'localtime'/'utc' modifier, STRFTIME iff its format and first value are explicit, TIMEDIFF iff neither argument is a current-time source; random/sqlite_version/etc. stay rejected via SqliteBuiltinFunctions.IsDeterministic. Ordering parity: EmbeddedTable.ValidateGeneratedColumnExpressions pre-validates CREATE TABLE / ALTER TABLE ADD COLUMN generation expressions in EmbeddedStatement.ExecuteIfNeeded before the unbound-parameter gate, matching Turso's translate-time ordering (bind-parameter prohibition preempts 'Missing value for parameter ?1'). Expected-failures net: exactly the 25 mapped gencol keys removed (incl. the 6 nested-error cases previously unlinked), 0 added; GeneratedColumnsTests 25/25; full lane 3765/3765. Remaining gencol groups (STORED acceptance is an intentional Ahtola extension; ALTER ADD VIRTUAL runtime values, NOT NULL/PK ALTER messages, three-part qualified names, FK/deferred-trigger cases) track under their respective entries.",
+      "status": "closed"
     },
     {
       "id": "parser-implicit-column-alias",

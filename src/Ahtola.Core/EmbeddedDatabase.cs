@@ -38520,6 +38520,11 @@ public sealed class EmbeddedStatement : IDisposable
             return;
 
         cancellationToken.ThrowIfCancellationRequested();
+
+        // Translate-time validation runs before the unbound-parameter gate (see
+        // EmbeddedTable.ValidateGeneratedColumnExpressions).
+        EmbeddedTable.ValidateGeneratedColumnExpressions(_statement);
+
         for (var index = 1; index <= ParameterCount; index++)
         {
             if (!_isBound[index])
@@ -39763,24 +39768,52 @@ internal sealed class EmbeddedTable
         order.Add(node);
     }
 
+    // Mirrors Turso's ordering: generated-column expressions are validated at CREATE/ALTER
+    // translate time, before execution, so their prohibition diagnostics preempt the
+    // execution-time unbound-parameter error (gencol_error_bind_parameter).
+    internal static void ValidateGeneratedColumnExpressions(ParsedStatement statement)
+    {
+        switch (statement)
+        {
+            case CreateTableStatement create:
+                foreach (var column in create.Columns)
+                {
+                    if (column.GenerationExpression is { } expression)
+                        ValidateGenerationExpressionAllowed(expression);
+                }
+                return;
+            case AlterTableAddColumnStatement { Column.GenerationExpression: { } expression }:
+                ValidateGenerationExpressionAllowed(expression);
+                return;
+        }
+    }
+
     // Rejects constructs that cannot be evaluated deterministically inside a generated
-    // column: bound parameters, subqueries, aggregate/window functions, and any scalar
-    // function outside the deterministic allow-list.
+    // column: bound parameters, subqueries, qualified column references, aggregate/window
+    // functions, and any function that is not deterministic. Mirrors Turso's
+    // validate_generated_expr (schema.rs).
     private static void ValidateGenerationExpressionAllowed(Expression expression)
     {
         switch (expression)
         {
             case LiteralExpression:
-            case ColumnExpression:
                 return;
+            case ColumnExpression column:
+                if (column.Qualifier is not null)
+                    throw new EmbeddedSqlException("the \".\" operator prohibited in generated columns");
+                return;
+            case CurrentTimeExpression:
+                // CURRENT_DATE/TIME/TIMESTAMP re-evaluate on every read, so SQLite rejects
+                // them like any other non-deterministic function.
+                throw new EmbeddedSqlException("non-deterministic functions prohibited in generated columns");
             case ParameterExpression:
-                throw new EmbeddedSqlException("cannot use a bound parameter in a generated column");
+                throw new EmbeddedSqlException("bind parameters prohibited in generated columns");
             case RowValueExpression rowValue:
                 foreach (var value in rowValue.Values)
                     ValidateGenerationExpressionAllowed(value);
                 return;
             case ScalarSubqueryExpression or ExistsExpression or InSubqueryExpression:
-                throw new EmbeddedSqlException("subqueries are not allowed in a generated column");
+                throw new EmbeddedSqlException("subqueries prohibited in generated columns");
             case StarExpression or QualifiedStarExpression:
                 throw new EmbeddedSqlException("cannot use '*' in a generated column");
             case FunctionExpression function:
@@ -39796,8 +39829,8 @@ internal sealed class EmbeddedTable
                 }
                 if (SqliteBuiltinFunctions.IsWindowOnly(function.Name))
                     throw new EmbeddedSqlException($"misuse of window function {function.Name}()");
-                if (!IsAllowedGeneratedFunction(function.Name))
-                    throw new EmbeddedSqlException($"function {function.Name.ToLowerInvariant()}() is not allowed in a generated column");
+                if (!IsDeterministicGenerationFunction(function))
+                    throw new EmbeddedSqlException("non-deterministic functions prohibited in generated columns");
                 foreach (var argument in function.Arguments)
                     ValidateGenerationExpressionAllowed(argument);
                 return;
@@ -39850,20 +39883,79 @@ internal sealed class EmbeddedTable
         }
     }
 
-    // The deterministic scalar functions the managed engine implements and can therefore
-    // reproduce byte-for-byte inside a generated column. Non-deterministic or connection-
-    // scoped functions (date/time, last_insert_rowid) are deliberately excluded.
-    private static bool IsAllowedGeneratedFunction(string name)
+    // Mirrors Turso's is_deterministic_schema_function_call (schema.rs): a generated-column
+    // call is allowed when it resolves to a deterministic built-in scalar. The date/time
+    // family is deterministic only when it cannot read the wall clock or the local timezone.
+    private static bool IsDeterministicGenerationFunction(FunctionExpression function)
     {
-        return name.ToUpperInvariant() switch
+        var upperName = function.Name.ToUpperInvariant();
+        if (upperName is "DATE" or "TIME" or "DATETIME" or "UNIXEPOCH" or "JULIANDAY"
+            or "STRFTIME" or "TIMEDIFF")
         {
-            "ABS" or "COALESCE" or "GLOB" or "HEX" or "IFNULL" or "JSON" or "JSON_ARRAY"
-                or "JSON_ARRAY_LENGTH" or "JSON_ERROR_POSITION" or "JSON_EXTRACT" or "JSON_INSERT"
-                or "JSON_OBJECT" or "JSON_PATCH" or "JSON_QUOTE" or "JSON_REMOVE" or "JSON_REPLACE"
-                or "JSON_SET" or "JSON_TYPE" or "JSON_VALID" or "LENGTH" or "LIKE" or "LOWER"
-                or "MAX" or "MIN" or "NULLIF" or "TYPEOF" or "UPPER" => true,
-            _ => false,
-        };
+            return IsDeterministicDateTimeCall(upperName, function.Arguments);
+        }
+
+        return SqliteBuiltinFunctions.IsDeterministic(function.Name);
+    }
+
+    private static bool IsDeterministicDateTimeCall(string upperName, IReadOnlyList<Expression> arguments)
+    {
+        if (upperName == "TIMEDIFF")
+        {
+            foreach (var argument in arguments)
+            {
+                if (IsCurrentTimeLiteral(argument))
+                    return false;
+            }
+
+            return true;
+        }
+
+        // strftime(format, value, modifier, ...): the time value is the second argument;
+        // strftime('%s') defaults to 'now' and is therefore non-deterministic.
+        if (upperName == "STRFTIME")
+        {
+            if (arguments.Count < 2 || IsCurrentTimeLiteral(arguments[1]))
+                return false;
+            for (var i = 2; i < arguments.Count; i++)
+            {
+                if (IsUnsafeDateTimeModifier(arguments[i]))
+                    return false;
+            }
+
+            return true;
+        }
+
+        // date/time/datetime/unixepoch/julianday(value, modifier, ...): require an explicit
+        // time value that is not the current clock, and no localtime/utc modifiers.
+        if (arguments.Count == 0 || IsCurrentTimeLiteral(arguments[0]))
+            return false;
+        for (var i = 1; i < arguments.Count; i++)
+        {
+            if (IsUnsafeDateTimeModifier(arguments[i]))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsCurrentTimeLiteral(Expression expression)
+    {
+        if (expression is CurrentTimeExpression)
+            return true;
+        return expression is LiteralExpression literal
+            && literal.Value.Kind == SqlValueKind.Text
+            && string.Equals(literal.Value.AsText(), "now", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUnsafeDateTimeModifier(Expression expression)
+    {
+        if (IsCurrentTimeLiteral(expression))
+            return true;
+        return expression is LiteralExpression literal
+            && literal.Value.Kind == SqlValueKind.Text
+            && (string.Equals(literal.Value.AsText(), "localtime", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(literal.Value.AsText(), "utc", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool CollectColumnReferences(Expression expression, HashSet<string> names)
