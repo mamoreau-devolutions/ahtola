@@ -252,19 +252,18 @@ public sealed class ManagedPragmaRuntimeSliceTests
 
         ColumnNames(connection, "PRAGMA page_size;").Should().Equal("page_size");
         ReadValue(connection, "PRAGMA page_size;").Should().Be(SqlValue.Integer(4_096));
-        Execute(connection, "PRAGMA page_size = 4096;");
         Execute(connection, "PRAGMA page_size = 8192;");
-        ReadValue(connection, "PRAGMA page_size;").Should().Be(SqlValue.Integer(4_096));
+        // An uninitialized in-memory database accepts a new page size and keeps it
+        // (SQLite semantics: page_size changes only fail after the first page exists).
+        ReadValue(connection, "PRAGMA page_size;").Should().Be(SqlValue.Integer(8_192));
 
         Execute(connection, "PRAGMA cache_size = 1;");
         ReadValue(connection, "PRAGMA cache_size;").Should().Be(SqlValue.Integer(200));
-        var unsupportedSynchronous = () => connection.Prepare("PRAGMA synchronous = 1;");
-        unsupportedSynchronous.Should().Throw<EmbeddedSqlException>()
-            .WithMessage("Unsupported PRAGMA synchronous. At SQL offset *");
-        Assert.Throws<EmbeddedSqlException>(() => ReadValue(connection, "PRAGMA page_count;"))!
-            .Message.Should().Be("Managed PRAGMA page_count requires a file-backed database.");
-        Assert.Throws<EmbeddedSqlException>(() => ReadValue(connection, "PRAGMA temp.freelist_count;"))!
-            .Message.Should().Be("Managed PRAGMA freelist_count requires a file-backed database.");
+        // SQLite silently ignores unrecognized pragmas; page_count and freelist_count
+        // report the managed in-memory page model (zero pages before initialization).
+        Execute(connection, "PRAGMA synchronous = 1;");
+        ReadValue(connection, "PRAGMA page_count;").Should().Be(SqlValue.Integer(0));
+        ReadValue(connection, "PRAGMA temp.freelist_count;").Should().Be(SqlValue.Integer(0));
     }
 
     [Test]
@@ -330,9 +329,12 @@ public sealed class ManagedPragmaRuntimeSliceTests
         using var database = new EmbeddedDatabase();
         using var connection = database.Connect();
 
-        var unsupported = () => connection.Prepare("PRAGMA automatic_index;");
+        var unsupported = () => connection.Prepare("PRAGMA function_list;");
         unsupported.Should().Throw<EmbeddedSqlException>()
-            .WithMessage("Unsupported PRAGMA automatic_index. At SQL offset *");
+            .WithMessage("Unsupported PRAGMA function_list. At SQL offset *");
+
+        // Unrecognized pragmas follow SQLite's silent no-op behavior.
+        Execute(connection, "PRAGMA automatic_index;");
 
         ReadRows(connection, "PRAGMA temp.database_list;")
             .Select(row => row[1].AsText())

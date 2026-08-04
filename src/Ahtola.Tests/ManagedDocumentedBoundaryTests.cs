@@ -13,17 +13,14 @@ namespace Ahtola.Tests;
 /// </summary>
 public sealed class ManagedDocumentedBoundaryTests
 {
+    // The remaining pragma cluster (synchronous, locking_mode, busy_timeout,
+    // wal_checkpoint, wal_autocheckpoint, auto_vacuum, max_page_count, temp_store,
+    // mmap_size) is now accepted: busy_timeout / wal_checkpoint / max_page_count /
+    // temp_store are fully executed and the rest follow SQLite's silent no-op
+    // behavior for unrecognized pragmas. function_list and module_list stay
+    // documented-unsupported because they would have to return registry rows.
     private static readonly string[] UnsupportedPragmas =
     [
-        "PRAGMA synchronous = FULL",
-        "PRAGMA locking_mode = EXCLUSIVE",
-        "PRAGMA busy_timeout = 100",
-        "PRAGMA wal_checkpoint",
-        "PRAGMA wal_autocheckpoint = 100",
-        "PRAGMA auto_vacuum = 1",
-        "PRAGMA max_page_count = 100",
-        "PRAGMA temp_store = 2",
-        "PRAGMA mmap_size = 0",
         "PRAGMA function_list",
         "PRAGMA module_list",
     ];

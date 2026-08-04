@@ -301,7 +301,30 @@ internal sealed class SqlParser
         if (name.Equals("quick_check", StringComparison.OrdinalIgnoreCase))
             return ParsePragmaIntegrityCheck(name, quick: true, schema);
 
-        throw Error($"Unsupported PRAGMA {name}.");
+        if (name.Equals("max_page_count", StringComparison.OrdinalIgnoreCase))
+            return new PragmaMaxPageCountStatement(ParseOptionalPragmaLong(name), schema);
+        if (name.Equals("ignore_check_constraints", StringComparison.OrdinalIgnoreCase))
+            return new PragmaIgnoreCheckConstraintsStatement(ParseOptionalPragmaBoolean(name), schema);
+        if (name.Equals("require_where", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("i_am_a_dummy", StringComparison.OrdinalIgnoreCase))
+            return new PragmaRequireWhereStatement(ParseOptionalPragmaBoolean(name), schema);
+        if (name.Equals("temp_store", StringComparison.OrdinalIgnoreCase))
+            return new PragmaTempStoreStatement(ParseOptionalPragmaTempStore(name), schema);
+        if (name.Equals("wal_checkpoint", StringComparison.OrdinalIgnoreCase))
+            return new PragmaWalCheckpointStatement(ParseOptionalPragmaMode(name), schema);
+        if (name.Equals("busy_timeout", StringComparison.OrdinalIgnoreCase))
+            return new PragmaBusyTimeoutStatement(ParseOptionalPragmaLong(name), schema);
+
+        // The introspection pragmas stay documented-unsupported (they return rows in
+        // Turso). Every other unrecognized pragma is silently ignored by SQLite, so accept
+        // the common argument shapes and execute as a no-op (Turso translate/pragma.rs
+        // falls through the same way).
+        if (name.Equals("function_list", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("module_list", StringComparison.OrdinalIgnoreCase))
+            throw Error($"Unsupported PRAGMA {name}.");
+
+        ParseOptionalPragmaIgnoredValue(name);
+        return new PragmaNoOpStatement(name, schema);
     }
 
     /// <remarks>
@@ -591,6 +614,79 @@ internal sealed class SqlParser
 
         _lexer.Next();
         return token.Text;
+    }
+
+    private int? ParseOptionalPragmaTempStore(string name)
+    {
+        if (Consume(TokenKind.Equal))
+            return ParsePragmaTempStoreValue();
+
+        if (Consume(TokenKind.LeftParen))
+        {
+            var value = ParsePragmaTempStoreValue();
+            Expect(TokenKind.RightParen);
+            return value;
+        }
+
+        if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
+            return null;
+
+        throw Error($"PRAGMA {name} requires '=' or a parenthesized value.");
+    }
+
+    private int ParsePragmaTempStoreValue()
+    {
+        var token = _lexer.Current;
+        _lexer.Next();
+        switch (token.Kind)
+        {
+            case TokenKind.Integer:
+                var value = ParsePragmaLongText(token.Text);
+                if (value is 0 or 1 or 2)
+                    return (int)value;
+                throw Error("temp_store must be 0, 1, 2, DEFAULT, FILE, or MEMORY");
+            case TokenKind.Identifier or TokenKind.String:
+                if (token.Text.Equals("DEFAULT", StringComparison.OrdinalIgnoreCase))
+                    return 0;
+                if (token.Text.Equals("FILE", StringComparison.OrdinalIgnoreCase))
+                    return 1;
+                if (token.Text.Equals("MEMORY", StringComparison.OrdinalIgnoreCase))
+                    return 2;
+                throw Error("temp_store must be 0, 1, 2, DEFAULT, FILE, or MEMORY");
+            default:
+                throw Error("temp_store must be 0, 1, 2, DEFAULT, FILE, or MEMORY");
+        }
+    }
+
+    private void ParseOptionalPragmaIgnoredValue(string name)
+    {
+        if (Consume(TokenKind.Equal))
+        {
+            ParsePragmaIgnoredValue(name);
+            return;
+        }
+
+        if (Consume(TokenKind.LeftParen))
+        {
+            ParsePragmaIgnoredValue(name);
+            Expect(TokenKind.RightParen);
+            return;
+        }
+
+        if (_lexer.Current.Kind is not (TokenKind.Semicolon or TokenKind.End))
+            throw Error($"PRAGMA {name} requires '=' or a parenthesized value.");
+    }
+
+    private void ParsePragmaIgnoredValue(string name)
+    {
+        if (_lexer.Current.Kind is TokenKind.Minus or TokenKind.Plus)
+            _lexer.Next();
+
+        var token = _lexer.Current;
+        if (token.Kind is not (TokenKind.Integer or TokenKind.Real or TokenKind.Identifier or TokenKind.String))
+            throw Error($"Invalid value for PRAGMA {name}.");
+
+        _lexer.Next();
     }
 
     private ParsedStatement ParseCreate()

@@ -301,6 +301,25 @@ internal sealed record PragmaCacheSizeStatement(long? Value, string? Schema = nu
 
 internal sealed record PragmaCacheSpillStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
 
+internal sealed record PragmaMaxPageCountStatement(long? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaIgnoreCheckConstraintsStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaRequireWhereStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaTempStoreStatement(int? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaWalCheckpointStatement(string? Mode, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaBusyTimeoutStatement(long? Value, string? Schema = null) : ParsedStatement;
+
+/// <summary>
+/// An unrecognized pragma: SQLite silently ignores unknown pragmas (Turso's
+/// translate/pragma.rs falls through without emitting anything), so the engine executes
+/// these as a no-op instead of rejecting them at prepare time.
+/// </summary>
+internal sealed record PragmaNoOpStatement(string Name, string? Schema = null) : ParsedStatement;
+
 internal sealed record PragmaPageCountStatement(string? Schema = null) : ParsedStatement;
 
 internal sealed record PragmaFreelistCountStatement(string? Schema = null) : ParsedStatement;

@@ -256,6 +256,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private readonly Dictionary<BlobMutationIdentity, int> _activeBlobMutations = new();
     private readonly Dictionary<BlobMutationIdentity, long> _blobMutationGenerations = new();
     private long _nextBlobMutationGeneration;
+
+    // Managed in-memory page model backing PRAGMA page_count / page_size /
+    // max_page_count on databases that have no file store. The memory database
+    // starts with zero pages (matching SQLite's empty pager) and materializes
+    // pages the way the pager would: the first header write creates the header
+    // page, and each table or index adds one page.
+    internal bool _inMemoryInitialized;
+    internal int? _inMemoryPageSize;
+    private uint _maxPageCount = 4294967294;
     private readonly EmbeddedTransactionLock _transactionLock;
 
     public EmbeddedDatabase()
@@ -402,6 +411,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     internal string DatabasePath => _databasePath;
 
+    internal uint MaxPageCount
+    {
+        get => _maxPageCount;
+        set => _maxPageCount = value;
+    }
+
     internal IFileSystem FileSystem
         => _fileSystem ?? throw new InvalidOperationException("The managed database is not file-backed.");
 
@@ -521,7 +536,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         bool CompilationEnabled = true,
         TempTriggerBridge? TempTriggers = null,
         ManagedStatementHooks? Hooks = null,
-        OuterAggregateScope? OuterAggregateScope = null)
+        OuterAggregateScope? OuterAggregateScope = null,
+        bool IgnoreCheckConstraints = false)
     {
         /// <summary>
         /// Row-loop checkpoint. It honors cooperative cancellation exactly as before and
@@ -987,7 +1003,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         CancellationToken cancellationToken = default,
         bool compilationEnabled = true,
         TempTriggerBridge? tempTriggers = null,
-        ManagedStatementHooks? hooks = null)
+        ManagedStatementHooks? hooks = null,
+        bool ignoreCheckConstraints = false)
     {
         var result = ExecuteCore(
             statement,
@@ -1000,7 +1017,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             cancellationToken,
             compilationEnabled,
             tempTriggers,
-            hooks);
+            hooks,
+            ignoreCheckConstraints);
 
         RecordChangeCounters(statement, result);
         return result;
@@ -1030,7 +1048,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         CancellationToken cancellationToken = default,
         bool compilationEnabled = true,
         TempTriggerBridge? tempTriggers = null,
-        ManagedStatementHooks? hooks = null)
+        ManagedStatementHooks? hooks = null,
+        bool ignoreCheckConstraints = false)
     {
         ThrowIfRecursiveTriggerCallbackReentry();
         if (RequiresRecursiveTriggerStack(
@@ -1049,7 +1068,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 cancellationToken,
                 compilationEnabled,
                 tempTriggers,
-                hooks));
+                hooks,
+                ignoreCheckConstraints));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -1092,7 +1112,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                                 cancellationToken,
                                 compilationEnabled,
                                 tempTriggers,
-                                hooks);
+                                hooks,
+                                ignoreCheckConstraints);
                         }
                         catch (EmbeddedConflictFailException)
                         {
@@ -1157,7 +1178,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                                 cancellationToken,
                                 compilationEnabled,
                                 tempTriggers,
-                                hooks);
+                                hooks,
+                                ignoreCheckConstraints);
                         }
                         catch (EmbeddedConflictFailException)
                         {
@@ -1194,7 +1216,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                             cancellationToken,
                             compilationEnabled,
                             tempTriggers,
-                            hooks);
+                            hooks,
+                            ignoreCheckConstraints);
 
                     var working = new SchemaCatalog(_tables, _views, _triggers).Clone();
                     ExecutionResult result;
@@ -1212,7 +1235,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                             cancellationToken,
                             compilationEnabled,
                             tempTriggers,
-                            hooks);
+                            hooks,
+                            ignoreCheckConstraints);
                     }
                     catch (EmbeddedConflictFailException)
                     {
@@ -1298,7 +1322,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 CancellationToken: outer.CancellationToken,
                 StatementState: new StatementExecutionState(outer.LastInsertRowId),
                 CompilationEnabled: false,
-                Hooks: hooks);
+                Hooks: hooks,
+                IgnoreCheckConstraints: outer.IgnoreCheckConstraints);
             return statement switch
             {
                 InsertStatement insert => ExecuteDmlWithAutoIncrementState(
@@ -1401,7 +1426,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         or InsertStatement or UpdateStatement or DeleteStatement or WithDmlStatement
         or ReindexStatement or VacuumStatement
         or PragmaHeaderIntegerStatement { Value: not null }
-        or PragmaJournalModeStatement { Mode: not null };
+        or PragmaJournalModeStatement { Mode: not null }
+        or PragmaMaxPageCountStatement;
 
     internal static bool MayChangeSchema(ParsedStatement statement) => statement is
         CreateTableStatement or CreateTableAsSelectStatement
@@ -1803,7 +1829,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     internal int GetPageSize()
     {
         lock (_gate)
-            return _fileStore is null ? SqlitePageSize.Default : _fileCatalogVersion.PageSize;
+            return _fileStore is null ? _inMemoryPageSize ?? SqlitePageSize.Default : _fileCatalogVersion.PageSize;
     }
 
     internal uint GetPageCount()
@@ -1811,17 +1837,48 @@ public sealed partial class EmbeddedDatabase : IDisposable
         lock (_gate)
         {
             if (_fileStore is null)
-                throw new EmbeddedSqlException("Managed PRAGMA page_count requires a file-backed database.");
+            {
+                // An uninitialized in-memory database has no pages yet (SQLite
+                // reports 0 until the first page is written). Once initialized,
+                // model the pager: one header page plus one page per table and
+                // index b-tree.
+                if (!_inMemoryInitialized)
+                    return 0;
+
+                var pages = 1;
+                foreach (var table in _tables.Values)
+                    pages += 1 + table.Indexes.Count;
+
+                return (uint)pages;
+            }
+
             return _fileCatalogVersion.DatabaseSizeInPages;
         }
+    }
+
+    // An in-memory database models PRAGMA max_page_count at the catalog level: each new
+    // table or index b-tree needs one page (plus the header page while the database is
+    // still uninitialized), and SQLite fails the statement with "database or disk is
+    // full" when the allocation would exceed the limit. File-backed databases allocate
+    // real pages, so the pager owns enforcement there and the catalog check stays inert.
+    private void EnforceMaxPageCountForCatalogChange(int additionalPages)
+    {
+        if (_fileStore is not null)
+            return;
+
+        var required = GetPageCount() + (uint)additionalPages + (_inMemoryInitialized ? 0u : 1u);
+        if (required > MaxPageCount)
+            throw new EmbeddedSqlException("database or disk is full");
     }
 
     internal uint GetFreelistCount()
     {
         lock (_gate)
         {
+            // An in-memory database never frees pages, so the count is always zero
+            // (SQLite reports 0 rather than an error for :memory: databases).
             if (_fileStore is null)
-                throw new EmbeddedSqlException("Managed PRAGMA freelist_count requires a file-backed database.");
+                return 0;
             return _fileCatalogVersion.FreelistPageCount;
         }
     }
@@ -1988,8 +2045,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
             {
                 var updated = UpdatePragmaHeaderInteger(_inMemoryPragmaHeader, kind, value);
                 if (_inMemoryPragmaHeader == updated)
+                {
+                    // Even a no-op header write materializes the header page.
+                    _inMemoryInitialized = true;
                     return;
+                }
                 _inMemoryPragmaHeader = updated;
+                _inMemoryInitialized = true;
                 _version++;
                 return;
             }
@@ -2368,6 +2430,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         _triggers = catalog.Triggers;
         if (fileCatalogVersion is { } version)
             _fileCatalogVersion = version;
+        else if (_fileStore is null)
+            _inMemoryInitialized = true;
         _version++;
 
         // Pin the storage generation to this commit/reload so the statement-level
@@ -2607,7 +2671,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         CancellationToken cancellationToken = default,
         bool compilationEnabled = true,
         TempTriggerBridge? tempTriggers = null,
-        ManagedStatementHooks? hooks = null)
+        ManagedStatementHooks? hooks = null,
+        bool ignoreCheckConstraints = false)
     {
         ThrowIfRecursiveTriggerCallbackReentry();
         if (RequiresRecursiveTriggerStack(
@@ -2627,7 +2692,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 cancellationToken,
                 compilationEnabled,
                 tempTriggers,
-                hooks));
+                hooks,
+                ignoreCheckConstraints));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -2650,7 +2716,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             StatementState: new StatementExecutionState(lastInsertRowId),
             CompilationEnabled: compilationEnabled,
             TempTriggers: tempTriggers,
-            Hooks: hooks);
+            Hooks: hooks,
+            IgnoreCheckConstraints: ignoreCheckConstraints);
         return statement switch
         {
             CreateTableStatement create => ExecuteCreateTable(create, catalog, cancellationToken),
@@ -3424,6 +3491,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 table.RowIds.Add(checked(rowIndex + 1L));
             }
         }
+        var requiredPages = 1;
+        if (table.IsAutoIncrement && !catalog.Tables.ContainsKey(SqliteSequenceTableName))
+            requiredPages++;
+        EnforceMaxPageCountForCatalogChange(requiredPages);
         if (table.IsAutoIncrement)
             EnsureSqliteSequenceTable(catalog);
 
@@ -3686,6 +3757,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (definition.Unique)
             ValidateUniqueIndex(statement.TableName, table, definition, table.Rows);
 
+        EnforceMaxPageCountForCatalogChange(1);
         table.Indexes.Add(definition);
         return new ExecutionResult([], [], 0, true);
     }
@@ -6876,7 +6948,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     updated,
                     updatedRowId,
                     parameters,
-                    updateContext);
+                    updateContext,
+                    updatePlan);
                 ValidateColumnUniqueConstraints(table, updatedRows);
                 ValidatePrimaryKey(statement.TableName, table, updatedRows);
                 ValidateUniqueIndexes(statement.TableName, table, updatedRows);
@@ -9512,7 +9585,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             context,
             enforceNotNull: enforceGeneratedNotNull);
         if (validateCheckConstraints)
-            ValidateCheckConstraints(statement.TableName, table, updated, newRowid, parameters, context);
+            ValidateCheckConstraints(statement.TableName, table, updated, newRowid, parameters, context, plan);
 
         return (updated, newRowid);
     }
@@ -9544,10 +9617,21 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[] row,
         long rowid,
         SqlValue[] parameters,
-        QueryContext context)
+        QueryContext context,
+        UpdatePlan? updatePlan = null)
     {
         if (!table.HasCheckConstraints)
             return;
+
+        // PRAGMA ignore_check_constraints suppresses CHECK enforcement for the connection
+        // (Turso emitter::emit_check_constraints returns early when the flag is set).
+        if (context.IgnoreCheckConstraints)
+            return;
+
+        // On UPDATE, SQLite only re-evaluates CHECK constraints that reference at least
+        // one column in the SET clause (expanded through generated-column dependents, and
+        // including the rowid pseudo-names when the rowid is reassigned).
+        var changedColumns = updatePlan is null ? null : GetUpdatedColumnNames(table, updatePlan);
 
         var source = new SourceRow(
             table.Columns,
@@ -9559,10 +9643,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
         foreach (var column in table.ColumnDefinitions)
         {
             foreach (var check in column.CheckConstraints)
+            {
+                if (changedColumns is not null && !ReferencesAnyChangedColumn(check.Expression, changedColumns))
+                    continue;
                 Validate(check);
+            }
         }
         foreach (var check in table.CheckConstraints)
+        {
+            if (changedColumns is not null && !ReferencesAnyChangedColumn(check.Expression, changedColumns))
+                continue;
             Validate(check);
+        }
 
         void Validate(CheckConstraint check)
         {
@@ -9574,6 +9666,45 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     InsertConflictAlgorithm.Abort);
             }
         }
+    }
+
+    // Mirrors Turso's columns_affected_by_update + ROWID_STRS expansion in the update
+    // emitter: assigned ordinals expanded through generated-column dependents, plus the
+    // rowid pseudo-column names when the rowid itself is reassigned.
+    private static HashSet<string> GetUpdatedColumnNames(EmbeddedTable table, UpdatePlan plan)
+    {
+        var assigned = plan.ColumnAssignments
+            .Select(assignment => assignment.Index)
+            .ToHashSet();
+        table.ExpandAssignedColumnsThroughGeneratedColumns(assigned);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var index in assigned)
+            names.Add(table.Columns[index]);
+        // Assigning to the INTEGER PRIMARY KEY alias column assigns the rowid itself, so
+        // constraints that reference any rowid spelling are re-evaluated too.
+        var rowidTouched = plan.RowidAssignment is not null
+            || (plan.AliasIndex >= 0 && assigned.Contains(plan.AliasIndex));
+        if (rowidTouched)
+        {
+            names.Add("rowid");
+            names.Add("oid");
+            names.Add("_rowid_");
+            if (plan.AliasIndex >= 0)
+                names.Add(table.Columns[plan.AliasIndex]);
+        }
+        return names;
+    }
+
+    private static bool ReferencesAnyChangedColumn(Expression expression, HashSet<string> changedColumns)
+    {
+        var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        EmbeddedTable.CollectColumnReferences(expression, referenced);
+        foreach (var name in referenced)
+        {
+            if (changedColumns.Contains(name))
+                return true;
+        }
+        return false;
     }
 
     // Validates the fully assembled post-update rows, then swaps them in and restores
@@ -10198,7 +10329,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 updated,
                 newRowId,
                 EmptyParameters,
-                context);
+                context,
+                plan);
             var rows = childTable.Rows.Select(row => row.ToArray()).ToList();
             var rowIds = childTable.RowIds.Count == childTable.Rows.Count
                 ? childTable.RowIds.ToList()
@@ -34716,6 +34848,9 @@ public sealed class EmbeddedConnection : IDisposable
     private bool _recursiveTriggers;
     private long _cacheSize = -2000;
     private bool _cacheSpill = true;
+    private int _tempStore;
+    private bool _ignoreCheckConstraints;
+    private bool _requireWhere;
     private bool _tempInitialized;
     private readonly Dictionary<EmbeddedDatabase, int> _pendingPageSizes = [];
     private readonly ManagedConnectionHooks _hooks = new();
@@ -35284,6 +35419,9 @@ public sealed class EmbeddedConnection : IDisposable
         _foreignKeys = false;
         _deferForeignKeys = false;
         _recursiveTriggers = false;
+        _tempStore = 0;
+        _ignoreCheckConstraints = false;
+        _requireWhere = false;
         _tempInitialized = false;
         _pendingPageSizes.Clear();
         _hooks.UpdateHook = null;
@@ -35470,6 +35608,7 @@ public sealed class EmbeddedConnection : IDisposable
         ThrowIfDisposed();
         ThrowIfInsideHookCallback();
         cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfRequireWhereViolated(statement);
         if (_transactionMutationDatabase is not null && EmbeddedDatabase.MayMutate(statement))
         {
             throw new EmbeddedSqlException(
@@ -35559,6 +35698,22 @@ public sealed class EmbeddedConnection : IDisposable
                 return ExecutePragmaCacheSize(cacheSize);
             case PragmaCacheSpillStatement cacheSpill:
                 return ExecutePragmaCacheSpill(cacheSpill);
+            case PragmaMaxPageCountStatement maxPageCount:
+                return ExecutePragmaMaxPageCount(maxPageCount);
+            case PragmaIgnoreCheckConstraintsStatement ignoreCheckConstraints:
+                return ExecutePragmaIgnoreCheckConstraints(ignoreCheckConstraints);
+            case PragmaRequireWhereStatement requireWhere:
+                return ExecutePragmaRequireWhere(requireWhere);
+            case PragmaTempStoreStatement tempStore:
+                return ExecutePragmaTempStore(tempStore);
+            case PragmaWalCheckpointStatement walCheckpoint:
+                return ExecutePragmaWalCheckpoint(walCheckpoint);
+            case PragmaBusyTimeoutStatement busyTimeout:
+                return ExecutePragmaBusyTimeout(busyTimeout);
+            case PragmaNoOpStatement:
+                // SQLite silently ignores unrecognized pragmas (Turso falls through its
+                // translate switch without emitting anything).
+                return ExecutionResult.Empty;
             case AnalyzeStatement:
                 throw EmbeddedDatabase.AnalyzeNotSupported();
             case VacuumStatement vacuum:
@@ -35611,7 +35766,8 @@ public sealed class EmbeddedConnection : IDisposable
                                     compilationEnabled: !routed.IsAttached
                                         && !ReferenceEquals(routed.Database, _tempDatabase),
                                     tempTriggers,
-                                    CreateStatementHooks(routed.Database, includeCommitGate: true));
+                                    CreateStatementHooks(routed.Database, includeCommitGate: true),
+                                    ignoreCheckConstraints: _ignoreCheckConstraints);
                             }
                             catch (Exception failure)
                                 when (failure is not EmbeddedConflictFailException
@@ -35643,7 +35799,8 @@ public sealed class EmbeddedConnection : IDisposable
                                 compilationEnabled: !routed.IsAttached
                                     && !ReferenceEquals(routed.Database, _tempDatabase),
                                 tempTriggers,
-                                CreateStatementHooks(routed.Database, includeCommitGate: false));
+                                CreateStatementHooks(routed.Database, includeCommitGate: false),
+                                ignoreCheckConstraints: _ignoreCheckConstraints);
                             if (EmbeddedDatabase.MayMutate(routed.Statement))
                                 cancellationToken.ThrowIfCancellationRequested();
                             // The catalog overload used for transactional statements does not
@@ -38112,8 +38269,8 @@ public sealed class EmbeddedConnection : IDisposable
 
         if (database.IsFileBacked)
             _pendingPageSizes[database] = requested;
-        else
-            _pendingPageSizes.Remove(database);
+        else if (!database._inMemoryInitialized)
+            database._inMemoryPageSize = requested;
         return ExecutionResult.Empty;
     }
 
@@ -38167,6 +38324,104 @@ public sealed class EmbeddedConnection : IDisposable
         }
 
         return new ExecutionResult(["cache_spill"], [[SqlValue.Integer(_cacheSpill ? 1 : 0)]], 0);
+    }
+
+    private ExecutionResult ExecutePragmaMaxPageCount(PragmaMaxPageCountStatement statement)
+    {
+        var database = ResolvePragmaDatabase(statement.Schema);
+        if (statement.Value is null)
+            return new ExecutionResult(["max_page_count"], [[SqlValue.Integer(database.MaxPageCount)]], 0);
+
+        // Turso treats 0 as a no-op query and clamps any other request to at
+        // least the current database size (set_max_page_count).
+        if (statement.Value.Value == 0)
+            return new ExecutionResult(["max_page_count"], [[SqlValue.Integer(database.MaxPageCount)]], 0);
+
+        var requested = statement.Value.Value < 0 ? 0 : (uint)statement.Value.Value;
+        var newMax = Math.Max(requested, database.GetPageCount());
+        database.MaxPageCount = newMax;
+        return new ExecutionResult(["max_page_count"], [[SqlValue.Integer(newMax)]], 0);
+    }
+
+    private ExecutionResult ExecutePragmaIgnoreCheckConstraints(PragmaIgnoreCheckConstraintsStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Enabled is { } enabled)
+        {
+            _ignoreCheckConstraints = enabled;
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(["ignore_check_constraints"], [[SqlValue.Integer(_ignoreCheckConstraints ? 1 : 0)]], 0);
+    }
+
+    private ExecutionResult ExecutePragmaRequireWhere(PragmaRequireWhereStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Enabled is { } enabled)
+        {
+            _requireWhere = enabled;
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(["require_where"], [[SqlValue.Integer(_requireWhere ? 1 : 0)]], 0);
+    }
+
+    private ExecutionResult ExecutePragmaTempStore(PragmaTempStoreStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Value is null)
+            return new ExecutionResult(["temp_store"], [[SqlValue.Integer(_tempStore)]], 0);
+
+        // Turso rejects the change only while a transaction is open AND a temp
+        // database exists; otherwise the new setting simply tears down and
+        // reinitializes temp storage.
+        if (HasActiveTransaction && _tempInitialized)
+            throw new EmbeddedSqlException("temporary storage cannot be changed from within a transaction");
+
+        _tempStore = statement.Value.Value;
+        ResetTemporaryDatabase();
+        _tempInitialized = false;
+        return ExecutionResult.Empty;
+    }
+
+    private ExecutionResult ExecutePragmaWalCheckpoint(PragmaWalCheckpointStatement statement)
+    {
+        if (statement.Mode is { } mode)
+        {
+            if (!mode.Equals("PASSIVE", StringComparison.OrdinalIgnoreCase)
+                && !mode.Equals("FULL", StringComparison.OrdinalIgnoreCase)
+                && !mode.Equals("RESTART", StringComparison.OrdinalIgnoreCase)
+                && !mode.Equals("TRUNCATE", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new EmbeddedSqlException($"Unknown Checkpoint Mode: {mode}");
+            }
+        }
+
+        string[] columns = ["busy", "log", "checkpointed"];
+        if (statement.Schema is not null && statement.Schema.Equals("temp", StringComparison.OrdinalIgnoreCase))
+        {
+            // The temp schema carries no WAL; Turso reports -1 for both counters.
+            return new ExecutionResult(columns, [[SqlValue.Integer(0), SqlValue.Integer(-1), SqlValue.Integer(-1)]], 0);
+        }
+
+        ValidatePragmaSchema(statement.Schema);
+        // The managed engine commits inline and keeps no persistent WAL frames,
+        // so every checkpoint completes trivially with nothing left in the log.
+        return new ExecutionResult(columns, [[SqlValue.Integer(0), SqlValue.Integer(0), SqlValue.Integer(0)]], 0);
+    }
+
+    private ExecutionResult ExecutePragmaBusyTimeout(PragmaBusyTimeoutStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Value is { } value)
+        {
+            // Turso clamps negative values to zero.
+            BusyTimeout = TimeSpan.FromMilliseconds(Math.Max(0, value));
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(["busy_timeout"], [[SqlValue.Integer((long)BusyTimeout.TotalMilliseconds)]], 0);
     }
 
     private ExecutionResult ExecuteVacuum(VacuumStatement statement, SqlValue[] parameters)
@@ -38298,6 +38553,18 @@ public sealed class EmbeddedConnection : IDisposable
             return ["journal_mode"];
         if (statement is PragmaPageSizeStatement { Value: null })
             return ["page_size"];
+        if (statement is PragmaMaxPageCountStatement)
+            return ["max_page_count"];
+        if (statement is PragmaIgnoreCheckConstraintsStatement { Enabled: null })
+            return ["ignore_check_constraints"];
+        if (statement is PragmaRequireWhereStatement { Enabled: null })
+            return ["require_where"];
+        if (statement is PragmaTempStoreStatement { Value: null })
+            return ["temp_store"];
+        if (statement is PragmaWalCheckpointStatement)
+            return ["busy", "log", "checkpointed"];
+        if (statement is PragmaBusyTimeoutStatement { Value: null })
+            return ["busy_timeout"];
 
         var routed = RouteStatement(statement);
         var transactionState = GetTransactionState(routed.Database);
@@ -38433,6 +38700,33 @@ public sealed class EmbeddedConnection : IDisposable
         }
     }
 
+    /// <summary>
+    /// PRAGMA require_where / i_am_a_dummy forbids UPDATE and DELETE statements
+    /// with no WHERE clause. Turso checks this at translate time, before table
+    /// resolution, so the guard fires even for nonexistent tables and through
+    /// WITH-DML wrappers.
+    /// </summary>
+    private void ThrowIfRequireWhereViolated(ParsedStatement statement)
+    {
+        if (!_requireWhere)
+            return;
+
+        if (statement is WithDmlStatement withDml)
+            statement = withDml.Dml;
+
+        if (statement is UpdateStatement { Where: null })
+        {
+            throw new EmbeddedSqlException(
+                "UPDATE without a WHERE clause is not allowed when require_where (or i_am_a_dummy) is enabled");
+        }
+
+        if (statement is DeleteStatement { Where: null })
+        {
+            throw new EmbeddedSqlException(
+                "DELETE without a WHERE clause is not allowed when require_where (or i_am_a_dummy) is enabled");
+        }
+    }
+
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -38515,6 +38809,12 @@ public sealed class EmbeddedStatement : IDisposable
             || _statement is PragmaHeaderIntegerStatement { Value: null }
             || _statement is PragmaJournalModeStatement
             || _statement is PragmaPageSizeStatement { Value: null }
+            || _statement is PragmaMaxPageCountStatement
+            || _statement is PragmaIgnoreCheckConstraintsStatement { Enabled: null }
+            || _statement is PragmaRequireWhereStatement { Enabled: null }
+            || _statement is PragmaTempStoreStatement { Value: null }
+            || _statement is PragmaWalCheckpointStatement
+            || _statement is PragmaBusyTimeoutStatement { Value: null }
             || EmbeddedDatabase.TryGetReturning(_statement, out _, out _))
         {
             ExecuteIfNeeded();
@@ -40128,12 +40428,14 @@ internal sealed class EmbeddedTable
                 || string.Equals(literal.Value.AsText(), "utc", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static bool CollectColumnReferences(Expression expression, HashSet<string> names)
+    internal static bool CollectColumnReferences(Expression expression, HashSet<string> names)
     {
         switch (expression)
         {
             case ColumnExpression column:
                 names.Add(column.Name);
+                if (column.UnqualifiedName is not null)
+                    names.Add(column.UnqualifiedName);
                 return column.Qualifier is not null;
             case FunctionExpression function:
                 var functionQualified = false;
