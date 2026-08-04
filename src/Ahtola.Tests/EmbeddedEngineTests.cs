@@ -2202,7 +2202,7 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void FullJoinUsingCoalescesFromWhicheverSideSurvives()
+    public void FullJoinUsingIsRejectedLikeTurso()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
@@ -2211,11 +2211,11 @@ public class EmbeddedEngineTests
         Execute(connection, "INSERT INTO t1 VALUES (1, 'b1'), (3, 'b3');");
         Execute(connection, "INSERT INTO t2 VALUES (1, 'c1'), (4, 'c4');");
 
-        var rows = ReadRows(connection, "SELECT a, b, c FROM t1 FULL JOIN t2 USING(a);");
-        rows.Should().HaveCount(3);
-        rows[0].Should().Equal(SqlValue.Integer(1), SqlValue.Text("b1"), SqlValue.Text("c1"));
-        rows[1].Should().Equal(SqlValue.Integer(3), SqlValue.Text("b3"), SqlValue.Null);
-        rows[2].Should().Equal(SqlValue.Integer(4), SqlValue.Null, SqlValue.Text("c4"));
+        // Turso's full-join planner cannot express coalesced USING output, so it rejects the
+        // shape; Ahtola mirrors the rejection (turso-src/core/translate/optimizer/join.rs).
+        Assert.Throws<EmbeddedSqlException>(
+            () => ReadRows(connection, "SELECT a, b, c FROM t1 FULL JOIN t2 USING(a);"))!
+            .Message.Should().StartWith("FULL OUTER JOIN requires an equality condition");
     }
 
     [Test]

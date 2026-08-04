@@ -12098,6 +12098,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         select = ResolveSelectBindings(select, context, outerRow);
         ValidateGroupByCollations(select.GroupBy);
         ValidateOrderByAggregateMisuse(select);
+        ValidateJoinStructure(select);
         var canUseCompiledRoute = CanUseCompiledSelectRoute(select, context, outerRow);
         CompiledSelect? compiled = null;
         if (canUseCompiledRoute)
@@ -19157,6 +19158,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             throw new EmbeddedSqlException("misuse of window function in HAVING clause");
 
         ValidateOrderByAggregateMisuse(statement);
+        ValidateJoinStructure(statement);
 
         // The window pass runs after aggregation, so a window call handed to an aggregate has no
         // pass left to be evaluated in.
@@ -25949,6 +25951,379 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var misusedAggregate = FindAggregateFunction(orderByAggregateMisuse.Expression)!;
             throw new EmbeddedSqlException($"misuse of aggregate: {misusedAggregate.Name}()");
         }
+    }
+
+    // Wave F2.10: reject the join shapes Turso's planner cannot plan instead of executing
+    // them with divergent results. Turso raises these from the RIGHT JOIN parse rewrite
+    // (turso-src/core/translate/planner.rs:1842-1852) and the "no plan found" branch of its
+    // FULL OUTER join-order search (core/translate/optimizer/join.rs:1340-1365); the check
+    // order mirrors that precedence.
+    private void ValidateJoinStructure(SelectStatement statement)
+    {
+        if (statement.Source is null)
+            return;
+
+        ValidateRightJoinPlacement(statement.Source);
+
+        var fullOuterJoins = new List<JoinTableSource>();
+        CollectFullOuterJoins(statement.Source, fullOuterJoins);
+        if (fullOuterJoins.Count == 0)
+            return;
+
+        foreach (var fullOuterJoin in fullOuterJoins)
+        {
+            if (ContainsOuterJoin(fullOuterJoin.Left))
+                throw new EmbeddedSqlException("FULL OUTER JOIN chaining is not yet supported");
+        }
+
+        if (ContainsCorrelatedSubqueryReferencingFromSources(statement))
+        {
+            throw new EmbeddedSqlException(
+                "FULL OUTER JOIN is not supported with correlated subqueries that reference the joined tables");
+        }
+
+        foreach (var fullOuterJoin in fullOuterJoins)
+        {
+            // Turso lowers NATURAL joins to INNER joins before the outer-join checks apply.
+            if (fullOuterJoin.Natural || fullOuterJoin.UsingColumns is not { Count: > 0 })
+                continue;
+
+            throw new EmbeddedSqlException("FULL OUTER JOIN requires an equality condition in the ON clause");
+        }
+    }
+
+    // Turso plans a RIGHT JOIN by swapping the two tables it joins, and the swap only works
+    // for the last join of a chain, so a RIGHT JOIN whose left side is already a join is
+    // rejected at parse time.
+    private static void ValidateRightJoinPlacement(TableSource source)
+    {
+        if (source is not JoinTableSource join)
+            return;
+
+        ValidateRightJoinPlacement(join.Left);
+        ValidateRightJoinPlacement(join.Right);
+        if (join.Kind == JoinKind.Right && join.Left is JoinTableSource)
+        {
+            throw new EmbeddedSqlException(
+                "RIGHT JOIN following another join is not yet supported. Try rewriting as LEFT JOIN or using a subquery.");
+        }
+    }
+
+    private static void CollectFullOuterJoins(TableSource source, List<JoinTableSource> found)
+    {
+        if (source is not JoinTableSource join)
+            return;
+
+        if (join.Kind == JoinKind.Full)
+            found.Add(join);
+
+        CollectFullOuterJoins(join.Left, found);
+        CollectFullOuterJoins(join.Right, found);
+    }
+
+    private static bool ContainsOuterJoin(TableSource source)
+    {
+        return source is JoinTableSource join
+            && (join.Kind is JoinKind.Left or JoinKind.Right or JoinKind.Full
+                || ContainsOuterJoin(join.Left)
+                || ContainsOuterJoin(join.Right));
+    }
+
+    private static bool ContainsCorrelatedSubqueryReferencingFromSources(SelectStatement statement)
+    {
+        var fromNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        CollectFromSourceNames(statement.Source, fromNames);
+        if (fromNames.Count == 0)
+            return false;
+
+        foreach (var projection in statement.Projections)
+        {
+            if (ExpressionContainsCorrelatedSubquery(projection.Expression, fromNames))
+                return true;
+        }
+
+        if (ExpressionContainsCorrelatedSubquery(statement.Where, fromNames))
+            return true;
+
+        foreach (var expression in statement.GroupBy)
+        {
+            if (ExpressionContainsCorrelatedSubquery(expression, fromNames))
+                return true;
+        }
+
+        if (ExpressionContainsCorrelatedSubquery(statement.Having, fromNames))
+            return true;
+
+        foreach (var term in statement.OrderBy)
+        {
+            if (ExpressionContainsCorrelatedSubquery(term.Expression, fromNames))
+                return true;
+        }
+
+        if (ExpressionContainsCorrelatedSubquery(statement.Limit, fromNames)
+            || ExpressionContainsCorrelatedSubquery(statement.Offset, fromNames))
+            return true;
+
+        return TableSourceConditionsContainCorrelatedSubquery(statement.Source, fromNames);
+    }
+
+    private static bool TableSourceConditionsContainCorrelatedSubquery(
+        TableSource? source,
+        HashSet<string> fromNames)
+    {
+        switch (source)
+        {
+            case JoinTableSource join:
+                return ExpressionContainsCorrelatedSubquery(join.Condition, fromNames)
+                    || TableSourceConditionsContainCorrelatedSubquery(join.Left, fromNames)
+                    || TableSourceConditionsContainCorrelatedSubquery(join.Right, fromNames);
+            case TableValuedFunctionSource function:
+                return function.Arguments.Any(argument => ExpressionContainsCorrelatedSubquery(argument, fromNames));
+            default:
+                return false;
+        }
+    }
+
+    private static void CollectFromSourceNames(TableSource? source, HashSet<string> names)
+    {
+        switch (source)
+        {
+            case NamedTableSource named:
+                names.Add(named.Alias ?? named.Name);
+                break;
+            case TableValuedFunctionSource function:
+                names.Add(function.Alias ?? function.Name);
+                break;
+            case DerivedTableSource derived:
+                if (derived.Alias is not null)
+                    names.Add(derived.Alias);
+                break;
+            case JoinTableSource join:
+                CollectFromSourceNames(join.Left, names);
+                CollectFromSourceNames(join.Right, names);
+                break;
+        }
+    }
+
+    // True when <paramref name="expression"/> contains a subquery that references one of
+    // <paramref name="outerNames"/> with a qualified column reference. Nested subqueries are
+    // scanned at every depth because Turso's correlation detection propagates outer
+    // references through nesting.
+    private static bool ExpressionContainsCorrelatedSubquery(Expression? expression, HashSet<string> outerNames)
+    {
+        switch (expression)
+        {
+            case null:
+                return false;
+            case ScalarSubqueryExpression subquery:
+                return QueryReferencesFromNames(subquery.Query, outerNames);
+            case ExistsExpression exists:
+                return QueryReferencesFromNames(exists.Query, outerNames);
+            case InSubqueryExpression inSubquery:
+                return QueryReferencesFromNames(inSubquery.Query, outerNames)
+                    || ExpressionContainsCorrelatedSubquery(inSubquery.Value, outerNames);
+            case FunctionExpression function:
+                return function.Arguments.Any(argument => ExpressionContainsCorrelatedSubquery(argument, outerNames))
+                    || ExpressionContainsCorrelatedSubquery(function.Filter, outerNames)
+                    || WindowContainsCorrelatedSubquery(function.Window, outerNames)
+                    || (function.AggregateOrderBy?.Any(term =>
+                        ExpressionContainsCorrelatedSubquery(term.Expression, outerNames)) ?? false);
+            case RowValueExpression rowValue:
+                return rowValue.Values.Any(value => ExpressionContainsCorrelatedSubquery(value, outerNames));
+            case UnaryExpression unary:
+                return ExpressionContainsCorrelatedSubquery(unary.Operand, outerNames);
+            case BinaryExpression binary:
+                return ExpressionContainsCorrelatedSubquery(binary.Left, outerNames)
+                    || ExpressionContainsCorrelatedSubquery(binary.Right, outerNames);
+            case CollationExpression collation:
+                return ExpressionContainsCorrelatedSubquery(collation.Expression, outerNames);
+            case CastExpression cast:
+                return ExpressionContainsCorrelatedSubquery(cast.Expression, outerNames);
+            case CaseExpression @case:
+                return ExpressionContainsCorrelatedSubquery(@case.Operand, outerNames)
+                    || @case.Clauses.Any(clause =>
+                        ExpressionContainsCorrelatedSubquery(clause.When, outerNames)
+                        || ExpressionContainsCorrelatedSubquery(clause.Then, outerNames))
+                    || ExpressionContainsCorrelatedSubquery(@case.Else, outerNames);
+            case LikeExpression like:
+                return ExpressionContainsCorrelatedSubquery(like.Value, outerNames)
+                    || ExpressionContainsCorrelatedSubquery(like.Pattern, outerNames)
+                    || ExpressionContainsCorrelatedSubquery(like.Escape, outerNames);
+            case GlobExpression glob:
+                return ExpressionContainsCorrelatedSubquery(glob.Value, outerNames)
+                    || ExpressionContainsCorrelatedSubquery(glob.Pattern, outerNames);
+            case InExpression @in:
+                return ExpressionContainsCorrelatedSubquery(@in.Value, outerNames)
+                    || @in.Values.Any(value => ExpressionContainsCorrelatedSubquery(value, outerNames));
+            case BetweenExpression between:
+                return ExpressionContainsCorrelatedSubquery(between.Value, outerNames)
+                    || ExpressionContainsCorrelatedSubquery(between.Lower, outerNames)
+                    || ExpressionContainsCorrelatedSubquery(between.Upper, outerNames);
+            default:
+                return false;
+        }
+    }
+
+    private static bool WindowContainsCorrelatedSubquery(WindowSpecification? window, HashSet<string> outerNames)
+    {
+        if (window is null)
+            return false;
+
+        return window.PartitionBy.Any(expression => ExpressionContainsCorrelatedSubquery(expression, outerNames))
+            || window.OrderBy.Any(term => ExpressionContainsCorrelatedSubquery(term.Expression, outerNames))
+            || (window.Frame is not null
+                && (ExpressionContainsCorrelatedSubquery(window.Frame.Start.Offset, outerNames)
+                    || ExpressionContainsCorrelatedSubquery(window.Frame.End.Offset, outerNames)));
+    }
+
+    // True when <paramref name="query"/> holds a qualified column reference (or qualified
+    // star) to one of <paramref name="outerNames"/> at any nesting depth. FROM items the
+    // query declares itself shadow same-named outer sources for its own scope.
+    private static bool QueryReferencesFromNames(QueryStatement query, HashSet<string> outerNames)
+    {
+        switch (query)
+        {
+            case SelectStatement select:
+                {
+                    var shadowedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    CollectFromSourceNames(select.Source, shadowedNames);
+                    var effectiveNames = shadowedNames.Count == 0
+                        ? outerNames
+                        : new HashSet<string>(outerNames.Except(shadowedNames), StringComparer.OrdinalIgnoreCase);
+                    if (effectiveNames.Count == 0)
+                        return false;
+
+                    foreach (var projection in select.Projections)
+                    {
+                        if (ExpressionReferencesFromNames(projection.Expression, effectiveNames))
+                            return true;
+                    }
+
+                    if (ExpressionReferencesFromNames(select.Where, effectiveNames))
+                        return true;
+
+                    foreach (var expression in select.GroupBy)
+                    {
+                        if (ExpressionReferencesFromNames(expression, effectiveNames))
+                            return true;
+                    }
+
+                    if (ExpressionReferencesFromNames(select.Having, effectiveNames))
+                        return true;
+
+                    foreach (var term in select.OrderBy)
+                    {
+                        if (ExpressionReferencesFromNames(term.Expression, effectiveNames))
+                            return true;
+                    }
+
+                    if (ExpressionReferencesFromNames(select.Limit, effectiveNames)
+                        || ExpressionReferencesFromNames(select.Offset, effectiveNames))
+                        return true;
+
+                    return TableSourceConditionsReferenceFromNames(select.Source, effectiveNames);
+                }
+            case CompoundSelectStatement compound:
+                return compound.Terms.Any(term => QueryReferencesFromNames(term, outerNames));
+            case WithSelectStatement with:
+                {
+                    var cteNames = with.CommonTableExpressions.Select(cte => cte.Name);
+                    var bodyNames = new HashSet<string>(outerNames.Except(cteNames), StringComparer.OrdinalIgnoreCase);
+                    return with.CommonTableExpressions.Any(cte => QueryReferencesFromNames(cte.Query, outerNames))
+                        || QueryReferencesFromNames(with.Query, bodyNames);
+                }
+            case ValuesClause values:
+                return values.Rows.Any(row =>
+                    row.Any(expression => ExpressionReferencesFromNames(expression, outerNames)));
+            default:
+                return false;
+        }
+    }
+
+    private static bool TableSourceConditionsReferenceFromNames(TableSource? source, HashSet<string> names)
+    {
+        switch (source)
+        {
+            case JoinTableSource join:
+                return ExpressionReferencesFromNames(join.Condition, names)
+                    || TableSourceConditionsReferenceFromNames(join.Left, names)
+                    || TableSourceConditionsReferenceFromNames(join.Right, names);
+            case TableValuedFunctionSource function:
+                return function.Arguments.Any(argument => ExpressionReferencesFromNames(argument, names));
+            default:
+                return false;
+        }
+    }
+
+    private static bool ExpressionReferencesFromNames(Expression? expression, HashSet<string> names)
+    {
+        switch (expression)
+        {
+            case null:
+                return false;
+            case ColumnExpression column:
+                return column.Qualifier is not null && names.Contains(column.Qualifier);
+            case QualifiedStarExpression star:
+                return names.Contains(star.Qualifier);
+            case ScalarSubqueryExpression subquery:
+                return QueryReferencesFromNames(subquery.Query, names);
+            case ExistsExpression exists:
+                return QueryReferencesFromNames(exists.Query, names);
+            case InSubqueryExpression inSubquery:
+                return QueryReferencesFromNames(inSubquery.Query, names)
+                    || ExpressionReferencesFromNames(inSubquery.Value, names);
+            case FunctionExpression function:
+                return function.Arguments.Any(argument => ExpressionReferencesFromNames(argument, names))
+                    || ExpressionReferencesFromNames(function.Filter, names)
+                    || WindowReferencesFromNames(function.Window, names)
+                    || (function.AggregateOrderBy?.Any(term =>
+                        ExpressionReferencesFromNames(term.Expression, names)) ?? false);
+            case RowValueExpression rowValue:
+                return rowValue.Values.Any(value => ExpressionReferencesFromNames(value, names));
+            case UnaryExpression unary:
+                return ExpressionReferencesFromNames(unary.Operand, names);
+            case BinaryExpression binary:
+                return ExpressionReferencesFromNames(binary.Left, names)
+                    || ExpressionReferencesFromNames(binary.Right, names);
+            case CollationExpression collation:
+                return ExpressionReferencesFromNames(collation.Expression, names);
+            case CastExpression cast:
+                return ExpressionReferencesFromNames(cast.Expression, names);
+            case CaseExpression @case:
+                return ExpressionReferencesFromNames(@case.Operand, names)
+                    || @case.Clauses.Any(clause =>
+                        ExpressionReferencesFromNames(clause.When, names)
+                        || ExpressionReferencesFromNames(clause.Then, names))
+                    || ExpressionReferencesFromNames(@case.Else, names);
+            case LikeExpression like:
+                return ExpressionReferencesFromNames(like.Value, names)
+                    || ExpressionReferencesFromNames(like.Pattern, names)
+                    || ExpressionReferencesFromNames(like.Escape, names);
+            case GlobExpression glob:
+                return ExpressionReferencesFromNames(glob.Value, names)
+                    || ExpressionReferencesFromNames(glob.Pattern, names);
+            case InExpression @in:
+                return ExpressionReferencesFromNames(@in.Value, names)
+                    || @in.Values.Any(value => ExpressionReferencesFromNames(value, names));
+            case BetweenExpression between:
+                return ExpressionReferencesFromNames(between.Value, names)
+                    || ExpressionReferencesFromNames(between.Lower, names)
+                    || ExpressionReferencesFromNames(between.Upper, names);
+            default:
+                return false;
+        }
+    }
+
+    private static bool WindowReferencesFromNames(WindowSpecification? window, HashSet<string> names)
+    {
+        if (window is null)
+            return false;
+
+        return window.PartitionBy.Any(expression => ExpressionReferencesFromNames(expression, names))
+            || window.OrderBy.Any(term => ExpressionReferencesFromNames(term.Expression, names))
+            || (window.Frame is not null
+                && (ExpressionReferencesFromNames(window.Frame.Start.Offset, names)
+                    || ExpressionReferencesFromNames(window.Frame.End.Offset, names)));
     }
 
     // Returns the first non-window aggregate call inside <paramref name="expression"/>, walking
