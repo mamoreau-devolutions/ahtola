@@ -2936,19 +2936,32 @@ internal sealed class SqlParser
             return new RaiseExpression(RaiseAction.Ignore, null);
         }
 
-        var action = ConsumeKeyword("ROLLBACK")
-            ? RaiseAction.Rollback
-            : ConsumeKeyword("ABORT")
-                ? RaiseAction.Abort
-                : ConsumeKeyword("FAIL")
-                    ? RaiseAction.Fail
-                    : throw Error("Expected ROLLBACK, ABORT, FAIL, or IGNORE in RAISE().");
-        Expect(TokenKind.Comma);
-        if (_lexer.Current.Kind != TokenKind.String)
-            throw Error("RAISE() error messages must be string literals.");
+        // SQLite accepts both the shorthand RAISE('message') — an implicit ABORT with no
+        // comma — and the full RAISE(action, message) form (Turso parser.rs:1808-1836).
+        var shorthand = false;
+        RaiseAction action;
+        if (_lexer.Current.Kind == TokenKind.String)
+        {
+            action = RaiseAction.Abort;
+            shorthand = true;
+        }
+        else
+        {
+            action = ConsumeKeyword("ROLLBACK")
+                ? RaiseAction.Rollback
+                : ConsumeKeyword("ABORT")
+                    ? RaiseAction.Abort
+                    : ConsumeKeyword("FAIL")
+                        ? RaiseAction.Fail
+                        : throw Error("Expected ROLLBACK, ABORT, FAIL, or IGNORE in RAISE().");
+        }
 
-        var message = _lexer.Current.Text;
-        _lexer.Next();
+        if (!shorthand)
+            Expect(TokenKind.Comma);
+
+        // The message is an arbitrary expression (e.g. 'bad: ' || NEW.a); it is evaluated
+        // when the RAISE fires, not at parse time.
+        var message = ParseExpression();
         Expect(TokenKind.RightParen);
         return new RaiseExpression(action, message);
     }

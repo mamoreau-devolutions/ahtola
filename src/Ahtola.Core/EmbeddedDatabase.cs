@@ -4002,13 +4002,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
             throw new EmbeddedSqlException($"trigger {statement.Name} already exists");
         }
-        if (tables.ContainsKey(statement.Name))
-            throw new EmbeddedSqlException($"there is already a table named {statement.Name}");
-        if (catalog.Views.ContainsKey(statement.Name))
-            throw new EmbeddedSqlException($"there is already a view named {statement.Name}");
-        if (TryFindIndex(tables, statement.Name, out _, out _))
-            throw new EmbeddedSqlException($"there is already an index named {statement.Name}");
 
+        // Triggers live in their own namespace: a trigger may share its name with a
+        // table, view, or index. Only trigger-vs-trigger collides (SQLite/Turso
+        // semantics — turso-src/core/translate/trigger.rs checks get_trigger only).
         var targetsTable = tables.ContainsKey(statement.TableName);
         var targetsView = catalog.Views.ContainsKey(statement.TableName);
         // A temp trigger may watch a table in another schema. That table lives in a database this
@@ -24180,7 +24177,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ParameterExpression parameter => ReadParameter(parameters, parameter.Index),
             RowValueExpression => throw new EmbeddedSqlException("row value misused"),
             ColumnExpression column => EvaluateColumn(column, row, context),
-            RaiseExpression raise => EvaluateRaise(raise, context),
+            RaiseExpression raise => EvaluateRaise(raise, parameters, row, context),
             FunctionExpression function => EvaluateFunctionRespectingOuterAggregateScope(function, parameters, row, context),
             ScalarSubqueryExpression subquery => EvaluateScalarSubquery(subquery, parameters, row, context),
             ExistsExpression exists => EvaluateExists(exists, parameters, row, context),
@@ -24261,9 +24258,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return SqlValue.Integer(truth ^ negate ? 1 : 0);
     }
 
-    private static SqlValue EvaluateRaise(RaiseExpression expression, QueryContext context)
+    private SqlValue EvaluateRaise(
+        RaiseExpression expression,
+        SqlValue[] parameters,
+        SourceRow? row,
+        QueryContext context)
     {
-        var message = expression.Message ?? string.Empty;
+        var message = ResolveRaiseMessage(expression.Message, parameters, row, context);
         var error = new EmbeddedSqlException(message);
         throw expression.Action switch
         {
@@ -24275,6 +24276,24 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 context.TriggerState?.LiveLastInsertRowId ?? context.LastInsertRowId),
             _ => new InvalidOperationException($"Unknown RAISE action {expression.Action}."),
         };
+    }
+
+    /// <summary>
+    /// Evaluates a RAISE() message expression and stringifies it the way SQLite does
+    /// (<c>CAST AS TEXT</c>), treating a NULL result as an empty message. The message may be
+    /// any expression, including references to the <c>NEW</c>/<c>OLD</c> pseudo-columns.
+    /// </summary>
+    private string ResolveRaiseMessage(
+        Expression? messageExpression,
+        SqlValue[] parameters,
+        SourceRow? row,
+        QueryContext context)
+    {
+        if (messageExpression is null)
+            return string.Empty;
+
+        var value = Evaluate(messageExpression, parameters, row, context);
+        return value.Kind == SqlValueKind.Null ? string.Empty : ToSqlText(value);
     }
 
     // Executes a subquery, reusing a memoized result when the subquery is provably

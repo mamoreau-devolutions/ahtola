@@ -14,12 +14,12 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "entry_count": 176,
+    "entry_count": 178,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 42,
-        "parser": 22,
+        "compilation": 43,
+        "parser": 23,
         "functions": 24,
         "storage": 20,
         "mvcc": 14,
@@ -27,25 +27,25 @@
       },
       "by_kind": {
         "missing": 98,
-        "divergent": 44,
-        "partial": 25,
+        "divergent": 45,
+        "partial": 26,
         "extension": 7,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 89,
+        "s2-capability": 91,
         "s4-intentional": 32,
         "s1-correctness": 21
       },
       "by_effort": {
         "M": 71,
         "L": 37,
-        "S": 68
+        "S": 70
       },
       "by_status": {
         "open": 154,
-        "closed": 22
+        "closed": 24
       }
     },
     "schema": {
@@ -2610,6 +2610,45 @@
         "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
       ],
       "notes": "Closed 2026-08-05. changes() and total_changes() existed but were written only by the top-level Execute path (RecordChangeCounters), so trigger-body statements left changes() frozen at the previous top-level value, contributed nothing to total_changes(), and FK cascade rows were dropped entirely. Fixed by mirroring Turso's subprogram accounting: FireRowTriggers saves _changes when a trigger fires, each successful body INSERT/UPDATE/DELETE sets _changes to its RowsAffected and adds it to _totalChanges, and _changes (not the monotonic total) is restored when the trigger returns; FK CASCADE/SET NULL/SET DEFAULT add their rowsAffected to _totalChanges only. changes() still reflects only the outermost statement's own rows. Full lane 3765/3765.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-trigger-namespace-separation",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "core/translate/trigger.rs:147-155 (CREATE TRIGGER checks only s.get_trigger(name) — triggers occupy their own namespace and never collide with tables/views/indexes) + core/translate/schema.rs:1175-1200 (CREATE TABLE get_object_type match arms cover Table/View/Index only, no Trigger)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ExecuteCreateTrigger no longer rejects table/view/index name collisions; only trigger-vs-trigger with IfNotExists remains)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "trigger_namespace.sqltest::trigger-same-name-as-table",
+        "trigger_namespace.sqltest::trigger-same-name-as-other-table",
+        "trigger_namespace.sqltest::trigger-same-name-as-index",
+        "trigger_namespace.sqltest::trigger-if-not-exists-same-name-as-table",
+        "trigger_namespace.sqltest::trigger-same-name-as-view",
+        "trigger_namespace.sqltest::drop-trigger-with-same-name-as-table",
+        "trigger_namespace.sqltest::multiple-triggers-sharing-names-with-tables"
+      ],
+      "notes": "Closed 2026-08-05. SQLite stores triggers in a separate namespace from tables, views, and indexes, so a trigger may legally share a name with any of them. Ahtola's CREATE TRIGGER rejected such collisions ('there is already a table/index/view named X'). Fixed by removing the three collision checks so only trigger-vs-trigger names collide, matching Turso. Note: the reverse-direction checks (CREATE TABLE/VIEW/INDEX rejecting an existing trigger name) still diverge from SQLite but are not covered by the conformance corpus. DROP TRIGGER already removed only from catalog.Triggers, so no change needed there.",
+      "status": "closed"
+    },
+    {
+      "id": "parser-raise-expression-message",
+      "layer": "parser",
+      "kind": "partial",
+      "turso_ref": "sqlite/parser/src/parser.rs:1808-1836 (RAISE parses Expr::Raise(ResolveType, Option<Box<Expr>>); a bare TK_STRING is the shorthand ABORT with no comma; otherwise ROLLBACK/ABORT/FAIL then comma then parse_expr(0) — the message is an arbitrary expression)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs (RaiseExpression.Message is now Expression?), Parsing/SqlParser.cs (ParseRaiseExpression accepts the shorthand and a full expression message), EmbeddedDatabase.cs (EvaluateRaise/ResolveRaiseMessage evaluate the message with parameters/row threaded, stringifying via ToSqlText)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "trigger.sqltest::trigger-raise-shorthand",
+        "trigger.sqltest::trigger-raise-expr-concat",
+        "trigger.sqltest::trigger-raise-expr-concat-pass",
+        "trigger.sqltest::trigger-raise-fail-expr",
+        "trigger.sqltest::trigger-raise-rollback-expr",
+        "trigger.sqltest::trigger-raise-expr-case"
+      ],
+      "notes": "Closed 2026-08-05. RAISE() required a string-literal message and rejected the shorthand RAISE('msg') form, so messages that concatenate or reference NEW/OLD pseudo-columns (e.g. RAISE(ABORT, 'bad: ' || NEW.a)) failed to parse. Fixed by making RaiseExpression.Message an Expression: the parser now accepts RAISE('msg') as the shorthand ABORT (no comma) and RAISE(action, <expr>) with an arbitrary expression message; EvaluateRaise evaluates the message with parameters/row threaded and stringifies it (CAST AS TEXT, NULL -> empty) at raise time. Expression walkers treat RaiseExpression as a leaf, matching the prior opaque-string behavior. Full lane green.",
       "status": "closed"
     }
   ]

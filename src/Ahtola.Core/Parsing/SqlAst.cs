@@ -725,7 +725,13 @@ internal enum RaiseAction
     Fail,
 }
 
-internal sealed record RaiseExpression(RaiseAction Action, string? Message) : Expression;
+/// <summary>
+/// A <c>RAISE(...)</c> call inside a trigger body. <see cref="Message"/> is an arbitrary
+/// expression (SQLite allows any expression, e.g. <c>RAISE(ABORT, 'bad: ' || NEW.a)</c>),
+/// or <c>null</c> for <c>RAISE(IGNORE)</c> and for the <c>RAISE('msg')</c> shorthand whose
+/// message is a plain string literal still represented as a <see cref="LiteralExpression"/>.
+/// </summary>
+internal sealed record RaiseExpression(RaiseAction Action, Expression? Message) : Expression;
 
 internal sealed record RowValueExpression(IReadOnlyList<Expression> Values) : Expression;
 
