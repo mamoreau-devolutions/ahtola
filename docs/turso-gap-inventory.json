@@ -14,11 +14,11 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "entry_count": 183,
+    "entry_count": 185,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 48,
+        "compilation": 50,
         "parser": 23,
         "functions": 24,
         "storage": 20,
@@ -27,25 +27,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 48,
+        "divergent": 49,
         "partial": 27,
-        "extension": 7,
+        "extension": 8,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 95,
-        "s4-intentional": 32,
+        "s2-capability": 96,
+        "s4-intentional": 33,
         "s1-correctness": 22
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 73
+        "S": 75
       },
       "by_status": {
-        "open": 150,
-        "closed": 33
+        "open": 151,
+        "closed": 34
       }
     },
     "schema": {
@@ -1498,7 +1498,7 @@
       "id": "parser-error-message-parity",
       "layer": "parser",
       "kind": "divergent",
-      "turso_ref": "turso-src/sqlite/parser + core error strings (NATURAL join message, RAISE shorthand, circular view, aggregate ORDER BY message)",
+      "turso_ref": "turso-src/sqlite/parser + core error strings (NATURAL join message, RAISE shorthand)",
       "ahtola_ref": "src/Ahtola.Core/Parsing + Compilation messages",
       "severity": "s2-capability",
       "effort": "M",
@@ -1506,11 +1506,38 @@
         "join/memory.sqltest::join-3-1",
         "join/memory.sqltest::join-3-2",
         "trigger.sqltest::trigger-raise-shorthand",
-        "views.sqltest::view-rejects-aggregate-order-by",
-        "views.sqltest::view-mutual-circle-detection",
         "default_value.sqltest::default-value-column-name"
       ],
-      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint. Cleared 2026-08-06 by Wave F2.10 Batch 4 / compile-select-prepare-time-column-resolution: ambiguous-self-join and ambiguous-column-error-message-format.)",
+      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint. Cleared 2026-08-06 by Wave F2.10 Batch 4 / compile-select-prepare-time-column-resolution: ambiguous-self-join and ambiguous-column-error-message-format. Cleared 2026-08-07 by Wave F2.10 Batch 5 / compile-view-create-validation-deferred-to-query-time: view-mutual-circle-detection; view-rejects-aggregate-order-by reclassified to compile-ordered-aggregates-intentional-extension.)",
+      "status": "open"
+    },
+    {
+      "id": "compile-view-create-validation-deferred-to-query-time",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/view.rs::validate_create_view (L282-306: CREATE VIEW only checks existence + reserved prefix; body validation happens at query time), turso-src/core/schema.rs:56 + core/util.rs:2283 ('view {} is circularly defined' raised when entering a view), turso-src/core/translate/view.rs:303 ('Object name reserved for internal use')",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteCreateView (reserved check via IsReservedObjectName, no CREATE-time body validation) + query-time EnterView/EnsureNoViewRecursion circle detection and ResolveViewColumns/ApplyViewColumnNames",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "views.sqltest::view-mutual-circle-detection",
+        "views.sqltest::view-reserved-prefix-sqlite"
+      ],
+      "notes": "Ahtola used to validate the view body at CREATE VIEW time, rejecting forward references (a view defined before its base table, or two views defined in either order) and detecting self-circles at CREATE instead of matching SQLite/Turso, which defer all body validation to query time. Closed 2026-08-07 (Wave F2.10 Batch 5): ExecuteCreateView now only checks the reserved 'sqlite_' prefix (IsReservedObjectName helper, matching Turso's RESERVED_TABLE_PREFIXES check wording 'object name reserved for internal use: {name}') and registers the view; body validation, column-count checks against explicit CREATE VIEW v(a,b) column lists, and recursion detection all happen at query time via EnterView/EnsureNoViewRecursion. Mutual view circles (a -> b -> a) now error with the SQLite-compatible 'view a is circularly defined' on first query, exactly like the self-circle case that already passed. One structural check stays at prepare time: SqlParser.ParseCommonTableExpressions now rejects duplicate WITH names ('duplicate WITH table name: {name}') while parsing, matching SQLite's parse-time behavior — this surfaced when pure deferral initially let cte.sqltest::cte-duplicate-name-view (CREATE VIEW whose body contains two CTEs with the same name) succeed at CREATE time. Expected-failures net: both mapped views keys removed, 0 added; views.sqltest fully green except view-rejects-aggregate-order-by (s4 intentional, see compile-ordered-aggregates-intentional-extension).",
+      "status": "closed"
+    },
+    {
+      "id": "compile-ordered-aggregates-intentional-extension",
+      "layer": "compilation",
+      "kind": "extension",
+      "turso_ref": "turso-src/core/translate/aggregation.rs (Turso rejects ordered aggregates: 'ORDER BY clause is not supported yet in aggregate functions')",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs (ordered-aggregate support, e.g. SUM(x ORDER BY y), required by the EF Core provider)",
+      "severity": "s4-intentional",
+      "effort": "S",
+      "conformance_links": [
+        "views.sqltest::view-rejects-aggregate-order-by"
+      ],
+      "notes": "Real SQLite (3.44+) supports ORDER BY inside aggregate function calls; Turso v0.7.2 does not yet and rejects it with 'ORDER BY clause is not supported yet in aggregate functions' (the sqltest is @skip-if sqlite). Ahtola intentionally supports ordered aggregates because the EF Core provider depends on them, so the one sqltest key asserting Turso's rejection (views.sqltest::view-rejects-aggregate-order-by) stays in managed-sqltest-expected-failures as a documented s4-intentional divergence rather than a gap to close. Do not 'fix' this by rejecting ordered aggregates.",
       "status": "open"
     },
     {

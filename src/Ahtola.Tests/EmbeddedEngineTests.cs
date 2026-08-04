@@ -2486,14 +2486,16 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void ViewExplicitColumnCountMismatchIsRejected()
+    public void ViewExplicitColumnCountMismatchIsRejectedAtQueryTime()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
         Execute(connection, "CREATE TABLE t(a INTEGER, b INTEGER);");
 
-        Assert.Throws<EmbeddedSqlException>(
-            () => Execute(connection, "CREATE VIEW v(only_one) AS SELECT a, b FROM t;"));
+        // SQLite defers column-arity validation to query time, so CREATE succeeds.
+        Execute(connection, "CREATE VIEW v(only_one) AS SELECT a, b FROM t;");
+        var error = Assert.Throws<EmbeddedSqlException>(() => ReadRows(connection, "SELECT * FROM v;"));
+        error!.Message.Should().Contain("columns for v");
     }
 
     [Test]
@@ -2553,15 +2555,17 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void SelfReferentialViewIsRejectedAsCircular()
+    public void SelfReferentialViewIsRejectedAsCircularAtQueryTime()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
 
-        var error = Assert.Throws<EmbeddedSqlException>(
-            () => Execute(connection, "CREATE VIEW v AS SELECT * FROM v;"));
+        // SQLite defers view-body validation to query time, so CREATE succeeds and the
+        // circular definition is reported when the view is queried.
+        Execute(connection, "CREATE VIEW v AS SELECT * FROM v;");
+        var error = Assert.Throws<EmbeddedSqlException>(() => ReadRows(connection, "SELECT * FROM v;"));
         error!.Message.Should().Contain("circularly defined");
-        AssertCount(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view';", 0);
+        AssertCount(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view';", 1);
     }
 
     [Test]

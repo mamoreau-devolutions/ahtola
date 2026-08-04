@@ -3427,8 +3427,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         CancellationToken cancellationToken)
     {
         var tables = catalog.Tables;
-        if (IsSqliteSequenceTable(statement.Name))
-            throw new EmbeddedSqlException($"object name reserved for internal use: {SqliteSequenceTableName}");
+        if (IsReservedObjectName(statement.Name))
+            throw new EmbeddedSqlException($"object name reserved for internal use: {statement.Name}");
         if (tables.ContainsKey(statement.Name))
         {
             if (statement.IfNotExists)
@@ -3717,8 +3717,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private ExecutionResult ExecuteCreateIndex(CreateIndexStatement statement, SchemaCatalog catalog)
     {
         var tables = catalog.Tables;
-        if (IsSqliteSequenceTable(statement.Name))
-            throw new EmbeddedSqlException($"object name reserved for internal use: {SqliteSequenceTableName}");
+        if (IsReservedObjectName(statement.Name))
+            throw new EmbeddedSqlException($"object name reserved for internal use: {statement.Name}");
         if (tables.ContainsKey(statement.Name))
             throw new EmbeddedSqlException($"there is already a table named {statement.Name}");
         if (catalog.Views.ContainsKey(statement.Name))
@@ -3999,8 +3999,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private static ExecutionResult ExecuteCreateView(CreateViewStatement statement, SchemaCatalog catalog)
     {
         var tables = catalog.Tables;
-        if (IsSqliteSequenceTable(statement.Name))
-            throw new EmbeddedSqlException($"object name reserved for internal use: {SqliteSequenceTableName}");
+        if (IsReservedObjectName(statement.Name))
+            throw new EmbeddedSqlException($"object name reserved for internal use: {statement.Name}");
         if (catalog.Views.ContainsKey(statement.Name))
         {
             if (statement.IfNotExists)
@@ -4015,27 +4015,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (TryFindIndex(tables, statement.Name, out _, out _))
             throw new EmbeddedSqlException($"there is already an index named {statement.Name}");
 
+        // SQLite defers view-body validation to query time: base tables and views may be
+        // defined later (forward references), and column arity / unknown columns, tables, or
+        // functions are reported when the view is queried, not when it is created. Circular
+        // definitions are detected at query time by EnterView. File-backed catalogs still
+        // reject runtime-only dependencies (bind parameters, managed callbacks) at persist time.
         var view = new ViewDefinition(statement.Name, statement.Columns, statement.Query, statement.Sql);
-
-        // SQLite validates the view body when it is created: base tables must exist and,
-        // when an explicit column list is supplied, its arity must match the query output.
-        // Register the view before validating so a self-referential body is reported as a
-        // circular definition; roll the registration back if validation fails.
-        var context = new QueryContext(
-            tables,
-            new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
-            catalog.Views,
-            catalog.Triggers);
         catalog.Views.Add(statement.Name, view);
-        try
-        {
-            _ = ResolveViewColumns(view, EnterView(context, view.Name));
-        }
-        catch
-        {
-            catalog.Views.Remove(statement.Name);
-            throw;
-        }
 
         return new ExecutionResult([], [], 0, true);
     }
@@ -4061,8 +4047,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         QueryContext context)
     {
         var tables = catalog.Tables;
-        if (IsSqliteSequenceTable(statement.Name))
-            throw new EmbeddedSqlException($"object name reserved for internal use: {SqliteSequenceTableName}");
+        if (IsReservedObjectName(statement.Name))
+            throw new EmbeddedSqlException($"object name reserved for internal use: {statement.Name}");
         if (catalog.Triggers.ContainsKey(statement.Name))
         {
             if (statement.IfNotExists)
@@ -22970,6 +22956,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     private static bool IsSqliteSequenceTable(string name)
         => string.Equals(name, SqliteSequenceTableName, StringComparison.OrdinalIgnoreCase);
+
+    // SQLite rejects any user-created object whose name begins with "sqlite_" (case
+    // insensitive); those names are reserved for the internal schema.
+    private static bool IsReservedObjectName(string name)
+        => name.StartsWith("sqlite_", StringComparison.OrdinalIgnoreCase);
 
     private static SourceData GetNamedTableRows(
         NamedTableSource source,

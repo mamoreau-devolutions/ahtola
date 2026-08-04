@@ -1863,9 +1863,14 @@ internal sealed class SqlParser
         // which treats the keyword as optional.
         ConsumeKeyword("RECURSIVE");
         var commonTableExpressions = new List<CommonTableExpression>();
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         do
         {
             var name = ExpectIdentifier();
+            // SQLite rejects duplicate WITH names at parse time, so this fires even
+            // inside CREATE VIEW/TRIGGER bodies whose resolution is otherwise deferred.
+            if (!names.Add(name))
+                throw Error($"duplicate WITH table name: {name}");
             IReadOnlyList<string>? columns = null;
             if (Consume(TokenKind.LeftParen))
             {
