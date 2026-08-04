@@ -7,9 +7,13 @@ parser/dialect, built-in functions, storage/pager/WAL/b-tree, MVCC/transactions,
 and sync/replication.
 
 **Companion artifact.** [`turso-gap-inventory.json`](./turso-gap-inventory.json) —
-the machine-readable inventory of all **171 gap entries** with stable IDs for
-status tracking (`open → closed`). This report is the human-readable analysis;
-the JSON is the tracking source of truth.
+the machine-readable inventory, with stable IDs for status tracking
+(`open → closed`). This report is the human-readable analysis **as of analysis
+time (171 entries)**; the JSON is the live tracking source of truth. Closure
+progress since analysis (waves F1–F2.10) is recorded in
+[section 11](#11-closure-progress-since-analysis), and current counts are:
+**185 entries, 34 closed**; expected-failures file down from **606 → 247**
+lines.
 
 **Ground truth.** `src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt`
 (606 failure lines at analysis time). Every line was cross-referenced to at least
@@ -824,6 +828,49 @@ Typed values (`vdbe-typed-value-opcode-family`, 17 opcodes), `CREATE SEQUENCE`
 family (8), materialized views, CDC, virtual tables, sync engine. Each needs
 an adopt/skip decision recorded by flipping the entry's `status`/`severity`
 (s2 → s4-intentional) in the inventory.
+
+## 11. Closure progress since analysis
+
+The waves suggested in §10.2 began landing immediately after the analysis.
+This section is the running log; the JSON inventory remains the source of
+truth (entries are never deleted — an audit trail). Every closure followed the
+same protocol: engine fix against `turso-src/` semantics → targeted
+conformance cases → full managed lane (3755+ tests, green) → resolved keys
+removed from `managed-sqltest-expected-failures.txt` → inventory entry flipped
+`open → closed`.
+
+**Totals.** 32 entries closed since analysis (34 including the 2 `parity`
+entries closed at analysis time); the inventory grew 171 → **185** entries as
+closure work surfaced adjacent gaps that were recorded rather than folded in;
+the expected-failures file dropped **606 → 247** lines (359 cleared; lines
+multi-map, so a cleared line may redistribute to the next blocker in its
+chain rather than disappear). One deliberate extension was recorded:
+`compile-ordered-aggregates-intentional-extension` (s4 — Ahtola keeps ordered
+aggregates because the EF Core provider depends on them).
+
+| Wave | Date | Entries closed | Fail-lines (net) |
+| --- | --- | --- | ---: |
+| **F1 — quick wins** | 2026-08-03 | `parser-implicit-column-alias`, `compile-order-by-aggregate-misuse-not-rejected`, `parser-indexed-by-hint`, `parser-numeric-literal-digit-separators`, `parser-isnull-notnull-postfix`, `compile-reindex-statement` | 606 → 529 |
+| **F2 — s1 correctness** | 2026-08-03/05 | `vdbe-typecheck-on-write`, `compile-select-alias-visibility`, `compile-affinity-rules-diverge-in-subquery-and-compound-contexts`, `compile-window-function-tie-break-ordering-diverges`, `compile-alter-rename-trigger-body-not-rebound`, `compile-collation-propagation-through-subquery`, `compile-schema-sql-always-quotes-identifiers` (+ CTAS synthesis entry) | 529 → 398 |
+| **F2.5 — generated columns** | 2026-08-05 | `compile-generated-column-determinism-validation`, `compile-generated-column-error-message-mismatch`, `compile-alter-add-generated-column-backfill`, `compile-fk-affected-columns-through-generated-columns`, `compile-generated-not-null-deferred-until-after-triggers` | 398 → 351 |
+| **F2.6 — changes()/total_changes()** | 2026-08-05 | `vdbe-changes-total-changes-trigger-fk-accounting` | 351 → 344 |
+| **F2.7 — trigger namespace + RAISE** | 2026-08-06 | `compile-trigger-namespace-separation`, `parser-raise-expression-message` | 348 → 335 |
+| **F2.8 — pragma acceptance** | 2026-08-06 | `compile-pragma-cache-size-unsupported`, `parser-pragma-argument-syntax-equals-form` | 330 → 304 |
+| **F2.9 — pragma family + CHECK filter** | 2026-08-06 | `parser-pragma-unrecognized-name-hard-rejection`, `parser-pragma-family-coverage-gap` | 305 → 276 |
+| **F2.10 — error-parity batches 1–5** | 2026-08-06/07 | `compile-full-outer-right-join-structure-validation`, `compile-order-by-ordinal-range-error-parity`, `compile-duplicate-primary-key-rejection`, `compile-index-string-literal-column-resolution`, `compile-select-prepare-time-column-resolution`, `compile-view-create-validation-deferred-to-query-time` | 275 → 247 |
+
+Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
+redistributed onto a newly-unmasked blocker within the same commit group.
+
+**Next up (open, in planned order).** F2.10 batches 6–8 (correlated outer
+refs in subquery GROUP BY; UPDATE SET missing-identifier + FK multi-parent;
+ALTER temp-trigger revalidation), then Wave F3 structural machinery:
+`vdbe-trigger-subprogram-machinery` (111 mapped), `mvcc-statement-level-rollback-on-constraint-violation`
+(20), `vdbe-seek-op-family-partial` (21), `compile-recursive-cte-single-term-only`
+(27), and the Wave 4 planner track led by `compile-no-subquery-flattening`
+(63). The §10.1 top-25 rows that are now closed: #2, #4, #6, #9, #10, #12,
+#13, #20 — the remaining open leaders are #3 (`vdbe-trigger-subprogram-machinery`),
+#5 (`compile-attach-cross-database-support`), and #7 (`compile-no-subquery-flattening`).
 
 
 ## Appendix A — Inventory JSON schema
