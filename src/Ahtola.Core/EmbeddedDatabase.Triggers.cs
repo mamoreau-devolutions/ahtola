@@ -1293,11 +1293,6 @@ public sealed partial class EmbeddedDatabase
     {
         if (statement.Upsert is null)
             throw new InvalidOperationException("UPSERT execution requires an UPSERT clause.");
-        if (statement.Source is not null || context.CommonTableExpressions.Count != 0)
-        {
-            throw new EmbeddedSqlException(
-                "Managed UPSERT supports VALUES rows only and does not support INSERT ... SELECT or CTE sources.");
-        }
         if (!context.Tables.TryGetValue(statement.TableName, out var table))
             throw new EmbeddedSqlException($"no such table: {statement.TableName}");
 
@@ -1394,11 +1389,13 @@ public sealed partial class EmbeddedDatabase
             statement.TableName,
             TriggerEvent.Insert,
             beforeInsert.Concat(afterInsert));
-        var inputRows = statement.Rows
-            .Select(expressions => expressions
-                .Select(expression => Evaluate(expression, parameters, row: null, context))
-                .ToArray())
-            .ToArray();
+        IReadOnlyList<SqlValue[]> inputRows = statement.Source is null
+            ? statement.Rows
+                .Select(expressions => expressions
+                    .Select(expression => Evaluate(expression, parameters, row: null, context))
+                    .ToArray())
+                .ToArray()
+            : ExecuteQuery(statement.Source, parameters, context, outerRow: null).Rows;
         var returningRows = new List<SqlValue[]>();
         string[]? returningColumns = null;
         var rowsAffected = 0;

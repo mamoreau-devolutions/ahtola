@@ -6982,11 +6982,6 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         if (statement.Upsert is null)
             throw new InvalidOperationException("UPSERT execution requires an UPSERT clause.");
-        if (statement.Source is not null || context.CommonTableExpressions.Count != 0)
-        {
-            throw new EmbeddedSqlException(
-                "Managed UPSERT supports VALUES rows only and does not support INSERT ... SELECT or CTE sources.");
-        }
         if (!context.Tables.TryGetValue(statement.TableName, out var table))
             throw new EmbeddedSqlException($"no such table: {statement.TableName}");
 
@@ -7067,8 +7062,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var deleteTriggers = context.RecursiveTriggersEnabled
             ? GetMatchingTriggers(context, statement.TableName, TriggerEvent.Delete)
             : Array.Empty<TriggerDefinition>();
+        var sourceRows = statement.Source is null
+            ? null
+            : ExecuteQuery(statement.Source, parameters, context, outerRow: null).Rows;
         long? lastInsertRowId = null;
-        foreach (var values in statement.Rows)
+        var inputRowCount = sourceRows?.Count ?? statement.Rows.Count;
+        for (var inputRowIndex = 0; inputRowIndex < inputRowCount; inputRowIndex++)
         {
             SynchronizeInsertAllocation(insertPlan, table);
             var allocationSnapshot = CaptureInsertAllocation(insertPlan);
@@ -7076,14 +7075,28 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var candidateRowId = 0L;
             try
             {
-                (candidate, candidateRowId) = BuildInsertRow(
-                    statement,
-                    table,
-                    insertPlan,
-                    values,
-                    parameters,
-                    context,
-                    allowExistingRowid: true);
+                if (sourceRows is null)
+                {
+                    (candidate, candidateRowId) = BuildInsertRow(
+                        statement,
+                        table,
+                        insertPlan,
+                        statement.Rows[inputRowIndex],
+                        parameters,
+                        context,
+                        allowExistingRowid: true);
+                }
+                else
+                {
+                    (candidate, candidateRowId) = BuildInsertRow(
+                        statement,
+                        table,
+                        insertPlan,
+                        sourceRows[inputRowIndex],
+                        parameters,
+                        context,
+                        allowExistingRowid: true);
+                }
                 table.ValidateRows(statement.TableName, [candidate]);
                 ValidatePrimaryKey(statement.TableName, table, [candidate]);
             }

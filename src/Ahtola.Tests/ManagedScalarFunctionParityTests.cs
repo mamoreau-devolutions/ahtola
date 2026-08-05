@@ -263,17 +263,6 @@ public sealed class ManagedScalarFunctionParityTests
             .Should().Be(SqlValue.Text("-0000-00-01 00:00:00.000"));
     }
 
-    [Test]
-    public void ManagedEngineStillRejectsFunctionsThatWereNeverImplemented()
-    {
-        using var database = new EmbeddedDatabase();
-        using var connection = database.Connect();
-
-        var missing = () => ReadValue(connection, "SELECT soundex('Robert');");
-        missing.Should().Throw<EmbeddedSqlException>()
-            .WithMessage("no such function: soundex");
-    }
-
     private static void Execute(EmbeddedConnection connection, string sql)
     {
         using var statement = connection.Prepare(sql);

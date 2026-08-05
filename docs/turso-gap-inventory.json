@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 118,
-        "closed": 88
+        "open": 117,
+        "closed": 89
       }
     },
     "schema": {
@@ -659,14 +659,14 @@
       "layer": "compilation",
       "kind": "missing",
       "turso_ref": "turso-src/core/translate/upsert.rs::emit_upsert (upsert target resolution independent of INSERT source shape)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation/DmlStatementCompiler.cs (UPSERT handling)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::PerformUpsertEvaluated; src/Ahtola.Core/EmbeddedDatabase.Triggers.cs::PerformRowTriggeredUpsert",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
         "upsert.sqltest::upsert-select-single"
       ],
-      "notes": "Ahtola's UPSERT compiler rejects any INSERT...SELECT or CTE-sourced INSERT with an ON CONFLICT clause: \"Managed UPSERT supports VALUES rows only and does not support INSERT ... SELECT or CTE sources.\" Turso's upsert.rs resolves the conflict target and emits the DO UPDATE/DO NOTHING body independently of whether the INSERT source is VALUES or SELECT.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. Both the ordinary and row-triggered UPSERT evaluators materialize INSERT ... SELECT source rows through ExecuteQuery, then pass those values through the same BuildInsertRow, conflict-target, DO UPDATE/DO NOTHING, RETURNING, and trigger paths as VALUES input. This mirrors Turso's source-shape-independent target resolution. ManagedBoundedUpsertRuntimeSliceTests covers SELECT and CTE sources with mixed update/insert rows and RETURNING; upsert.sqltest::upsert-select-single now passes.",
+      "status": "closed"
     },
     {
       "id": "compile-on-conflict-rollback-update-unsupported",
