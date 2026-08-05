@@ -20336,6 +20336,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             if (!namesInCurrentClause.Add(commonTableExpression.Name))
                 throw new EmbeddedSqlException($"duplicate WITH table name: {commonTableExpression.Name}");
+        }
+
+        var requiredCteNames = GetRequiredCommonTableExpressionNames(
+            statement.CommonTableExpressions,
+            name => CountAllReferences(statement.Query, name));
+        foreach (var commonTableExpression in statement.CommonTableExpressions)
+        {
+            if (!requiredCteNames.Contains(commonTableExpression.Name))
+                continue;
 
             var cteContext = context with { CommonTableExpressions = commonTableExpressions };
             var columns = ResolveCommonTableExpressionColumns(
@@ -20780,11 +20789,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
             return passThrough;
         }
 
+        var requiredCteNames = GetRequiredCommonTableExpressionNames(
+            statement.CommonTableExpressions,
+            name => CountAllReferences(statement.Query, name));
         var cteContext = MaterializeCommonTableExpressions(
             statement.CommonTableExpressions,
             parameters,
             context,
-            outerRow);
+            outerRow,
+            requiredCteNames);
 
         return ExecuteQuery(statement.Query, parameters, cteContext, outerRow);
     }
@@ -20822,12 +20835,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[] parameters,
         QueryContext context)
     {
-        ValidateDmlCommonTableExpressionUsage(statement);
+        var requiredCteNames = GetRequiredCommonTableExpressionNames(
+            statement.CommonTableExpressions,
+            name => CountDmlReferences(statement.Dml, name));
         var cteContext = MaterializeCommonTableExpressions(
             statement.CommonTableExpressions,
             parameters,
             context,
-            outerRow: null);
+            outerRow: null,
+            requiredCteNames: requiredCteNames);
         var backup = CloneTablesShallow(context.Tables);
         try
         {
@@ -20850,49 +20866,46 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
     }
 
-    private static void ValidateDmlCommonTableExpressionUsage(WithDmlStatement statement)
+    // SQLite only validates a CTE's query and explicit result-column list once the statement reaches it.
+    // Build the same dependency closure here so unused CTEs are not evaluated, while every CTE needed by
+    // a referenced CTE is materialized in declaration order.
+    private static HashSet<string> GetRequiredCommonTableExpressionNames(
+        IReadOnlyList<CommonTableExpression> expressions,
+        Func<string, int> countRootReferences)
     {
-        var names = statement.CommonTableExpressions.Select(commonTableExpression => commonTableExpression.Name).ToArray();
-        if (names.Distinct(StringComparer.OrdinalIgnoreCase).Count() != names.Length)
-            return;
-
         var required = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var name in names)
+        foreach (var commonTableExpression in expressions)
         {
-            if (CountDmlReferences(statement.Dml, name) > 0)
-                required.Add(name);
+            if (countRootReferences(commonTableExpression.Name) > 0)
+                required.Add(commonTableExpression.Name);
         }
 
         var changed = true;
         while (changed)
         {
             changed = false;
-            foreach (var commonTableExpression in statement.CommonTableExpressions)
+            foreach (var commonTableExpression in expressions)
             {
                 if (!required.Contains(commonTableExpression.Name))
                     continue;
 
-                foreach (var name in names)
+                foreach (var candidate in expressions)
                 {
-                    if (CountAllReferences(commonTableExpression.Query, name) > 0)
-                        changed |= required.Add(name);
+                    if (CountAllReferences(commonTableExpression.Query, candidate.Name) > 0)
+                        changed |= required.Add(candidate.Name);
                 }
             }
         }
 
-        var unused = names.FirstOrDefault(name => !required.Contains(name));
-        if (unused is not null)
-        {
-            throw new EmbeddedSqlException(
-                $"Managed CTE DML requires every CTE to contribute to the DML statement; {unused} is unused.");
-        }
+        return required;
     }
 
     private QueryContext MaterializeCommonTableExpressions(
         IReadOnlyList<CommonTableExpression> expressions,
         SqlValue[] parameters,
         QueryContext context,
-        SourceRow? outerRow)
+        SourceRow? outerRow,
+        IReadOnlySet<string> requiredCteNames)
     {
         var resolvedExpressions = new Dictionary<string, SourceData>(
             context.CommonTableExpressions,
@@ -20902,6 +20915,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             if (!namesInCurrentClause.Add(commonTableExpression.Name))
                 throw new EmbeddedSqlException($"duplicate WITH table name: {commonTableExpression.Name}");
+        }
+
+        foreach (var commonTableExpression in expressions)
+        {
+            if (!requiredCteNames.Contains(commonTableExpression.Name))
+                continue;
 
             var cteContext = context with { CommonTableExpressions = resolvedExpressions };
             var resolved = CountAllReferences(commonTableExpression.Query, commonTableExpression.Name) > 0
@@ -24290,6 +24309,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             if (!namesInCurrentClause.Add(commonTableExpression.Name))
                 throw new EmbeddedSqlException($"duplicate WITH table name: {commonTableExpression.Name}");
+        }
+
+        var requiredCteNames = GetRequiredCommonTableExpressionNames(
+            statement.CommonTableExpressions,
+            name => CountAllReferences(statement.Query, name));
+        foreach (var commonTableExpression in statement.CommonTableExpressions)
+        {
+            if (!requiredCteNames.Contains(commonTableExpression.Name))
+                continue;
 
             var columns = ResolveCommonTableExpressionColumns(
                 commonTableExpression,
@@ -24678,6 +24706,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             if (!namesInCurrentClause.Add(cte.Name))
                 throw new EmbeddedSqlException($"duplicate WITH table name: {cte.Name}");
+        }
+
+        var requiredCteNames = GetRequiredCommonTableExpressionNames(
+            statement.CommonTableExpressions,
+            name => CountAllReferences(statement.Query, name));
+        foreach (var cte in statement.CommonTableExpressions)
+        {
+            if (!requiredCteNames.Contains(cte.Name))
+                continue;
 
             var columns = DescribeQueryAffinities(
                 cte.Query,

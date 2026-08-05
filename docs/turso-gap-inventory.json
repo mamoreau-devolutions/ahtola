@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 150,
+    "current_conformance_expected_failures": 138,
     "last_reconciled": "2026-08-08",
     "entry_count": 206,
     "counts": {
@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 117,
-        "closed": 89
+        "open": 115,
+        "closed": 91
       }
     },
     "schema": {
@@ -1117,8 +1117,8 @@
       "id": "compile-cte-dml-and-materialization-restrictions",
       "layer": "compilation",
       "kind": "partial",
-      "turso_ref": "turso-src/core/translate/cte.rs (CTEs in UPDATE/DELETE, unused-CTE tolerance, materialization hints)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation (Managed CTE DML requires every CTE to contribute to the statement)",
+      "turso_ref": "turso-src/core/translate/planner.rs::plan_cte + plan_ctes_as_outer_refs (lazy CTE planning, DML outer references, deferred explicit-column validation)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::GetRequiredCommonTableExpressionNames + CTE execution/metadata paths",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
@@ -1126,8 +1126,8 @@
         "cte.sqltest::cte-update-direct-ref-nonkeyed",
         "cte.sqltest::cte-unreferenced-column-mismatch-delete"
       ],
-      "notes": "CTE use inside DML is artificially restricted (\"every CTE must contribute\"); expression-CTE materialization semantics diverge. (Previously linked keys cleared by earlier wave work: cte-limit-inside, range-scan-text-vs-int-affinity.)",
-      "status": "open"
+      "notes": "Closed: execution and metadata now materialize only the dependency closure reached by the SELECT or DML body. Unused CTEs therefore defer invalid explicit-column validation, while direct CTE column references in DML retain SQLite's missing-column error. (Previously linked keys cleared by earlier wave work: cte-limit-inside, range-scan-text-vs-int-affinity.)",
+      "status": "closed"
     },
     {
       "id": "compile-collation-propagation-through-subquery",

@@ -122,7 +122,7 @@ public class ManagedWithCteDmlSubsetTests
     }
 
     [Test]
-    public void ManagedWithCteDmlRollsBackFailuresKeepsCtesStatementLocalAndRejectsWritableCtes()
+    public void ManagedWithCteDmlRollsBackFailuresKeepsCtesStatementLocalAndDefersUnusedCtes()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
@@ -156,10 +156,14 @@ public class ManagedWithCteDmlSubsetTests
         Assert.Throws<EmbeddedSqlException>(() => schemaQualified.Step())!
             .Message.Should().Contain("UNIQUE constraint failed");
 
-        using var unused = connection.Prepare(
-            "WITH unused AS (SELECT 2) INSERT INTO target VALUES (3);");
-        Assert.Throws<EmbeddedSqlException>(() => unused.Step())!
-            .Message.Should().Contain("requires every CTE to contribute");
+        using (var unused = connection.Prepare(
+                   "WITH unused(value) AS (VALUES (2, 4)) INSERT INTO target VALUES (3);"))
+        {
+            unused.Step().Should().Be(StatementStepResult.Done);
+        }
+
+        using var finalRows = connection.Prepare("SELECT id FROM target ORDER BY id;");
+        AssertRows(ReadRows(finalRows), [SqlValue.Integer(1)], [SqlValue.Integer(3)]);
     }
 
     private static void Execute(EmbeddedConnection connection, string sql)

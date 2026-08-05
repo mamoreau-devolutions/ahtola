@@ -22,12 +22,6 @@ autoincr.sqltest::autoinc-create-sequence-table | expected 3 row(s), got 2 row(s
 before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorrelated-subquery | expected 3 row(s), got 3 row(s); row 1 expected '2/600' but was '2/1100'
 bracket-quoting.sqltest::bracket-analyze-table-name | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 check_constraint.sqltest::check_constraint_rename_table_qualified_ref | expected success but got error: ALTER TABLE RENAME cannot rewrite table-qualified CHECK expressions until managed schema token rewriting is implemented.
-cte.sqltest::cte-update-direct-ref-keyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
-cte.sqltest::cte-update-direct-ref-nonkeyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
-cte.sqltest::cte-unreferenced-column-mismatch-delete | expected success but got error: Managed CTE DML requires every CTE to contribute to the DML statement; cte is unused.
-cte.sqltest::cte-unreferenced-column-mismatch-update | expected success but got error: Managed CTE DML requires every CTE to contribute to the DML statement; cte is unused.
-cte.sqltest::cte-unreferenced-column-mismatch-select | expected success but got error: table cte has 3 values for 1 columns
-cte.sqltest::cte-unreferenced-column-mismatch-multi-cte | expected success but got error: table cte_bad has 3 values for 1 columns
 delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'memory'
 detach/transaction.sqltest::detach-fails-with-active-read-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
 detach/transaction.sqltest::detach-fails-with-active-write-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
