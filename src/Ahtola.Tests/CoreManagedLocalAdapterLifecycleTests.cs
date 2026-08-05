@@ -25,8 +25,9 @@ public class CoreManagedLocalAdapterLifecycleTests
         statement.GetValue(0).AsInteger().Should().Be(7);
         statement.Reset();
 
-        Assert.Throws<EmbeddedSqlException>(() => statement.Step())!
-            .Message.Should().Be("Missing value for parameter ?1.");
+        statement.Step().Should().Be(StatementStepResult.Row);
+        statement.GetValue(0).Kind.Should().Be(SqlValueKind.Null);
+        statement.Reset();
 
         statement.Bind(1, SqlValue.Integer(9));
         statement.Step().Should().Be(StatementStepResult.Row);

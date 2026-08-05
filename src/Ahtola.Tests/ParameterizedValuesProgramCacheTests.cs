@@ -11,9 +11,9 @@ namespace Ahtola.Tests;
 // (the cached immutable program, reference-stable across resets) plus ValuesProgramCompilationCount (which
 // reaches one and never grows). The suite also confirms the fix preserves prepared-statement semantics:
 // repeated binds/resets for every value kind (blobs, NULLs), named and duplicate-numbered placeholders
-// collapsing to one slot, clear/rebind to fresh values, disposal releasing the cache, the missing/unbound
-// and unequal-width diagnostics with their exact timing, and that fallback shapes (a computed cell) are
-// never cached.
+// collapsing to one slot, clear/rebind to fresh values, disposal releasing the cache, SQLite/Turso NULL
+// defaults for unbound parameters, unequal-width diagnostics with their exact timing, and that fallback
+// shapes (a computed cell) are never cached.
 public class ParameterizedValuesProgramCacheTests
 {
     [Test]
@@ -239,20 +239,20 @@ public class ParameterizedValuesProgramCacheTests
     }
 
     [Test]
-    public void MissingParameterStillThrowsBeforeAnyLoweringIsCompiled()
+    public void UnboundParameterDefaultsToNullAndTheLoweringIsCached()
     {
         using var connection = new EmbeddedDatabase().Connect();
         using var statement = connection.Prepare("VALUES (?, ?)");
 
-        // The unbound-parameter guard runs before lowering resolution, so a missing binding is still a hard
-        // error at execution and nothing is compiled yet.
         statement.Bind(1, SqlValue.Integer(1));
-        Assert.Throws<EmbeddedSqlException>(() => statement.Step())!
-            .Message.Should().Be("Missing value for parameter at position 2.");
-        statement.CompiledValuesProgram.Should().BeNull();
-        statement.ValuesProgramCompilationCount.Should().Be(0);
+        statement.Step().Should().Be(StatementStepResult.Row);
+        statement.GetValue(0).Should().Be(SqlValue.Integer(1));
+        statement.GetValue(1).Kind.Should().Be(SqlValueKind.Null);
+        statement.Step().Should().Be(StatementStepResult.Done);
+        statement.CompiledValuesProgram.Should().NotBeNull();
+        statement.ValuesProgramCompilationCount.Should().Be(1);
 
-        // Once the missing parameter is supplied, the very next execution compiles and caches the lowering.
+        statement.Reset();
         statement.Bind(2, SqlValue.Integer(2));
         RowIntegers(statement).Should().Equal(1, 2);
         statement.CompiledValuesProgram.Should().NotBeNull();

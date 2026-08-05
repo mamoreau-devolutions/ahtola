@@ -14,9 +14,9 @@ namespace Ahtola.Tests;
 // programs. Because the program reads its parameters late, its opcode shape is independent of the bound
 // values (no baked constant), so the same compiled program rebinds and re-runs without recompilation --
 // the observable signature of late binding. Duplicate placeholders (a repeated ?NNN number or named
-// identity) collapse to one slot and therefore one value, preserving SQLite parameter identity, and the
-// generated column1..columnN metadata plus the missing/unbound and unequal-width diagnostics stay exactly
-// as the evaluator raised them.
+// identity) collapse to one slot and therefore one value, preserving SQLite parameter identity. Generated
+// column1..columnN metadata and unequal-width diagnostics remain unchanged, while unset parameters use
+// SQLite/Turso's NULL value.
 public class ParameterizedValuesSqlRoutingTests
 {
     [Test]
@@ -279,27 +279,29 @@ public class ParameterizedValuesSqlRoutingTests
     }
 
     [Test]
-    public void MissingPositionalParameterRaisesUnchangedDiagnostic()
+    public void UnboundPositionalParameterDefaultsToNull()
     {
         using var connection = new EmbeddedDatabase().Connect();
 
-        // Binding requirements are unchanged by routing: an unbound positional parameter is still a hard
-        // error at execution, reported by 1-based position.
         using var statement = connection.Prepare("VALUES (?, ?)");
         statement.Bind(1, SqlValue.Integer(1));
-        Assert.Throws<EmbeddedSqlException>(() => statement.Step())!
-            .Message.Should().Be("Missing value for parameter at position 2.");
+        statement.Step().Should().Be(StatementStepResult.Row);
+        statement.GetValue(0).Should().Be(SqlValue.Integer(1));
+        statement.GetValue(1).Kind.Should().Be(SqlValueKind.Null);
+        statement.Step().Should().Be(StatementStepResult.Done);
     }
 
     [Test]
-    public void MissingNamedParameterRaisesUnchangedDiagnostic()
+    public void UnboundNamedParameterDefaultsToNull()
     {
         using var connection = new EmbeddedDatabase().Connect();
 
         using var statement = connection.Prepare("VALUES (:a, :b)");
         statement.Bind(":a", SqlValue.Integer(1)).Should().BeTrue();
-        Assert.Throws<EmbeddedSqlException>(() => statement.Step())!
-            .Message.Should().Be("Missing value for parameter :b.");
+        statement.Step().Should().Be(StatementStepResult.Row);
+        statement.GetValue(0).Should().Be(SqlValue.Integer(1));
+        statement.GetValue(1).Kind.Should().Be(SqlValueKind.Null);
+        statement.Step().Should().Be(StatementStepResult.Done);
     }
 
     [Test]

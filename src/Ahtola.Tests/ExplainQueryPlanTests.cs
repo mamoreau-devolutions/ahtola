@@ -42,8 +42,7 @@ public sealed class ExplainQueryPlanTests
         ReadDetail(statement).Should().Be("MANAGED COMPILED VDBE");
 
         using var unbound = connection.Prepare("EXPLAIN QUERY PLAN SELECT ?1 + 1;");
-        Assert.Throws<EmbeddedSqlException>(() => unbound.Step())!
-            .Message.Should().Be("Missing value for parameter ?1.");
+        ReadDetail(unbound).Should().Be("MANAGED COMPILED VDBE");
     }
 
     [Test]

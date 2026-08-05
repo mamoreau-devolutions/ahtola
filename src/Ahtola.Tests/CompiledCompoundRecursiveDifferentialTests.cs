@@ -407,7 +407,6 @@ public class CompiledCompoundRecursiveDifferentialTests
             managedRows[index].Should().Equal(sqliteRows[index]);
         QueryPlanDetail(managed, query, [SqlValue.Text("ADA")])
             .Should().Be("MANAGED EVALUATOR FALLBACK");
-        Assert.Throws<EmbeddedSqlException>(() => ExplainOpcodes(managed, query));
     }
 
     [Test]

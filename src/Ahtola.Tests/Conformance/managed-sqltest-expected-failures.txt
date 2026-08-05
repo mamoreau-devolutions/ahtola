@@ -91,7 +91,6 @@ select/memory.sqltest::collate-compound-10 | expected 3 row(s), got 3 row(s); ro
 select/memory.sqltest::collate-compound-11 | expected 3 row(s), got 3 row(s); row 0 expected 'BANANA' but was 'apple'
 select/memory.sqltest::collate-compound-13 | expected 1 row(s), got 1 row(s); row 0 expected 'TEST' but was 'Test'
 select/memory.sqltest::collate-compound-14 | expected 2 row(s), got 2 row(s); row 0 expected 'ABC' but was 'abc'
-select/memory.sqltest::where-variable-predicate | expected success but got error: Missing value for parameter ?1.
 snapshot_tests/analyze/stat1_rows.sqltest::analyze-indexed-table-does-not-insert-null-stat1-row | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-in-subquery | expected an error but the statement succeeded
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-function-call | expected an error but the statement succeeded

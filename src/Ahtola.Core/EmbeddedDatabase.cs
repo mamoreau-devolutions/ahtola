@@ -20682,8 +20682,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     }
 
     // Assembles the late-bound binding for a routed parameterized VALUES: one value per declared
-    // slot, read from the supplied parameter array through ReadParameter so an out-of-range index
-    // raises the exact "Missing value for parameter at position N" the evaluator raises. A
+    // slot, read through ReadParameter so unset parameters have SQLite/Turso's NULL value. A
     // constant-only VALUES declares no slots and takes the empty binding.
     private static VdbeParameterBinding BuildValuesBinding(
         IReadOnlyList<int> slotParameterIndices,
@@ -33225,10 +33224,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     private static SqlValue ReadParameter(SqlValue[] parameters, int index)
     {
-        if (index < 1 || index >= parameters.Length)
-            throw new EmbeddedSqlException($"Missing value for parameter at position {index}.");
-
-        return parameters[index];
+        return index >= 1 && index < parameters.Length
+            ? parameters[index]
+            : SqlValue.Null;
     }
 
     internal static Dictionary<string, EmbeddedTable> CloneTables(Dictionary<string, EmbeddedTable> source)
@@ -40310,7 +40308,6 @@ public sealed class EmbeddedStatement : IDisposable
     private readonly SqlParameterMap _parameters;
     private readonly string _sql;
     private readonly SqlValue[] _boundValues;
-    private readonly bool[] _isBound;
     private string[]? _columnNames;
     private ExecutionResult? _result;
     private SqlValue[]? _currentRow;
@@ -40345,7 +40342,6 @@ public sealed class EmbeddedStatement : IDisposable
         _parameters = parameters;
         _sql = sql;
         _boundValues = new SqlValue[parameters.Count + 1];
-        _isBound = new bool[parameters.Count + 1];
     }
 
     public int ParameterCount => _parameters.Count;
@@ -40418,7 +40414,6 @@ public sealed class EmbeddedStatement : IDisposable
             throw new ArgumentOutOfRangeException(nameof(index));
 
         _boundValues[index] = value.WithoutJsonSubtype();
-        _isBound[index] = true;
     }
 
     public bool Bind(string name, SqlValue value)
@@ -40533,17 +40528,9 @@ public sealed class EmbeddedStatement : IDisposable
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        // Translate-time validation runs before the unbound-parameter gate (see
-        // EmbeddedTable.ValidateGeneratedColumnExpressions).
+        // Translate-time validation must run before execution, including for statements whose
+        // parameters remain NULL because they were never bound.
         EmbeddedTable.ValidateGeneratedColumnExpressions(_statement);
-
-        for (var index = 1; index <= ParameterCount; index++)
-        {
-            if (!_isBound[index])
-                throw new EmbeddedSqlException(_parameters.GetName(index) is { } name
-                    ? $"Missing value for parameter {name}."
-                    : $"Missing value for parameter at position {index}.");
-        }
 
         if (_sql.Length != 0)
             _connection.FireTraceHook(_sql);

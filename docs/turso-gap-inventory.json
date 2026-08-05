@@ -14,12 +14,12 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 151,
+    "current_conformance_expected_failures": 150,
     "last_reconciled": "2026-08-08",
-    "entry_count": 205,
+    "entry_count": 206,
     "counts": {
       "by_layer": {
-        "vdbe": 36,
+        "vdbe": 37,
         "compilation": 62,
         "parser": 29,
         "functions": 26,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 96,
-        "divergent": 68,
+        "divergent": 69,
         "partial": 27,
         "extension": 8,
         "parity": 6
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 104,
         "s4-intentional": 33,
-        "s1-correctness": 34
+        "s1-correctness": 35
       },
       "by_effort": {
         "M": 75,
         "L": 37,
-        "S": 93
+        "S": 94
       },
       "by_status": {
         "open": 129,
-        "closed": 76
+        "closed": 77
       }
     },
     "schema": {
@@ -3027,6 +3027,20 @@
        "alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel"
      ],
      "notes": "Closed 2026-08-07. IndexExpressionSemantics.IsDeterministicBuiltin called SqliteBuiltinFunctions.IsDeterministic(name) directly, which marks the entire date/time family (date/time/datetime/unixepoch/julianday/strftime/timediff) as non-deterministic because they CAN read 'now'. That rejected deterministic calls such as strftime('%Y-%m-%d %H:00:00', \"created\") and date('2020-01-02') in index expressions. Extracted the existing generated-column check (IsDeterministicGenerationFunction / IsDeterministicDateTimeCall / IsCurrentTimeLiteral / IsUnsafeDateTimeModifier) into a shared internal EmbeddedTable.IsDeterministicSchemaFunction and routed the index-expression validator through it. strftime(format, column) and date(literal) now pass; strftime(format, 'now') and date() with no args still fail (non-deterministic), matching create-index-strftime-now-remains-rejected. Backed by DurableIndexSemanticsTests.IndexExpression* (accept deterministic strftime-with-column, accept deterministic date-literal, reject strftime-with-'now'). Conformance baseline 195 -> 192; all three linked cases removed, 0 added; full suite 3807/0/47.",
+     "status": "closed"
+   },
+   {
+     "id": "vdbe-unbound-parameter-default-null",
+     "layer": "vdbe",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/vdbe/mod.rs::ProgramState::{bind_at, clear_bindings, get_parameter} (parameter slots are extended with Value::Null and an absent slot reads as Value::Null)",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::EmbeddedStatement.ExecuteIfNeeded, ReadParameter, and BuildValuesBinding",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "select/memory.sqltest::where-variable-predicate"
+     ],
+     "notes": "Closed 2026-08-08. EmbeddedStatement rejected execution whenever any declared parameter had not been explicitly bound, and ReadParameter also threw for a sparse supplied parameter array. Turso's ProgramState instead clears bindings to an empty vector and get_parameter returns Value::Null for any absent slot. Ahtola now leaves core statement parameters initialized as SqlValue.Null, removes the pre-execution unbound-parameter gate, and maps out-of-range evaluator and routed VALUES slots to SqlValue.Null. Explicit ADO.NET provider parameter validation is intentionally unchanged.",
      "status": "closed"
    }
  ]
