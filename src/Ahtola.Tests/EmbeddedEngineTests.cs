@@ -1085,23 +1085,20 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void OrderByTiesFollowScanOrderLikeNativeStableSorter()
+    public void OrderByTiesFollowPhysicalRowidOrderLikeNativeStableSorter()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
         Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT COLLATE NOCASE);");
-        // Out-of-rowid-order insertion: the managed row store scans in insertion order
-        // (native's b-tree would scan in rowid order, so absolute tie order can differ
-        // from native here). The invariant both engines share is self-consistency:
-        // ORDER BY ties follow whatever the bare scan enumerates, because the sorter is
-        // stable. EF Core's Northwind assertions check exactly this consistency.
+        // Out-of-rowid-order inserts still scan in the table B-tree's rowid order. ORDER BY
+        // ties preserve that physical scan order because the sorter is stable.
         Execute(connection, "INSERT INTO t VALUES (221, 'a'), (203, 'A'), (250, 'b'), (210, 'B');");
 
-        CollectIds(connection, "SELECT id FROM t;").Should().Equal(221, 203, 250, 210);
+        CollectIds(connection, "SELECT id FROM t;").Should().Equal(203, 210, 221, 250);
 
         // NOCASE ties ('a'='A', 'b'='B') keep scan order instead of breaking by rowid.
-        CollectIds(connection, "SELECT id FROM t ORDER BY v;").Should().Equal(221, 203, 250, 210);
-        CollectIds(connection, "SELECT id FROM t ORDER BY v DESC;").Should().Equal(250, 210, 221, 203);
+        CollectIds(connection, "SELECT id FROM t ORDER BY v;").Should().Equal(203, 221, 210, 250);
+        CollectIds(connection, "SELECT id FROM t ORDER BY v DESC;").Should().Equal(210, 250, 203, 221);
 
         // In-order insertion (scan order == rowid order) keeps the native-visible tie order.
         Execute(connection, "CREATE TABLE u(id INTEGER PRIMARY KEY, v TEXT COLLATE NOCASE);");

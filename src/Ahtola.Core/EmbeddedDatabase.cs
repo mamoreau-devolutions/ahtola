@@ -9061,11 +9061,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         table.ApplyAffinities(row);
 
-        // The rowid pseudo-column overrides the alias column when both are supplied,
-        // matching SQLite; otherwise a rowid-alias table takes the alias column value.
-        var rowidSource = plan.RowidTargetPosition >= 0
+        // rowid and an INTEGER PRIMARY KEY alias address the same underlying key. SQLite uses
+        // whichever target appears last in the INSERT column list when both are supplied.
+        var aliasTargetPosition = -1;
+        for (var index = 0; plan.AliasIndex >= 0 && index < plan.TargetIndices.Length; index++)
+        {
+            if (plan.TargetIndices[index] == plan.AliasIndex)
+                aliasTargetPosition = index;
+        }
+
+        var rowidSource = plan.RowidTargetPosition > aliasTargetPosition
             ? explicitRowidValue
-            : plan.AliasIndex >= 0 ? row[plan.AliasIndex] : SqlValue.Null;
+            : aliasTargetPosition >= 0 ? row[plan.AliasIndex] : SqlValue.Null;
 
         long rowid;
         var automaticRowidDeferred = deferRowidTracking
@@ -14620,7 +14627,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             comparer,
             predicate,
             carryRowId: target.HasRowId);
-        compiled = new CompiledSelect(program, [new VdbeCursorSource(target.Rows, target.RowIds)]);
+        compiled = new CompiledSelect(program, [target.CreateCursorSource()]);
         return true;
     }
 
@@ -15631,7 +15638,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 new VdbeJoinScanPlan(
                     target.TableName,
                     target.Columns.Length,
-                    new VdbeCursorSource(target.Rows, target.RowIds)),
+                    target.CreateCursorSource()),
                 target.TableName,
                 target.Columns,
                 BuildQualifiedColumns(target.Qualifier, target.Columns),
@@ -23894,11 +23901,22 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (maximumRows is { } maximum && maximum < count)
             count = (int)maximum;
 
-        var sourceRows = new SourceRow[count];
-        for (var index = 0; index < count; index++)
+        var rowOrder = Enumerable.Range(0, table.Rows.Count).ToArray();
+        if (table.HasRowid)
         {
+            // A table B-tree cursor rewinds to its smallest integer key. Keep the evaluator's
+            // heap-backed table representation from leaking insertion order into physical scans.
+            Array.Sort(
+                rowOrder,
+                (left, right) => table.RowIds[left].CompareTo(table.RowIds[right]));
+        }
+
+        var sourceRows = new SourceRow[count];
+        for (var outputIndex = 0; outputIndex < count; outputIndex++)
+        {
+            var index = rowOrder[outputIndex];
             var rowid = index < table.RowIds.Count ? table.RowIds[index] : index + 1;
-            sourceRows[index] = new SourceRow(
+            sourceRows[outputIndex] = new SourceRow(
                 table.Columns,
                 table.Rows[index],
                 qualifiedColumns,

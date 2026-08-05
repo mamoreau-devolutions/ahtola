@@ -30,7 +30,6 @@ gencol.sqltest::gencol_stored_rejected | expected an error but the statement suc
 gencol.sqltest::gencol_stored_generated_always_rejected | expected an error but the statement succeeded
 indexed_by.sqltest::indexed-by-attached-qualified-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 indexed_by.sqltest::indexed-by-attached-update-delete | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-insert.sqltest::insert-explicit-rowid-with-rowidalias | expected 6 row(s), got 6 row(s); row 0 expected '-12/-10/-12/-9' but was '4/2/4/1'
 insert.sqltest::uniq_constraint | error 'UNIQUE constraint failed: test.id' does not match pattern 'UNIQUE constraint failed: test.id \(19\)'
 insert.sqltest::insert-explicit-rowid-conflict | error 'UNIQUE constraint failed: t.rowid' does not match pattern 'UNIQUE constraint failed: t.rowid \(19\)'
 join/memory.sqltest::correlated-subquery-hash-join-reuse | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.

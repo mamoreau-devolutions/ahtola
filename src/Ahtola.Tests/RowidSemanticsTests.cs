@@ -63,6 +63,20 @@ public class RowidSemanticsTests
     }
 
     [Test]
+    public void RowidTableScanFollowsBtreeKeyOrderWithoutAnOrderByClause()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE t(x, y INTEGER PRIMARY KEY, z)",
+                "INSERT INTO t(z, x, y, rowid) VALUES (1, 2, 3, 4), (5, 6, 7, 8)",
+                "INSERT INTO t(z, x, y, rowid) VALUES (9, 10, 11, 12)",
+                "INSERT INTO t(z, x, rowid, y) VALUES (-1, -2, -3, -4), (-5, -6, -7, -8)",
+                "INSERT INTO t(z, x, rowid, y) VALUES (-9, -10, -11, -12)",
+            ],
+            "SELECT rowid AS y, x, y, z FROM t");
+    }
+
+    [Test]
     public void NegativeRowidCountsTowardTheHighWaterMark()
     {
         AssertMatchesSqlite(

@@ -124,11 +124,9 @@ internal sealed class SelectStatementCompiler
         // reference is detected here; the INTEGER-PK-alias column name (e.g. `id`)
         // resolves to a declared column (`IsTargetRowIdReference` returns false) and
         // stays on the sorter path. Index-backed backward walks need the TableAccessPlan
-        // optimizer seam (absent) and are intentionally not handled. The cursor walks
-        // positions backward, which is rowid-descending ONLY when RowIds is ascending
-        // (CommitInserts appends batch rowids in INSERT order without re-sorting rowid
-        // tables) — `RowIdsAreAscending` guards that invariant, declining to the sorter
-        // when explicit out-of-order rowid INSERTs broke the sort.
+        // optimizer seam (absent) and are intentionally not handled. ScanTarget materializes
+        // table cursor sources in rowid order, so walking positions backward follows physical
+        // rowids in descending order.
         if (statement.OrderBy.Count == 1
             && statement.OrderBy[0].Descending
             && statement.Where is null
@@ -139,7 +137,6 @@ internal sealed class SelectStatementCompiler
             && !statement.Distinct
             && _resolveScanTarget(statement.Source!) is { } descTarget
             && descTarget.HasRowId
-            && RowIdsAreAscending(descTarget.RowIds)
             && statement.OrderBy[0].Expression is ColumnExpression descColumn
             && IsTargetRowIdReference(descColumn, descTarget))
         {
@@ -242,7 +239,7 @@ internal sealed class SelectStatementCompiler
                     cursorCount: 1,
                     seekInstructions,
                     parameterSlotCount: seekEmitter.ParameterIndices.Count),
-                [new VdbeCursorSource(target.Rows, target.RowIds)],
+                [target.CreateCursorSource()],
                 seekEmitter.ParameterIndices);
             return true;
         }
@@ -345,7 +342,7 @@ internal sealed class SelectStatementCompiler
                     cursorCount: 1,
                     seekInstructions,
                     parameterSlotCount: seekEmitter.ParameterIndices.Count),
-                [new VdbeCursorSource(target.Rows, target.RowIds)],
+                [target.CreateCursorSource()],
                 seekEmitter.ParameterIndices);
             return true;
         }
@@ -455,7 +452,7 @@ internal sealed class SelectStatementCompiler
                 instructions,
                 distinctSetCount: distinctEquality is null ? 0 : 1,
                 parameterSlotCount: emitter.ParameterIndices.Count),
-            [new VdbeCursorSource(target.Rows, target.RowIds)],
+            [target.CreateCursorSource()],
             emitter.ParameterIndices);
         return true;
     }
@@ -518,7 +515,7 @@ internal sealed class SelectStatementCompiler
                 instructions,
                 distinctSetCount: 0,
                 parameterSlotCount: emitter.ParameterIndices.Count),
-            [new VdbeCursorSource(target.Rows, target.RowIds)],
+            [target.CreateCursorSource()],
             emitter.ParameterIndices);
         return true;
     }
@@ -590,33 +587,6 @@ internal sealed class SelectStatementCompiler
                     column.Name[..separator],
                     target.Qualifier,
                     StringComparison.OrdinalIgnoreCase));
-    }
-
-    /// <summary>
-    /// The reverse rowid scan walks cursor positions backward (Last/Prev), which yields
-    /// rowid-descending order ONLY when <paramref name="rowIds"/> is stored ascending.
-    /// CommitInserts appends batch rowids in INSERT order without re-sorting rowid
-    /// tables, so explicit out-of-order rowid INSERTs leave the list unsorted; emitting
-    /// Last/Prev against that would silently produce reverse-INSERT order (a divergence
-    /// from SQLite's backward B-tree walk). The single-row insert path keeps the list
-    /// sorted, and auto-rowid batch inserts are monotonic, so the common case is
-    /// ascending — the check is O(n) per compile of an <c>ORDER BY rowid DESC</c> query,
-    /// strictly cheaper than the O(n log n) sort it avoids. When this returns false the
-    /// gate declines and the caller routes the statement through the sorter (correct,
-    /// just not optimized).
-    /// </summary>
-    private static bool RowIdsAreAscending(IReadOnlyList<long>? rowIds)
-    {
-        if (rowIds is null || rowIds.Count <= 1)
-            return true;
-
-        for (var index = 1; index < rowIds.Count; index++)
-        {
-            if (rowIds[index] <= rowIds[index - 1])
-                return false;
-        }
-
-        return true;
     }
 
     /// <summary>
