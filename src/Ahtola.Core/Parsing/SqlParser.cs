@@ -1582,6 +1582,22 @@ internal sealed class SqlParser
             return null;
 
         ExpectKeyword("CONFLICT");
+        var clause = ParseUpsertClause();
+        if (CurrentIsKeyword("ON"))
+        {
+            clause = clause with { Next = ParseUpsert() };
+            if (clause.Target.Count == 0)
+            {
+                throw Error(
+                    "ON CONFLICT clause without a conflict target must be the last clause in the UPSERT chain.");
+            }
+        }
+
+        return clause;
+    }
+
+    private UpsertClause ParseUpsertClause()
+    {
         var target = new List<UpsertTargetColumn>();
         if (Consume(TokenKind.LeftParen))
         {

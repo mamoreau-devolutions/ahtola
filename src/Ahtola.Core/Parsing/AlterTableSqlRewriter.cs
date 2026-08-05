@@ -493,17 +493,17 @@ internal static class AlterTableSqlRewriter
 
         private void CollectUpsert(UpsertClause? upsert)
         {
-            if (upsert is null)
-                return;
-
-            foreach (var target in upsert.Target)
-                CollectExpression(target.Expression);
-            CollectExpression(upsert.TargetWhere);
-            if (upsert.Action is DoUpdateUpsertAction doUpdate)
+            foreach (var clause in upsert?.Clauses() ?? [])
             {
-                foreach (var assignment in doUpdate.Assignments)
-                    CollectExpression(assignment.Value);
-                CollectExpression(doUpdate.Where);
+                foreach (var target in clause.Target)
+                    CollectExpression(target.Expression);
+                CollectExpression(clause.TargetWhere);
+                if (clause.Action is DoUpdateUpsertAction doUpdate)
+                {
+                    foreach (var assignment in doUpdate.Assignments)
+                        CollectExpression(assignment.Value);
+                    CollectExpression(doUpdate.Where);
+                }
             }
         }
 

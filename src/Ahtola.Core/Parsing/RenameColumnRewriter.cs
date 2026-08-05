@@ -370,22 +370,25 @@ internal static class RenameColumnRewriter
 
         private void WalkUpsert(UpsertClause upsert, string tableName, Scope? outer)
         {
-            var scope = TableScope(tableName, outer);
-            foreach (var target in upsert.Target)
+            foreach (var clause in upsert.Clauses())
             {
-                if (target.Expression is not null)
-                    WalkExpression(target.Expression, scope);
-            }
+                var scope = TableScope(tableName, outer);
+                foreach (var target in clause.Target)
+                {
+                    if (target.Expression is not null)
+                        WalkExpression(target.Expression, scope);
+                }
 
-            if (upsert.TargetWhere is not null)
-                WalkExpression(upsert.TargetWhere, scope);
+                if (clause.TargetWhere is not null)
+                    WalkExpression(clause.TargetWhere, scope);
 
-            if (upsert.Action is DoUpdateUpsertAction update)
-            {
-                WalkAssignments(update.Assignments, tableName);
-                WalkAssignmentValues(update.Assignments, scope);
-                if (update.Where is not null)
-                    WalkExpression(update.Where, scope);
+                if (clause.Action is DoUpdateUpsertAction update)
+                {
+                    WalkAssignments(update.Assignments, tableName);
+                    WalkAssignmentValues(update.Assignments, scope);
+                    if (update.Where is not null)
+                        WalkExpression(update.Where, scope);
+                }
             }
         }
 

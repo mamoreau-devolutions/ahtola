@@ -8060,17 +8060,17 @@ internal sealed class EmbeddedFileStore : IDisposable
                     CollectTriggerReferencedTables(insert.Source, tables);
                 foreach (var expression in insert.Rows.SelectMany(row => row))
                     CollectTriggerReferencedTables(expression, tables);
-                if (insert.Upsert?.Action is DoUpdateUpsertAction upsertUpdate)
-                {
-                    foreach (var assignment in upsertUpdate.Assignments)
-                        CollectTriggerReferencedTables(assignment.Value, tables);
-                    CollectTriggerReferencedTables(upsertUpdate.Where, tables);
-                }
-                if (insert.Upsert is { } upsert)
+                foreach (var upsert in insert.Upsert?.Clauses() ?? [])
                 {
                     foreach (var target in upsert.Target)
                         CollectTriggerReferencedTables(target.Expression, tables);
                     CollectTriggerReferencedTables(upsert.TargetWhere, tables);
+                    if (upsert.Action is DoUpdateUpsertAction upsertUpdate)
+                    {
+                        foreach (var assignment in upsertUpdate.Assignments)
+                            CollectTriggerReferencedTables(assignment.Value, tables);
+                        CollectTriggerReferencedTables(upsertUpdate.Where, tables);
+                    }
                 }
                 break;
             case UpdateStatement update:
@@ -8433,23 +8433,28 @@ internal sealed class EmbeddedFileStore : IDisposable
 
     private static string? FindRuntimeDependency(UpsertClause? upsert)
     {
-        if (upsert is null)
-            return null;
-        var collation = upsert.Target
-            .Select(column => column.Collation)
-            .FirstOrDefault(name => name is not null && !IsBuiltInCollation(name));
-        if (collation is not null)
-            return $"explicit collation '{collation}'";
-        var targetDependency = FirstRuntimeDependency(
-            FirstRuntimeDependency(upsert.Target.Select(target =>
-                FindRuntimeDependency(target.Expression)).ToArray()),
-            FindRuntimeDependency(upsert.TargetWhere));
-        return upsert.Action is DoUpdateUpsertAction update
-            ? FirstRuntimeDependency(
-                targetDependency,
-                FindRuntimeDependency(update.Assignments),
-                FindRuntimeDependency(update.Where))
-            : targetDependency;
+        foreach (var clause in upsert?.Clauses() ?? [])
+        {
+            var collation = clause.Target
+                .Select(column => column.Collation)
+                .FirstOrDefault(name => name is not null && !IsBuiltInCollation(name));
+            if (collation is not null)
+                return $"explicit collation '{collation}'";
+            var targetDependency = FirstRuntimeDependency(
+                FirstRuntimeDependency(clause.Target.Select(target =>
+                    FindRuntimeDependency(target.Expression)).ToArray()),
+                FindRuntimeDependency(clause.TargetWhere));
+            var dependency = clause.Action is DoUpdateUpsertAction update
+                ? FirstRuntimeDependency(
+                    targetDependency,
+                    FindRuntimeDependency(update.Assignments),
+                    FindRuntimeDependency(update.Where))
+                : targetDependency;
+            if (dependency is not null)
+                return dependency;
+        }
+
+        return null;
     }
 
     private static string? FindRuntimeDependency(IEnumerable<OrderByTerm> terms)

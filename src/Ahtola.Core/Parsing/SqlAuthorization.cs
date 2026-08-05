@@ -328,7 +328,12 @@ internal static class SqlAuthorization
                 };
             }
 
-            return upsert with { Action = action, TargetWhere = targetWhere };
+            return upsert with
+            {
+                Action = action,
+                TargetWhere = targetWhere,
+                Next = Upsert(upsert.Next, schema, table),
+            };
         }
 
         private ParsedStatement Update(UpdateStatement statement)

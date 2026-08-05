@@ -4934,7 +4934,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ValidateQuerySchema(statement.Source, context, triggerRow, cancellationToken);
 
         var targetRow = CreateSchemaValidationRow(statement.TableName, table, triggerRow);
-        if (statement.Upsert is { } upsert)
+        foreach (var upsert in statement.Upsert?.Clauses() ?? [])
         {
             foreach (var target in upsert.Target)
             {
@@ -6718,22 +6718,44 @@ public sealed partial class EmbeddedDatabase : IDisposable
             TriggerConflictAlgorithm = triggerConflictAlgorithm,
             PreserveUpsertFail = true,
         };
-        var conflictTarget = ResolveUpsertConflictTarget(statement.TableName, table, statement.Upsert);
         var insertPlan = PrepareInsert(statement, table, context);
-        var updateAction = statement.Upsert.Action as DoUpdateUpsertAction;
-        UpdatePlan? updatePlan = null;
-        if (updateAction is null && statement.Upsert.Action is not DoNothingUpsertAction)
-            throw new InvalidOperationException("Unknown UPSERT action.");
+        var upserts = statement.Upsert.Clauses()
+            .Select(upsert =>
+            {
+                var update = upsert.Action as DoUpdateUpsertAction;
+                if (update is null && upsert.Action is not DoNothingUpsertAction)
+                    throw new InvalidOperationException("Unknown UPSERT action.");
 
-        if (updateAction is not null)
+                UpdatePlan? plan = null;
+                if (update is not null)
+                {
+                    var updateStatement = new UpdateStatement(
+                        statement.TableName,
+                        update.Assignments,
+                        Where: null);
+                    plan = PrepareUpdate(updateStatement, table, context);
+                    ValidateUpsertUpdateExpressions(
+                        statement.TableName,
+                        update.Assignments,
+                        update.Where,
+                        allowTriggerQualifiers: context.InsideTrigger);
+                }
+
+                return new ResolvedUpsertClause(
+                    upsert,
+                    ResolveUpsertConflictTarget(statement.TableName, table, upsert),
+                    plan);
+            })
+            .ToArray();
+
+        if (upserts.Length == 0)
+            throw new InvalidOperationException("UPSERT execution requires an UPSERT clause.");
+
+        foreach (var upsert in upserts)
         {
-            var updateStatement = new UpdateStatement(statement.TableName, updateAction.Assignments, Where: null);
-            updatePlan = PrepareUpdate(updateStatement, table, context);
-            ValidateUpsertUpdateExpressions(
-                statement.TableName,
-                updateAction.Assignments,
-                updateAction.Where,
-                allowTriggerQualifiers: context.InsideTrigger);
+            if (upsert.Clause.Target.Count == 0 && upsert != upserts[^1])
+                throw new EmbeddedSqlException(
+                    "ON CONFLICT clause without a conflict target must be the last clause in the UPSERT chain.");
         }
 
         var beforeInsertTriggers = GetMatchingTriggers(
@@ -6760,30 +6782,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 TriggerEvent.Delete,
                 TriggerTiming.After)
             : [];
-        var updatedColumns = updateAction?.Assignments
-            .Select(assignment => assignment.Column)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var beforeUpdateTriggers = updateAction is null
-            ? []
-            : GetMatchingTriggers(
-                context,
-                statement.TableName,
-                TriggerEvent.Update,
-                TriggerTiming.Before,
-                updatedColumns);
-        var afterUpdateTriggers = updateAction is null
-            ? []
-            : GetMatchingTriggers(
-                context,
-                statement.TableName,
-                TriggerEvent.Update,
-                TriggerTiming.After,
-                updatedColumns);
         var affectedRows = new List<SqlValue[]>();
         var affectedRowIds = new List<long>();
         var affectedLastInsertRowIds = new List<long?>();
         var insertTriggers = GetMatchingTriggers(context, statement.TableName, TriggerEvent.Insert);
-        var updateTriggers = GetMatchingTriggers(context, statement.TableName, TriggerEvent.Update);
         var deleteTriggers = context.RecursiveTriggersEnabled
             ? GetMatchingTriggers(context, statement.TableName, TriggerEvent.Delete)
             : Array.Empty<TriggerDefinition>();
@@ -6829,14 +6831,25 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 throw new EmbeddedStatementFailureException(exception, lastInsertRowId.Value);
             }
 
-            var conflictPosition = PreserveLastInsertRowIdOnFailure(() =>
-                FindUpsertConflictPosition(
-                    table,
-                    conflictTarget,
-                    candidate,
-                    candidateRowId,
-                    table.Rows,
-                    table.RowIds));
+            ResolvedUpsertClause? selectedUpsert = null;
+            var conflictPosition = -1;
+            foreach (var upsert in upserts)
+            {
+                var position = PreserveLastInsertRowIdOnFailure(() =>
+                    FindUpsertConflictPosition(
+                        table,
+                        upsert.Target,
+                        candidate,
+                        candidateRowId,
+                        table.Rows,
+                        table.RowIds));
+                if (position < 0)
+                    continue;
+
+                selectedUpsert = upsert;
+                conflictPosition = position;
+                break;
+            }
 
             if (conflictPosition < 0)
             {
@@ -6907,6 +6920,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             }
 
             RestoreInsertAllocation(insertPlan, allocationSnapshot);
+            var updateAction = selectedUpsert!.Clause.Action as DoUpdateUpsertAction;
+            var updatePlan = selectedUpsert.UpdatePlan;
             if (updateAction is null)
                 continue;
 
@@ -6989,7 +7004,25 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 affectedRows.Add(updated);
                 affectedRowIds.Add(updatedRowId);
                 affectedLastInsertRowIds.Add(context.LastInsertRowId);
-                FireMutationTriggers(updateTriggers, InsertConflictAlgorithm.Abort);
+                FireMutationTriggers(
+                    GetMatchingTriggers(
+                        context,
+                        statement.TableName,
+                        TriggerEvent.Update,
+                        TriggerTiming.Before,
+                        updateAction.Assignments
+                            .Select(assignment => assignment.Column)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase))
+                    .Concat(GetMatchingTriggers(
+                        context,
+                        statement.TableName,
+                        TriggerEvent.Update,
+                        TriggerTiming.After,
+                        updatedColumns: updateAction.Assignments
+                            .Select(assignment => assignment.Column)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase)))
+                    .ToArray(),
+                    InsertConflictAlgorithm.Abort);
             }
             catch (EmbeddedUpsertConflictFailException)
             {
@@ -7783,6 +7816,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
         EmbeddedIndex? Index,
         IReadOnlyList<UpsertConflictColumn>? Columns,
         bool CatchesAllUniqueConstraints);
+
+    private sealed record ResolvedUpsertClause(
+        UpsertClause Clause,
+        UpsertConflictTarget Target,
+        UpdatePlan? UpdatePlan);
 
     private static InsertAllocationSnapshot? CaptureInsertAllocation(InsertPlan plan)
     {
@@ -37750,10 +37788,17 @@ public sealed class EmbeddedConnection : IDisposable
                     CollectExpressionSchemas(expression, schemas, commonTableExpressions);
                 if (insert.Source is not null)
                     CollectQuerySchemas(insert.Source, schemas, commonTableExpressions);
-                if (insert.Upsert is { Action: DoUpdateUpsertAction upsertUpdate })
+                foreach (var upsert in insert.Upsert?.Clauses() ?? [])
                 {
-                    foreach (var assignment in upsertUpdate.Assignments)
-                        CollectExpressionSchemas(assignment.Value, schemas, commonTableExpressions);
+                    foreach (var target in upsert.Target)
+                        CollectExpressionSchemas(target.Expression, schemas, commonTableExpressions);
+                    CollectExpressionSchemas(upsert.TargetWhere, schemas, commonTableExpressions);
+                    if (upsert.Action is DoUpdateUpsertAction update)
+                    {
+                        foreach (var assignment in update.Assignments)
+                            CollectExpressionSchemas(assignment.Value, schemas, commonTableExpressions);
+                        CollectExpressionSchemas(update.Where, schemas, commonTableExpressions);
+                    }
                 }
                 CollectProjectionSchemas(insert.Returning, schemas, commonTableExpressions);
                 break;
@@ -38048,18 +38093,7 @@ public sealed class EmbeddedConnection : IDisposable
                     ? null
                     : RewriteQuerySchema(insert.Source, schema, commonTableExpressions),
                 Returning = RewriteProjections(insert.Returning, schema, commonTableExpressions),
-                Upsert = insert.Upsert is { Action: DoUpdateUpsertAction update } upsert
-                    ? upsert with
-                    {
-                        Action = update with
-                        {
-                            Assignments = RewriteAssignments(
-                                update.Assignments,
-                                schema,
-                                commonTableExpressions),
-                        },
-                    }
-                    : insert.Upsert,
+                Upsert = RewriteUpsertSchema(insert.Upsert, schema, commonTableExpressions),
             },
             UpdateStatement update => update with
             {
@@ -38129,6 +38163,43 @@ public sealed class EmbeddedConnection : IDisposable
         {
             CommonTableExpressions = rewritten,
             Dml = RewriteStatementSchema(statement.Dml, schema, names),
+        };
+    }
+
+    private static UpsertClause? RewriteUpsertSchema(
+        UpsertClause? upsert,
+        string schema,
+        HashSet<string> commonTableExpressions)
+    {
+        if (upsert is null)
+            return null;
+
+        var targets = upsert.Target.Select(target => target with
+        {
+            Expression = RewriteNullableExpression(
+                target.Expression,
+                schema,
+                commonTableExpressions),
+        }).ToArray();
+        var action = upsert.Action is DoUpdateUpsertAction update
+            ? update with
+            {
+                Assignments = RewriteAssignments(
+                    update.Assignments,
+                    schema,
+                    commonTableExpressions),
+                Where = RewriteNullableExpression(update.Where, schema, commonTableExpressions),
+            }
+            : upsert.Action;
+        return upsert with
+        {
+            Target = targets,
+            TargetWhere = RewriteNullableExpression(
+                upsert.TargetWhere,
+                schema,
+                commonTableExpressions),
+            Action = action,
+            Next = RewriteUpsertSchema(upsert.Next, schema, commonTableExpressions),
         };
     }
 
@@ -38447,9 +38518,12 @@ public sealed class EmbeddedConnection : IDisposable
             InsertStatement insert => ManagedSchemaName.TrySplit(insert.TableName, out _, out _)
                 || insert.Rows.SelectMany(row => row).Any(ExpressionContainsSchemaQualification)
                 || (insert.Source is not null && QueryContainsSchemaQualification(insert.Source))
-                || (insert.Upsert is { Action: DoUpdateUpsertAction update }
-                    && (update.Assignments.Any(assignment => ExpressionContainsSchemaQualification(assignment.Value))
-                        || ExpressionContainsSchemaQualification(update.Where)))
+                || insert.Upsert?.Clauses().Any(upsert =>
+                    upsert.Target.Any(target => ExpressionContainsSchemaQualification(target.Expression))
+                    || ExpressionContainsSchemaQualification(upsert.TargetWhere)
+                    || upsert.Action is DoUpdateUpsertAction update
+                        && (update.Assignments.Any(assignment => ExpressionContainsSchemaQualification(assignment.Value))
+                            || ExpressionContainsSchemaQualification(update.Where))) == true
                 || (insert.Returning?.Any(projection => ExpressionContainsSchemaQualification(projection.Expression)) ?? false),
             UpdateStatement update => ManagedSchemaName.TrySplit(update.TableName, out _, out _)
                 || update.Assignments.Any(assignment => ExpressionContainsSchemaQualification(assignment.Value))

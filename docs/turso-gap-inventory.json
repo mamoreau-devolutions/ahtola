@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 163,
+    "current_conformance_expected_failures": 161,
     "last_reconciled": "2026-08-08",
     "entry_count": 204,
     "counts": {
@@ -28,11 +28,11 @@
         "sync": 18
       },
       "by_kind": {
-        "missing": 97,
+        "missing": 96,
         "divergent": 67,
         "partial": 27,
         "extension": 8,
-        "parity": 5
+        "parity": 6
       },
       "by_severity": {
         "s3-perf": 34,
@@ -46,8 +46,8 @@
         "S": 93
       },
       "by_status": {
-        "open": 134,
-        "closed": 70
+        "open": 133,
+        "closed": 71
       }
     },
     "schema": {
@@ -67,7 +67,7 @@
     {
       "id": "vdbe-bloom-filter-opcodes",
       "layer": "vdbe",
-      "kind": "missing",
+      "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Filter + Insn::FilterAdd (bloom-filter build/probe pair)",
       "ahtola_ref": "none",
       "severity": "s3-perf",
@@ -1342,15 +1342,15 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Upsert { next: Option<Box<Upsert>> } (chained ON CONFLICT clauses)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::UpsertClause (single instance, no chaining); src/Ahtola.Core/Parsing/SqlAst.cs::InsertStatement.Upsert : UpsertClause?",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::UpsertClause.Next and Clauses; src/Ahtola.Core/Parsing/SqlParser.cs::ParseUpsert; src/Ahtola.Core/EmbeddedDatabase.cs::PerformUpsertEvaluated",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
         "upsert.sqltest::upsert-multilple-conflict-targets",
         "upsert.sqltest::upsert-targets-chain"
       ],
-      "notes": "SQLite 3.35+ (and turso-parser's Upsert.next linked-list field) allow chaining multiple ON CONFLICT clauses on one INSERT: `INSERT ... ON CONFLICT(x) DO NOTHING ON CONFLICT(y) DO UPDATE SET ...`, evaluated in order until one matches. Ahtola's InsertStatement carries at most one `UpsertClause?`, so the parser can only ever recognize a single ON CONFLICT clause; a second chained clause is left dangling and fails with 'Expected End'.",
-      "status": "open"
+      "notes": "Closed 2026-08-05. Ahtola now models Turso's linked `Upsert.next` chain, parses every ON CONFLICT clause, validates targetless clauses as final-only, and resolves each target before selecting the first matching action per candidate row. Normal and trigger-aware paths preserve clause-specific DO NOTHING/DO UPDATE plans and trigger selection.",
+      "status": "closed"
     },
     {
       "id": "parser-raise-message-expression",

@@ -202,7 +202,15 @@ internal sealed record UpsertClause(
     IReadOnlyList<UpsertTargetColumn> Target,
     UpsertAction Action,
     Expression? TargetWhere = null,
-    string? TargetWhereSql = null);
+    string? TargetWhereSql = null,
+    UpsertClause? Next = null)
+{
+    public IEnumerable<UpsertClause> Clauses()
+    {
+        for (UpsertClause? clause = this; clause is not null; clause = clause.Next)
+            yield return clause;
+    }
+}
 
 internal sealed record UpdateStatement(
     string TableName,
