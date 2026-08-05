@@ -46,8 +46,8 @@
         "S": 92
       },
       "by_status": {
-        "open": 141,
-        "closed": 62
+        "open": 140,
+        "closed": 63
       }
     },
     "schema": {
@@ -853,8 +853,8 @@
       "conformance_links": [
         "alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel"
       ],
-      "notes": "ALTER TABLE ... DROP COLUMN on a table with an unrelated expression index fails with \"non-deterministic functions are prohibited in index expressions\" in Ahtola where Turso/SQLite succeed -- the drop-column path appears to re-run full expression-index determinism validation against indexes it doesn't need to touch, rejecting otherwise-valid schema mutations. The unrelated sibling case (alter-table-drop-column-expr-index-unreferenced) was cleared 2026-08-03 by compile-reindex-statement's registry-driven determinism work; the sentinel variant remains open.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. The retained date(c) expression index survives an unrelated DROP COLUMN and subsequent UPDATE. The earlier deterministic date/time index-expression closure made revalidation during table reconstruction accept date(c); this entry had become stale after that work. Added managed-vs-SQLite coverage for the surviving index and its post-drop mutation.",
+      "status": "closed"
     },
     {
       "id": "compile-alter-rename-trigger-body-not-rebound",

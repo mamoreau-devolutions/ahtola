@@ -152,6 +152,27 @@ public sealed class ManagedAlterTableDropColumnTests
         }
     }
 
+    [Test]
+    public void DropColumnPreservesRetainedDeterministicDateExpressionIndex()
+    {
+        using var managed = OpenManagedMemory();
+        using var sqlite = OpenMicrosoftMemory();
+        const string setup = """
+            CREATE TABLE t(a INTEGER, b INTEGER, c TEXT, d INTEGER);
+            CREATE INDEX i_expr ON t(a, date(c), c);
+            INSERT INTO t VALUES(1, 2, '2026-01-01', 3);
+            """;
+
+        Execute(managed, setup);
+        Execute(sqlite, setup);
+        Execute(managed, "ALTER TABLE t DROP COLUMN b; UPDATE t SET a = 5 WHERE c = '2026-01-01';");
+        Execute(sqlite, "ALTER TABLE t DROP COLUMN b; UPDATE t SET a = 5 WHERE c = '2026-01-01';");
+
+        ReadRows(managed, "SELECT a, c, d FROM t;")
+            .Should()
+            .Equal(ReadRows(sqlite, "SELECT a, c, d FROM t;"));
+    }
+
     [TestCase(
         "CREATE TABLE t(a);",
         "a",
