@@ -21,10 +21,10 @@ internal static class SqliteBuiltinFunctions
         "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE",
         // Built-in scalars (the EvaluateScalarFunction dispatch).
         "ABS", "CEIL", "CEILING", "FLOOR", "TRUNC", "ROUND", "LN", "LOG", "LOG2", "LOG10",
-        "EXP", "SQRT", "POW", "POWER", "MOD", "SIGN", "PI", "DEGREES", "RADIANS",
+        "EXP", "SQRT", "POW", "POWER", "GCD", "LCM", "MOD", "SIGN", "PI", "DEGREES", "RADIANS",
         "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "ATAN2", "SINH", "COSH", "TANH",
         "ASINH", "ACOSH", "ATANH",
-        "SUBSTR", "SUBSTRING", "REPLACE", "REPEAT", "LPAD", "RPAD", "TRIM", "BTRIM", "LTRIM", "RTRIM", "QUOTE",
+        "SUBSTR", "SUBSTRING", "REPLACE", "STRING_REVERSE", "REVERSE", "SOUNDEX", "REPEAT", "LPAD", "RPAD", "TRIM", "BTRIM", "LTRIM", "RTRIM", "QUOTE",
         "CHAR", "UNICODE", "UNHEX", "ZEROBLOB", "RANDOMBLOB", "RANDOM", "CONCAT", "CONCAT_WS",
         "IIF", "LIKELY", "UNLIKELY", "LIKELIHOOD",
         "SQLITE_VERSION", "SQLITE_SOURCE_ID", "CHANGES", "TOTAL_CHANGES", "TIMEDIFF",

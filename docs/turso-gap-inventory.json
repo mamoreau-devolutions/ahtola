@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 126,
-        "closed": 80
+        "open": 123,
+        "closed": 83
       }
     },
     "schema": {
@@ -1809,25 +1809,25 @@
       "id": "func-soundex-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Soundex (\"soundex\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Soundex; turso-src/core/vdbe/value.rs::Value::exec_soundex",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::EvaluateSoundex; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [],
-      "notes": "soundex() is registered in Turso but is optional in stock SQLite too (needs SQLITE_SOUNDEX); the corpus test itself is commented out. Low priority: not required for SQLite conformance, but a real capability gap vs. Turso's always-on registry. No hit for 'soundex'/'Soundex' anywhere in src/Ahtola.Core.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. soundex() now matches Turso's always-on ASCII-only implementation: it preserves the first uppercase letter, ignores H/W without resetting the previous code, resets on vowels/Y, and returns ?000 for NULL, non-text, empty, or non-ASCII/non-letter text. It is registered for persisted-schema recovery. TursoSoundexParityTests ports Turso's upstream vectors and edge cases. The vendored SQLite corpus leaves its optional soundex test commented out.",
+      "status": "closed"
     },
     {
       "id": "func-gcd-lcm-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Gcd (\"gcd\"), ScalarFunc::Lcm (\"lcm\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::{ScalarFunc::Gcd,ScalarFunc::Lcm}; turso-src/core/functions/math.rs::{exec_gcd,exec_lcm,gcd_inner,value_as_i64}",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.MathFunctions.cs::{EvaluateGreatestCommonDivisor,EvaluateLeastCommonMultiple,TryGetGreatestCommonDivisor}; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [],
-      "notes": "gcd()/lcm() (Turso/SQLite-3.41+-style math helpers) have no hits anywhere in src/Ahtola.Core or Ahtola.Core/EmbeddedDatabase.MathFunctions.cs. Not covered by the vendored sqltest corpus (no gcd(/lcm( occurrences found).",
-      "status": "open"
+      "notes": "Closed 2026-08-08. gcd()/lcm() now use Turso's signed 64-bit coercion and Euclidean algorithm, yielding non-negative results, NULL for non-integral/non-finite/NULL values, and immediate integer-overflow errors for unrepresentable MIN-value magnitudes or LCM products. Both are registered for persisted-schema recovery. TursoIntegerMathParityTests ports Turso's basic, NULL, coercion, and overflow vectors. No vendored sqltest case covers these extensions.",
+      "status": "closed"
     },
     {
       "id": "func-repeat-lpad-rpad-missing",
@@ -1845,13 +1845,13 @@
       "id": "func-string-reverse-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::StringReverse (\"string_reverse\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::StringReverse; turso-src/core/vdbe/execute.rs::ScalarFunc::StringReverse",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::EvaluateStringReverse; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [],
-      "notes": "string_reverse() is registered in Turso but has no counterpart in Ahtola.Core and no corpus coverage. Extension-level gap, not SQLite-standard.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. string_reverse() and Turso's reverse() alias now reverse Unicode scalar values after ordinary SQL text coercion, return NULL for NULL, and preserve supplementary Unicode scalars. The implementation is registered for persisted-schema recovery. TursoStringReverseParityTests cover scalar ordering, aliasing, coercion, NULL, arity diagnostics, and reopening a view. No vendored sqltest case covers this Turso extension.",
+      "status": "closed"
     },
     {
       "id": "func-numeric-boolean-ip-helpers-missing",

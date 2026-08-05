@@ -112,6 +112,77 @@ public sealed partial class EmbeddedDatabase
         return SqlValue.Text(source.Replace(pattern, ToSqlText(arguments[2]), StringComparison.Ordinal));
     }
 
+    private static SqlValue EvaluateStringReverse(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("string_reverse", arguments, 1);
+        if (arguments[0].Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+
+        // Turso reverses Rust chars, which are Unicode scalar values rather than UTF-8 bytes.
+        // Rune traversal is the corresponding .NET operation and keeps supplementary characters intact.
+        var source = ToSqlText(arguments[0]);
+        var builder = new StringBuilder(source.Length);
+        foreach (var rune in source.EnumerateRunes().Reverse())
+            builder.Append(rune.ToString());
+
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static SqlValue EvaluateSoundex(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("soundex", arguments, 1);
+        if (arguments[0].Kind != SqlValueKind.Text)
+            return SqlValue.Text("?000");
+
+        var source = arguments[0].AsText();
+        if (source.Length == 0 || source.Any(character => !IsAsciiLetter(character)))
+            return SqlValue.Text("?000");
+
+        Span<char> result = stackalloc char[4];
+        result[0] = char.ToUpperInvariant(source[0]);
+        var resultLength = 1;
+        var previousCode = GetSoundexCode(source[0]);
+        foreach (var character in source.AsSpan(1))
+        {
+            if (resultLength == result.Length)
+                break;
+
+            var lowercase = char.ToLowerInvariant(character);
+            if (lowercase is 'h' or 'w')
+                continue;
+
+            var code = GetSoundexCode(lowercase);
+            if (code is not null && code != previousCode)
+            {
+                result[resultLength++] = code.Value;
+                previousCode = code;
+            }
+            else if (code is null)
+            {
+                previousCode = null;
+            }
+        }
+
+        while (resultLength < result.Length)
+            result[resultLength++] = '0';
+        return SqlValue.Text(new string(result));
+    }
+
+    private static bool IsAsciiLetter(char character)
+        => character is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
+
+    private static char? GetSoundexCode(char character)
+        => char.ToLowerInvariant(character) switch
+        {
+            'b' or 'f' or 'p' or 'v' => '1',
+            'c' or 'g' or 'j' or 'k' or 'q' or 's' or 'x' or 'z' => '2',
+            'd' or 't' => '3',
+            'l' => '4',
+            'm' or 'n' => '5',
+            'r' => '6',
+            _ => null,
+        };
+
     private static SqlValue EvaluateRepeat(IReadOnlyList<SqlValue> arguments)
     {
         RequireArgumentCount("repeat", arguments, 2);
