@@ -150,7 +150,6 @@
       "effort": "M",
       "conformance_links": [
         "foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates",
-        "foreign_keys.sqltest::fk-alter-table-add-column-enforced",
         "gencol.sqltest::fk-gencol-unique-idx-update-cascade",
         "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
       ],
