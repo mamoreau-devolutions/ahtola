@@ -29,12 +29,6 @@ alter_table.sqltest::temp-trigger-attached-read-cross-table | expected success b
 alter_table.sqltest::alter-table-drop-column-temp-trigger-invalid | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-drop-column-invalid-temp-trigger-missing-main-table | expected an error but the statement succeeded
 alter_table.sqltest::alter-rename-col-schema-update-cmd-from | expected success but got error: no such column: src.b
-alter_table.sqltest::fail-drop-column-cross-table-trigger-update-where-expr | error 'error in trigger trg after drop column: table has no column named m' does not match pattern 'error in trigger trg after drop column: no such column: m'
-alter_table.sqltest::drop-column-cross-table-trigger-insert-col-list-deferred | expected success but got error: error in trigger trg after drop column: table has no column named m
-alter_table.sqltest::drop-column-cross-table-trigger-set-target-deferred | expected success but got error: error in trigger trg after drop column: table has no column named m
-alter_table.sqltest::drop-column-other-table-trigger-insert-col-deferred | expected success but got error: error in trigger tu after drop column: table has no column named zer
-alter_table.sqltest::drop-column-owning-table-trigger-insert-col-deferred | expected success but got error: error in trigger tu after drop column: table has no column named x
-alter_table.sqltest::drop-column-owning-table-trigger-update-set-deferred | expected success but got error: error in trigger tu after drop column: table has no column named x
 autoincr.sqltest::autoinc-create-sequence-table | expected 3 row(s), got 2 row(s); row 0 expected '__turso_internal_seq___turso_internal_autoincrement_t1' but was 'sqlite_sequence'
 autoincr.sqltest::autoinc-alter-column-clears-sequence-row | expected success but got error: Expected ADD, DROP, or RENAME after ALTER TABLE. At SQL offset 14.
 before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorrelated-subquery | expected 3 row(s), got 3 row(s); row 1 expected '2/600' but was '2/1100'

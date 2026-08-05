@@ -14,13 +14,13 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 209,
+    "current_conformance_expected_failures": 203,
     "last_reconciled": "2026-08-04",
-    "entry_count": 191,
+    "entry_count": 192,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 52,
+        "compilation": 53,
         "parser": 25,
         "functions": 26,
         "storage": 20,
@@ -29,25 +29,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 55,
+        "divergent": 56,
         "partial": 27,
         "extension": 8,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 100,
+        "s2-capability": 101,
         "s4-intentional": 33,
         "s1-correctness": 24
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 81
+        "S": 82
       },
       "by_status": {
         "open": 141,
-        "closed": 50
+        "closed": 51
       }
     },
     "schema": {
@@ -1749,6 +1749,25 @@
         "default_value.sqltest::default-value-column-name"
       ],
       "notes": "Ahtola emitted \"default value of column is not constant: {referenced-name}\" (colon separator, naming the offending referenced column) instead of the SQLite/Turso pattern \"default value of column [{defining-column}] is not constant\" (square brackets around the DEFINING column with the DEFAULT clause). The conformance runner regex-matches messages (unanchored, case-insensitive). Fixed 2026-08-04: ValidateConstraintExpression now takes a definingColumn parameter threaded from ValidateSchemaExpressions (which has the defining column name), and the non-constant error emits the defining column in brackets. Updated the two managed unit tests (ManagedConstraintSemanticsTests, ManagedDefaultValuesTests) that asserted the old colon-form message. default-value-column-name removed from the expected-failure baseline (210 -> 209 entries).",
+      "status": "closed"
+    },
+    {
+      "id": "compile-alter-drop-column-defers-trigger-target-validation",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "SQLite alter.c (sqlite3AlterDropColumn re-resolves dependent schema) — only expression column references (WHERE/WHEN/SET-value/INSERT-VALUES/INSERT-SELECT) fail at ALTER time; SET-target and INSERT-column-list names are deferred to trigger execution time",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateTriggerInsert, ValidateTriggerUpdate (called from ValidateTriggerSchema via ValidateDependentSchema)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "alter_table.sqltest::fail-drop-column-cross-table-trigger-update-where-expr",
+        "alter_table.sqltest::drop-column-cross-table-trigger-insert-col-list-deferred",
+        "alter_table.sqltest::drop-column-cross-table-trigger-set-target-deferred",
+        "alter_table.sqltest::drop-column-other-table-trigger-insert-col-deferred",
+        "alter_table.sqltest::drop-column-owning-table-trigger-insert-col-deferred",
+        "alter_table.sqltest::drop-column-owning-table-trigger-update-set-deferred"
+      ],
+      "notes": "Ahtola validated UPDATE SET-target column names and INSERT column-list column names at ALTER DROP COLUMN time (via table.GetColumnIndex), emitting \"table has no column named {x}\". SQLite defers those name resolutions to trigger execution time, so a trigger whose SET-target or INSERT-column-list names a just-dropped column must SUCCEED at ALTER time (only expression references to the dropped column fail). Fixed 2026-08-04: ValidateTriggerInsert no longer calls GetColumnIndex on the INSERT column list (keeps the bare-row column-count check and all value-expression validation), and ValidateTriggerUpdate no longer calls GetColumnIndex on the SET target (keeps SET-value and WHERE expression validation). fail-drop-column-cross-table-trigger-update-where-expr now reaches the WHERE resolver and emits \"no such column: m\". Six alter_table cases removed from the expected-failure baseline (209 -> 203 entries).",
       "status": "closed"
     },
     {

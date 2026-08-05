@@ -4900,13 +4900,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
             throw new EmbeddedSqlException($"no such table: {statement.TableName}");
         }
 
-        if (statement.Columns is { } columns)
-        {
-            foreach (var column in columns)
-                _ = table.GetColumnIndex(column);
-        }
-        else if (statement.Source is null
-                 && statement.Rows.Any(row => row.Length != table.Columns.Length))
+        // SQLite defers INSERT column-list name resolution to trigger execution time, so ALTER
+        // DROP COLUMN must not fail a trigger merely because a listed column was dropped. Only the
+        // value expressions (validated below) and the bare-row column count are checked here.
+        if (statement.Columns is null
+            && statement.Source is null
+            && statement.Rows.Any(row => row.Length != table.Columns.Length))
         {
             throw new EmbeddedSqlException(
                 $"table {statement.TableName} has {table.Columns.Length} columns but "
@@ -5000,7 +4999,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         foreach (var assignment in statement.Assignments)
         {
-            _ = table.GetColumnIndex(assignment.Column);
+            // SQLite defers UPDATE SET target name resolution to trigger execution time, so ALTER
+            // DROP COLUMN must not fail a trigger merely because the SET target was dropped. The
+            // SET value expression (validated next) and WHERE clause still fail at ALTER time.
             ValidateExpressionSchema(assignment.Value, row, context, cancellationToken);
         }
         ValidateExpressionSchema(statement.Where, row, context, cancellationToken);
