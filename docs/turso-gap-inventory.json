@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 136,
+    "current_conformance_expected_failures": 131,
     "last_reconciled": "2026-08-08",
-    "entry_count": 206,
+    "entry_count": 207,
     "counts": {
       "by_layer": {
         "vdbe": 37,
-        "compilation": 62,
+        "compilation": 63,
         "parser": 29,
         "functions": 26,
         "storage": 20,
@@ -28,26 +28,26 @@
         "sync": 18
       },
       "by_kind": {
-        "missing": 96,
+        "missing": 95,
         "divergent": 69,
         "partial": 27,
         "extension": 8,
-        "parity": 6
+        "parity": 8
       },
       "by_severity": {
         "s3-perf": 34,
         "s2-capability": 104,
         "s4-intentional": 33,
-        "s1-correctness": 35
+        "s1-correctness": 36
       },
       "by_effort": {
         "M": 75,
         "L": 37,
-        "S": 94
+        "S": 95
       },
       "by_status": {
-        "open": 113,
-        "closed": 93
+        "open": 112,
+        "closed": 95
       }
     },
     "schema": {
@@ -991,14 +991,32 @@
     {
       "id": "compile-views-not-updatable",
       "layer": "compilation",
-      "kind": "missing",
-      "turso_ref": "turso-src/core/translate/view.rs (view.rs handles simple-view UPDATE/DELETE/INSERT pass-through when no INSTEAD OF trigger exists, per SQLite's updatable-view rules)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteInsteadOfInsert (line ~5858) requires an explicit INSTEAD OF trigger",
+      "kind": "parity",
+      "turso_ref": "turso-src/core/translate/update.rs::prepare_update_plan (regular views are absent from Schema::get_table and UPDATE errors 'no such table'); insert.rs::prepare_insert_plan and delete.rs::translate_delete follow the same table-only lookup; trigger.rs rejects INSTEAD OF triggers as unsupported",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.Triggers.cs::PerformInsteadOfInsert/Update/Delete (regular views reject DML without a trigger; Ahtola's SQLite-compatible INSTEAD OF trigger support is an intentional extension)",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Ahtola only allows DML against a view when an explicit INSTEAD OF trigger is defined for it (ExecuteInsteadOfInsert throws \"cannot create INSTEAD OF trigger on table\" errors are the only DML-on-view path found). SQLite/Turso additionally support automatically-updatable simple views (a view over a single table with no aggregates/DISTINCT/compound/subqueries) without requiring an INSTEAD OF trigger.",
-      "status": "open"
+      "notes": "Closed 2026-08-08 after source revalidation. Turso does not implement automatically-updatable views: regular views have no B-tree and its INSERT, UPDATE, and DELETE translators resolve targets through Schema::get_table, which excludes regular views. Turso also explicitly rejects INSTEAD OF triggers. Ahtola correctly rejects DML against a view without an INSTEAD OF trigger; its SQLite-compatible trigger support is intentionally broader and does not leave a Turso capability gap. The prior entry conflated a non-existent SQLite/Turso feature with Ahtola's existing extension.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-group-by-outer-reference-scope",
+      "layer": "compilation",
+      "kind": "parity",
+      "turso_ref": "turso-src/core/translate/select.rs::prepare_select_plan and subquery.rs::plan_subqueries_with_outer_query_access (GROUP BY subqueries may correlate to their own query block, but name resolution does not admit a direct or skipped-scope outer reference)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateQuerySchema/ValidateExpressionSchema",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-in-subquery",
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-function-call",
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-oid",
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-underscore",
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-nested-group-by-subquery"
+      ],
+      "notes": "Closed 2026-08-08. GROUP BY schema validation now bounds a group expression's correlation chain at the grouped SELECT source while preserving local references from nested scalar subqueries. This rejects a direct outer reference and a reference that skips an intervening query block, including function-wrapped and rowid-alias forms, with the SQLite/Turso no-such-column diagnostic.",
+      "status": "closed"
     },
     {
       "id": "compile-compound-select-result-ordering",

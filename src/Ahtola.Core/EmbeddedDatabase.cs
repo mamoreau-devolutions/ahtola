@@ -5473,14 +5473,20 @@ public sealed partial class EmbeddedDatabase : IDisposable
         QueryStatement statement,
         QueryContext context,
         SourceRow? outerRow,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SourceRow? groupByScope = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         switch (statement)
         {
             case SelectStatement select:
                 select = ResolveNamedWindows(select);
-                ValidateTableSourceSchema(select.Source, context, outerRow, cancellationToken);
+                ValidateTableSourceSchema(
+                    select.Source,
+                    context,
+                    outerRow,
+                    cancellationToken,
+                    groupByScope);
                 var sourceColumns = GetSourceColumns(select.Source, context);
                 var outputColumns = GetOutputColumns(select.Source, context);
                 var rawOutputColumns = GetRawOutputColumns(select.Source, context);
@@ -5490,32 +5496,96 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     sourceColumns,
                     outputColumns,
                     outerRow);
+                // A scalar subquery nested in a GROUP BY expression may resolve columns from
+                // its own source and from the grouped query, but not from an earlier outer block.
+                var nestedGroupByScope = groupByScope is null
+                    ? null
+                    : row with { Parent = groupByScope };
                 foreach (var projection in select.Projections)
-                    ValidateExpressionSchema(projection.Expression, row, context, cancellationToken);
-                ValidateExpressionSchema(select.Where, row, context, cancellationToken);
+                    ValidateExpressionSchema(
+                        projection.Expression,
+                        row,
+                        context,
+                        cancellationToken,
+                        nestedGroupByScope);
+                ValidateExpressionSchema(
+                    select.Where,
+                    row,
+                    context,
+                    cancellationToken,
+                    nestedGroupByScope);
                 foreach (var expression in select.GroupBy)
-                    ValidateExpressionSchema(expression, row, context, cancellationToken);
-                ValidateExpressionSchema(select.Having, row, context, cancellationToken);
+                {
+                    // GROUP BY expressions may refer to this query's source but never to a
+                    // surrounding query block, including through a nested scalar subquery.
+                    ValidateExpressionSchema(
+                        expression,
+                        row,
+                        context,
+                        cancellationToken,
+                        row with { Parent = null });
+                }
+                ValidateExpressionSchema(
+                    select.Having,
+                    row,
+                    context,
+                    cancellationToken,
+                    nestedGroupByScope);
                 foreach (var window in select.NamedWindows)
-                    ValidateWindowSchema(window.Specification, row, context, cancellationToken);
+                    ValidateWindowSchema(
+                        window.Specification,
+                        row,
+                        context,
+                        cancellationToken,
+                        nestedGroupByScope);
                 foreach (var term in ResolveOrderBy(select.OrderBy, select.Projections))
-                    ValidateExpressionSchema(term.Expression, row, context, cancellationToken);
-                ValidateExpressionSchema(select.Limit, row, context, cancellationToken);
-                ValidateExpressionSchema(select.Offset, row, context, cancellationToken);
+                    ValidateExpressionSchema(
+                        term.Expression,
+                        row,
+                        context,
+                        cancellationToken,
+                        nestedGroupByScope);
+                ValidateExpressionSchema(
+                    select.Limit,
+                    row,
+                    context,
+                    cancellationToken,
+                    nestedGroupByScope);
+                ValidateExpressionSchema(
+                    select.Offset,
+                    row,
+                    context,
+                    cancellationToken,
+                    nestedGroupByScope);
                 _ = GetColumnNames(select.Projections, outputColumns, rawOutputColumns);
                 return;
             case ValuesClause values:
                 foreach (var valueRow in values.Rows)
                 {
                     foreach (var expression in valueRow)
-                        ValidateExpressionSchema(expression, outerRow, context, cancellationToken);
+                        ValidateExpressionSchema(
+                            expression,
+                            outerRow,
+                            context,
+                            cancellationToken,
+                            groupByScope);
                 }
                 return;
             case CompoundSelectStatement compound:
                 foreach (var term in compound.Terms)
-                    ValidateQuerySchema(term, context, outerRow, cancellationToken);
-                ValidateExpressionSchema(compound.Limit, outerRow, context, cancellationToken);
-                ValidateExpressionSchema(compound.Offset, outerRow, context, cancellationToken);
+                    ValidateQuerySchema(term, context, outerRow, cancellationToken, groupByScope);
+                ValidateExpressionSchema(
+                    compound.Limit,
+                    outerRow,
+                    context,
+                    cancellationToken,
+                    groupByScope);
+                ValidateExpressionSchema(
+                    compound.Offset,
+                    outerRow,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case WithSelectStatement with:
                 ValidateWithQuerySchema(
@@ -5523,7 +5593,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     with.Query,
                     context,
                     outerRow,
-                    cancellationToken);
+                    cancellationToken,
+                    groupByScope);
                 return;
             default:
                 throw new EmbeddedSqlException($"Unsupported query type {statement.GetType().Name}.");
@@ -5534,16 +5605,27 @@ public sealed partial class EmbeddedDatabase : IDisposable
         WindowSpecification window,
         SourceRow? row,
         QueryContext context,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SourceRow? groupByScope)
     {
         foreach (var expression in window.PartitionBy)
-            ValidateExpressionSchema(expression, row, context, cancellationToken);
+            ValidateExpressionSchema(expression, row, context, cancellationToken, groupByScope);
         foreach (var term in window.OrderBy)
-            ValidateExpressionSchema(term.Expression, row, context, cancellationToken);
+            ValidateExpressionSchema(term.Expression, row, context, cancellationToken, groupByScope);
         if (window.Frame is { } frame)
         {
-            ValidateExpressionSchema(frame.Start.Offset, row, context, cancellationToken);
-            ValidateExpressionSchema(frame.End.Offset, row, context, cancellationToken);
+            ValidateExpressionSchema(
+                frame.Start.Offset,
+                row,
+                context,
+                cancellationToken,
+                groupByScope);
+            ValidateExpressionSchema(
+                frame.End.Offset,
+                row,
+                context,
+                cancellationToken,
+                groupByScope);
         }
     }
 
@@ -5552,7 +5634,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         QueryStatement query,
         QueryContext context,
         SourceRow? outerRow,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SourceRow? groupByScope = null)
     {
         var resolved = new Dictionary<string, SourceData>(
             context.CommonTableExpressions,
@@ -5568,7 +5651,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var descriptor = expression.Query is CompoundSelectStatement { Terms.Count: > 0 } compound
                 ? compound.Terms[0]
                 : expression.Query;
-            ValidateQuerySchema(descriptor, expressionContext, outerRow, cancellationToken);
+            ValidateQuerySchema(
+                descriptor,
+                expressionContext,
+                outerRow,
+                cancellationToken,
+                groupByScope);
             var columns = ResolveCommonTableExpressionColumns(
                 expression,
                 DescribeQuery(descriptor, expressionContext));
@@ -5579,7 +5667,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     expression.Query,
                     context with { CommonTableExpressions = resolved },
                     outerRow,
-                    cancellationToken);
+                    cancellationToken,
+                    groupByScope);
             }
         }
 
@@ -5587,14 +5676,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
             query,
             context with { CommonTableExpressions = resolved },
             outerRow,
-            cancellationToken);
+            cancellationToken,
+            groupByScope);
     }
 
     private void ValidateTableSourceSchema(
         TableSource? source,
         QueryContext context,
         SourceRow? outerRow,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SourceRow? groupByScope = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         switch (source)
@@ -5603,7 +5694,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return;
             case NamedTableSource named when TryGetView(context, named.Name, out var view):
                 var viewContext = EnterView(context, view.Name);
-                ValidateQuerySchema(view.Query, viewContext, outerRow, cancellationToken);
+                ValidateQuerySchema(
+                    view.Query,
+                    viewContext,
+                    outerRow,
+                    cancellationToken,
+                    groupByScope);
                 _ = ResolveViewColumns(view, viewContext);
                 return;
             case NamedTableSource named:
@@ -5611,13 +5707,28 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return;
             case TableValuedFunctionSource function:
                 foreach (var argument in function.Arguments)
-                    ValidateExpressionSchema(argument, outerRow, context, cancellationToken);
+                    ValidateExpressionSchema(
+                        argument,
+                        outerRow,
+                        context,
+                        cancellationToken,
+                        groupByScope);
                 return;
             case DerivedTableSource derived:
-                ValidateQuerySchema(derived.Query, context, outerRow, cancellationToken);
+                ValidateQuerySchema(
+                    derived.Query,
+                    context,
+                    outerRow,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case JoinTableSource join:
-                ValidateTableSourceSchema(join.Left, context, outerRow, cancellationToken);
+                ValidateTableSourceSchema(
+                    join.Left,
+                    context,
+                    outerRow,
+                    cancellationToken,
+                    groupByScope);
                 // Table-valued function arguments on the right side of a join may reference the
                 // preceding source (for example json_each(json_array(t.c))). Validate the right
                 // source against that left-side schema just as execution evaluates it per left row.
@@ -5629,13 +5740,23 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     leftColumns,
                     leftOutputColumns,
                     outerRow);
-                ValidateTableSourceSchema(join.Right, context, leftRow, cancellationToken);
+                ValidateTableSourceSchema(
+                    join.Right,
+                    context,
+                    leftRow,
+                    cancellationToken,
+                    groupByScope);
                 var columns = GetSourceColumns(join, context);
                 var outputColumns = GetOutputColumns(join, context);
                 // Reuse the query validation row so qualified rowid references on real
                 // tables (ON l.rowid = r.lid) resolve in the join condition too.
                 var row = CreateQuerySchemaValidationRow(join, context, columns, outputColumns, outerRow);
-                ValidateExpressionSchema(join.Condition, row, context, cancellationToken);
+                ValidateExpressionSchema(
+                    join.Condition,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 return;
             default:
                 throw new EmbeddedSqlException($"Unsupported table source {source.GetType().Name}.");
@@ -5647,6 +5768,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SourceRow? row,
         QueryContext context,
         CancellationToken cancellationToken)
+        => ValidateExpressionSchema(expression, row, context, cancellationToken, groupByScope: null);
+
+    private void ValidateExpressionSchema(
+        Expression? expression,
+        SourceRow? row,
+        QueryContext context,
+        CancellationToken cancellationToken,
+        SourceRow? groupByScope)
     {
         if (expression is null)
             return;
@@ -5659,11 +5788,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return;
             case RowValueExpression rowValue:
                 foreach (var value in rowValue.Values)
-                    ValidateExpressionSchema(value, row, context, cancellationToken);
+                    ValidateExpressionSchema(value, row, context, cancellationToken, groupByScope);
                 return;
             case ColumnExpression column:
                 {
                     var probe = row ?? new SourceRow([], []);
+                    if (groupByScope is not null
+                        && !groupByScope.TryGetValue(column, out _)
+                        && probe.TryGetValue(column, out _))
+                    {
+                        throw SourceRow.CreateUnresolvedColumnException(column);
+                    }
                     // TRUE/FALSE are not reserved words: they fall back to the integer literals
                     // 1/0 once the name fails to resolve (mirroring EvaluateColumn), so only an
                     // unresolvable name that is not a boolean keyword is a schema error here.
@@ -5673,73 +5808,178 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 }
             case FunctionExpression function:
                 foreach (var argument in function.Arguments)
-                    ValidateExpressionSchema(argument, row, context, cancellationToken);
-                ValidateExpressionSchema(function.Filter, row, context, cancellationToken);
+                    ValidateExpressionSchema(argument, row, context, cancellationToken, groupByScope);
+                ValidateExpressionSchema(
+                    function.Filter,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 if (function.Window is not null)
                 {
                     foreach (var partition in function.Window.PartitionBy)
-                        ValidateExpressionSchema(partition, row, context, cancellationToken);
+                        ValidateExpressionSchema(
+                            partition,
+                            row,
+                            context,
+                            cancellationToken,
+                            groupByScope);
                     foreach (var term in function.Window.OrderBy)
-                        ValidateExpressionSchema(term.Expression, row, context, cancellationToken);
+                        ValidateExpressionSchema(
+                            term.Expression,
+                            row,
+                            context,
+                            cancellationToken,
+                            groupByScope);
                     if (function.Window.Frame is { } frame)
                     {
-                        ValidateExpressionSchema(frame.Start.Offset, row, context, cancellationToken);
-                        ValidateExpressionSchema(frame.End.Offset, row, context, cancellationToken);
+                        ValidateExpressionSchema(
+                            frame.Start.Offset,
+                            row,
+                            context,
+                            cancellationToken,
+                            groupByScope);
+                        ValidateExpressionSchema(
+                            frame.End.Offset,
+                            row,
+                            context,
+                            cancellationToken,
+                            groupByScope);
                     }
                 }
                 return;
             case RaiseExpression raise:
                 return;
             case ScalarSubqueryExpression scalar:
-                ValidateQuerySchema(scalar.Query, context, row, cancellationToken);
+                ValidateQuerySchema(
+                    scalar.Query,
+                    context,
+                    row,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case ExistsExpression exists:
-                ValidateQuerySchema(exists.Query, context, row, cancellationToken);
+                ValidateQuerySchema(
+                    exists.Query,
+                    context,
+                    row,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case CollationExpression collation:
-                ValidateExpressionSchema(collation.Expression, row, context, cancellationToken);
+                ValidateExpressionSchema(
+                    collation.Expression,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case CastExpression cast:
-                ValidateExpressionSchema(cast.Expression, row, context, cancellationToken);
+                ValidateExpressionSchema(
+                    cast.Expression,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case CaseExpression @case:
-                ValidateExpressionSchema(@case.Operand, row, context, cancellationToken);
+                ValidateExpressionSchema(
+                    @case.Operand,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 foreach (var clause in @case.Clauses)
                 {
-                    ValidateExpressionSchema(clause.When, row, context, cancellationToken);
-                    ValidateExpressionSchema(clause.Then, row, context, cancellationToken);
+                    ValidateExpressionSchema(
+                        clause.When,
+                        row,
+                        context,
+                        cancellationToken,
+                        groupByScope);
+                    ValidateExpressionSchema(
+                        clause.Then,
+                        row,
+                        context,
+                        cancellationToken,
+                        groupByScope);
                 }
-                ValidateExpressionSchema(@case.Else, row, context, cancellationToken);
+                ValidateExpressionSchema(
+                    @case.Else,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case LikeExpression like:
-                ValidateExpressionSchema(like.Value, row, context, cancellationToken);
-                ValidateExpressionSchema(like.Pattern, row, context, cancellationToken);
-                ValidateExpressionSchema(like.Escape, row, context, cancellationToken);
+                ValidateExpressionSchema(like.Value, row, context, cancellationToken, groupByScope);
+                ValidateExpressionSchema(like.Pattern, row, context, cancellationToken, groupByScope);
+                ValidateExpressionSchema(like.Escape, row, context, cancellationToken, groupByScope);
                 return;
             case GlobExpression glob:
-                ValidateExpressionSchema(glob.Value, row, context, cancellationToken);
-                ValidateExpressionSchema(glob.Pattern, row, context, cancellationToken);
+                ValidateExpressionSchema(glob.Value, row, context, cancellationToken, groupByScope);
+                ValidateExpressionSchema(glob.Pattern, row, context, cancellationToken, groupByScope);
                 return;
             case InExpression @in:
-                ValidateExpressionSchema(@in.Value, row, context, cancellationToken);
+                ValidateExpressionSchema(@in.Value, row, context, cancellationToken, groupByScope);
                 foreach (var value in @in.Values)
-                    ValidateExpressionSchema(value, row, context, cancellationToken);
+                    ValidateExpressionSchema(value, row, context, cancellationToken, groupByScope);
                 return;
             case InSubqueryExpression inSubquery:
-                ValidateExpressionSchema(inSubquery.Value, row, context, cancellationToken);
-                ValidateQuerySchema(inSubquery.Query, context, row, cancellationToken);
+                ValidateExpressionSchema(
+                    inSubquery.Value,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
+                ValidateQuerySchema(
+                    inSubquery.Query,
+                    context,
+                    row,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case BetweenExpression between:
-                ValidateExpressionSchema(between.Value, row, context, cancellationToken);
-                ValidateExpressionSchema(between.Lower, row, context, cancellationToken);
-                ValidateExpressionSchema(between.Upper, row, context, cancellationToken);
+                ValidateExpressionSchema(
+                    between.Value,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
+                ValidateExpressionSchema(
+                    between.Lower,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
+                ValidateExpressionSchema(
+                    between.Upper,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case UnaryExpression unary:
-                ValidateExpressionSchema(unary.Operand, row, context, cancellationToken);
+                ValidateExpressionSchema(
+                    unary.Operand,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 return;
             case BinaryExpression binary:
-                ValidateExpressionSchema(binary.Left, row, context, cancellationToken);
-                ValidateExpressionSchema(binary.Right, row, context, cancellationToken);
+                ValidateExpressionSchema(
+                    binary.Left,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
+                ValidateExpressionSchema(
+                    binary.Right,
+                    row,
+                    context,
+                    cancellationToken,
+                    groupByScope);
                 return;
             default:
                 throw new EmbeddedSqlException($"Unsupported expression type {expression.GetType().Name}.");

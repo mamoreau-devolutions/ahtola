@@ -79,11 +79,6 @@ select/memory.sqltest::collate-compound-7 | expected 2 row(s), got 2 row(s); row
 select/memory.sqltest::collate-compound-13 | expected 1 row(s), got 1 row(s); row 0 expected 'TEST' but was 'Test'
 select/memory.sqltest::collate-compound-14 | expected 2 row(s), got 2 row(s); row 0 expected 'ABC' but was 'abc'
 snapshot_tests/analyze/stat1_rows.sqltest::analyze-indexed-table-does-not-insert-null-stat1-row | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
-subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-in-subquery | expected an error but the statement succeeded
-subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-function-call | expected an error but the statement succeeded
-subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-oid | expected an error but the statement succeeded
-subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-underscore | expected an error but the statement succeeded
-subquery/memory.sqltest::subquery-correlated-outer-ref-in-nested-group-by-subquery | expected an error but the statement succeeded
 temp_tables.sqltest::temp-table-join-can-distinguish-main-and-temp | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 temp_tables_mvcc.sqltest::pragma-temp-journal-mode-mvcc-is-ignored | expected 2 row(s), got 2 row(s); row 0 expected 'wal' but was 'memory'
 temp_tables_mvcc.sqltest::temp-autoincrement-is-allowed-when-main-db-is-mvcc | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'wal'
