@@ -365,7 +365,7 @@ public sealed class ManagedConstraintSemanticsTests
                     connection,
                     "ALTER TABLE values_table ADD COLUMN defaulted INTEGER DEFAULT (missing);");
                 invalidDefault.Should().Throw<EmbeddedSqlException>()
-                    .WithMessage("default value of column is not constant: missing");
+                    .WithMessage("default value of column [defaulted] is not constant");
             }
 
             using (var reopened = EmbeddedDatabase.OpenFile(path))

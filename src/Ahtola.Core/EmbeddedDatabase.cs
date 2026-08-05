@@ -40162,7 +40162,7 @@ internal sealed class EmbeddedTable
         foreach (var column in ColumnDefinitions)
         {
             if (column.DefaultExpression is not null)
-                ValidateConstraintExpression(column.DefaultExpression, allowColumns: false, "default value");
+                ValidateConstraintExpression(column.DefaultExpression, allowColumns: false, "default value", definingColumn: column.Name);
             foreach (var check in column.CheckConstraints)
                 ValidateConstraintExpression(check.Expression, allowColumns: true, "CHECK constraint");
         }
@@ -40171,7 +40171,7 @@ internal sealed class EmbeddedTable
             ValidateConstraintExpression(check.Expression, allowColumns: true, "CHECK constraint");
     }
 
-    private void ValidateConstraintExpression(Expression expression, bool allowColumns, string context)
+    private void ValidateConstraintExpression(Expression expression, bool allowColumns, string context, string? definingColumn = null)
     {
         switch (expression)
         {
@@ -40185,7 +40185,7 @@ internal sealed class EmbeddedTable
                 if (column.BooleanKeyword is not null && (!allowColumns || !IsConstraintColumn(column)))
                     return;
                 if (!allowColumns)
-                    throw new EmbeddedSqlException($"default value of column is not constant: {column.Name}");
+                    throw new EmbeddedSqlException($"default value of column [{definingColumn}] is not constant");
                 if (!IsConstraintColumn(column))
                     throw new EmbeddedSqlException($"no such column: {column.Name}");
                 return;
@@ -40193,7 +40193,7 @@ internal sealed class EmbeddedTable
                 throw new EmbeddedSqlException($"parameters are prohibited in {context}s");
             case RowValueExpression rowValue:
                 foreach (var value in rowValue.Values)
-                    ValidateConstraintExpression(value, allowColumns, context);
+                    ValidateConstraintExpression(value, allowColumns, context, definingColumn);
                 return;
             case ScalarSubqueryExpression or ExistsExpression or InSubqueryExpression:
                 throw new EmbeddedSqlException($"subqueries are prohibited in {context}s");
@@ -40220,51 +40220,51 @@ internal sealed class EmbeddedTable
                 }
 
                 foreach (var argument in function.Arguments)
-                    ValidateConstraintExpression(argument, allowColumns, context);
+                    ValidateConstraintExpression(argument, allowColumns, context, definingColumn);
                 return;
             case CollationExpression collation:
-                ValidateConstraintExpression(collation.Expression, allowColumns, context);
+                ValidateConstraintExpression(collation.Expression, allowColumns, context, definingColumn);
                 return;
             case CastExpression cast:
-                ValidateConstraintExpression(cast.Expression, allowColumns, context);
+                ValidateConstraintExpression(cast.Expression, allowColumns, context, definingColumn);
                 return;
             case CaseExpression @case:
                 if (@case.Operand is not null)
-                    ValidateConstraintExpression(@case.Operand, allowColumns, context);
+                    ValidateConstraintExpression(@case.Operand, allowColumns, context, definingColumn);
                 foreach (var clause in @case.Clauses)
                 {
-                    ValidateConstraintExpression(clause.When, allowColumns, context);
-                    ValidateConstraintExpression(clause.Then, allowColumns, context);
+                    ValidateConstraintExpression(clause.When, allowColumns, context, definingColumn);
+                    ValidateConstraintExpression(clause.Then, allowColumns, context, definingColumn);
                 }
                 if (@case.Else is not null)
-                    ValidateConstraintExpression(@case.Else, allowColumns, context);
+                    ValidateConstraintExpression(@case.Else, allowColumns, context, definingColumn);
                 return;
             case LikeExpression like:
-                ValidateConstraintExpression(like.Value, allowColumns, context);
-                ValidateConstraintExpression(like.Pattern, allowColumns, context);
+                ValidateConstraintExpression(like.Value, allowColumns, context, definingColumn);
+                ValidateConstraintExpression(like.Pattern, allowColumns, context, definingColumn);
                 if (like.Escape is not null)
-                    ValidateConstraintExpression(like.Escape, allowColumns, context);
+                    ValidateConstraintExpression(like.Escape, allowColumns, context, definingColumn);
                 return;
             case GlobExpression glob:
-                ValidateConstraintExpression(glob.Value, allowColumns, context);
-                ValidateConstraintExpression(glob.Pattern, allowColumns, context);
+                ValidateConstraintExpression(glob.Value, allowColumns, context, definingColumn);
+                ValidateConstraintExpression(glob.Pattern, allowColumns, context, definingColumn);
                 return;
             case InExpression @in:
-                ValidateConstraintExpression(@in.Value, allowColumns, context);
+                ValidateConstraintExpression(@in.Value, allowColumns, context, definingColumn);
                 foreach (var value in @in.Values)
-                    ValidateConstraintExpression(value, allowColumns, context);
+                    ValidateConstraintExpression(value, allowColumns, context, definingColumn);
                 return;
             case BetweenExpression between:
-                ValidateConstraintExpression(between.Value, allowColumns, context);
-                ValidateConstraintExpression(between.Lower, allowColumns, context);
-                ValidateConstraintExpression(between.Upper, allowColumns, context);
+                ValidateConstraintExpression(between.Value, allowColumns, context, definingColumn);
+                ValidateConstraintExpression(between.Lower, allowColumns, context, definingColumn);
+                ValidateConstraintExpression(between.Upper, allowColumns, context, definingColumn);
                 return;
             case UnaryExpression unary:
-                ValidateConstraintExpression(unary.Operand, allowColumns, context);
+                ValidateConstraintExpression(unary.Operand, allowColumns, context, definingColumn);
                 return;
             case BinaryExpression binary:
-                ValidateConstraintExpression(binary.Left, allowColumns, context);
-                ValidateConstraintExpression(binary.Right, allowColumns, context);
+                ValidateConstraintExpression(binary.Left, allowColumns, context, definingColumn);
+                ValidateConstraintExpression(binary.Right, allowColumns, context, definingColumn);
                 return;
             default:
                 throw new EmbeddedSqlException($"expression is not allowed in a {context}");

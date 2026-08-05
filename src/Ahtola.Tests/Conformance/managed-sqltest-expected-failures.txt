@@ -51,7 +51,6 @@ cte.sqltest::cte-unreferenced-column-mismatch-update | expected success but got 
 cte.sqltest::cte-unreferenced-column-mismatch-select | expected success but got error: table cte has 3 values for 1 columns
 cte.sqltest::cte-unreferenced-column-mismatch-multi-cte | expected success but got error: table cte_bad has 3 values for 1 columns
 cte_expressions.sqltest::cte-schema-qualified-table-reference | expected success but got error: circular reference: t
-default_value.sqltest::default-value-column-name | error 'default value of column is not constant: x' does not match pattern 'default value of column \[y\] is not constant'
 delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'memory'
 detach/transaction.sqltest::detach-fails-with-active-read-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
 detach/transaction.sqltest::detach-fails-with-active-write-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'

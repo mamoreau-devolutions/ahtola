@@ -116,7 +116,7 @@ public sealed class ManagedDefaultValuesTests
 
         create.Should()
             .Throw<EmbeddedSqlException>()
-            .WithMessage("default value of column is not constant: identifier");
+            .WithMessage("default value of column [value] is not constant");
     }
 
     private static void Execute(EmbeddedConnection connection, string sql)

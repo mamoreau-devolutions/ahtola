@@ -14,14 +14,14 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 210,
+    "current_conformance_expected_failures": 209,
     "last_reconciled": "2026-08-04",
-    "entry_count": 190,
+    "entry_count": 191,
     "counts": {
       "by_layer": {
         "vdbe": 36,
         "compilation": 52,
-        "parser": 24,
+        "parser": 25,
         "functions": 26,
         "storage": 20,
         "mvcc": 14,
@@ -29,25 +29,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 54,
+        "divergent": 55,
         "partial": 27,
         "extension": 8,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 99,
+        "s2-capability": 100,
         "s4-intentional": 33,
         "s1-correctness": 24
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 80
+        "S": 81
       },
       "by_status": {
         "open": 141,
-        "closed": 49
+        "closed": 50
       }
     },
     "schema": {
@@ -1499,12 +1499,9 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
-        "join/memory.sqltest::join-3-1",
-        "join/memory.sqltest::join-3-2",
-        "trigger.sqltest::trigger-raise-shorthand",
-        "default_value.sqltest::default-value-column-name"
+        "trigger.sqltest::trigger-raise-shorthand"
       ],
-      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint. Cleared 2026-08-06 by Wave F2.10 Batch 4 / compile-select-prepare-time-column-resolution: ambiguous-self-join and ambiguous-column-error-message-format. Cleared 2026-08-07 by Wave F2.10 Batch 5 / compile-view-create-validation-deferred-to-query-time: view-mutual-circle-detection; view-rejects-aggregate-order-by reclassified to compile-ordered-aggregates-intentional-extension. Cleared 2026-08-04: NATURAL-join wording aligned to SQLite/Turso 'a NATURAL join may not have an ON or USING clause' in SqlParser.cs, removing join-3-1 and join-3-2. Remaining open links: trigger-raise-shorthand, default-value-column-name.)",
+      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint. Cleared 2026-08-06 by Wave F2.10 Batch 4 / compile-select-prepare-time-column-resolution: ambiguous-self-join and ambiguous-column-error-message-format. Cleared 2026-08-07 by Wave F2.10 Batch 5 / compile-view-create-validation-deferred-to-query-time: view-mutual-circle-detection; view-rejects-aggregate-order-by reclassified to compile-ordered-aggregates-intentional-extension. Cleared 2026-08-04: NATURAL-join wording aligned to SQLite/Turso 'a NATURAL join may not have an ON or USING clause' in SqlParser.cs, removing join-3-1 and join-3-2. Cleared 2026-08-04: default-value non-constant wording aligned to 'default value of column [{defining-column}] is not constant' in EmbeddedDatabase.cs::ValidateConstraintExpression, removing default-value-column-name (tracked separately under parser-default-value-column-name-diagnostic). Remaining open link: trigger-raise-shorthand.)",
       "status": "open"
     },
     {
@@ -1738,6 +1735,20 @@
         "insert.sqltest::insert-column-count-mismatch-select"
       ],
       "notes": "Ahtola emitted a generic \"table has a different number of columns\" for INSERT VALUES/SELECT and trigger-row insertion when the supplied value count did not match the target column count, which did not match the SQLite/Turso pattern \"table {name} has {N} columns but {M} values were supplied\". The conformance runner regex-matches error messages (unanchored, case-insensitive), so only the wording was wrong. Fixed 2026-08-04: all three insertion sites (InsertValues, BuildInsertRow for INSERT...SELECT, and the trigger-row insertion loop in EmbeddedDatabase.Triggers.cs) now emit the SQLite-compatible column-count message with the table name, target column count, and supplied value count. The four tracked insert cases removed from the expected-failure baseline.",
+      "status": "closed"
+    },
+    {
+      "id": "parser-default-value-column-name-diagnostic",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "SQLite expr.c \"default value of column [%s] is not constant\" (defining column name in square brackets)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateConstraintExpression (ValidateSchemaExpressions passes definingColumn)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "default_value.sqltest::default-value-column-name"
+      ],
+      "notes": "Ahtola emitted \"default value of column is not constant: {referenced-name}\" (colon separator, naming the offending referenced column) instead of the SQLite/Turso pattern \"default value of column [{defining-column}] is not constant\" (square brackets around the DEFINING column with the DEFAULT clause). The conformance runner regex-matches messages (unanchored, case-insensitive). Fixed 2026-08-04: ValidateConstraintExpression now takes a definingColumn parameter threaded from ValidateSchemaExpressions (which has the defining column name), and the non-constant error emits the defining column in brackets. Updated the two managed unit tests (ManagedConstraintSemanticsTests, ManagedDefaultValuesTests) that asserted the old colon-form message. default-value-column-name removed from the expected-failure baseline (210 -> 209 entries).",
       "status": "closed"
     },
     {
