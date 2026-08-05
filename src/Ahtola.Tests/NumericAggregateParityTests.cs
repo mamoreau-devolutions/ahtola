@@ -52,12 +52,34 @@ public sealed class NumericAggregateParityTests
     [TestCase("WITH t(x) AS (VALUES('abc'),(1)) SELECT typeof(sum(x)), sum(x) FROM t")]
     public void EmptyAndNonNumericInputsMatchSqlite(string sql) => AssertMatchesSqlite(sql);
 
-    // Only sum() reports the overflow flag. avg() and total() ignore it entirely, and a later real
-    // input clears it, so the third case succeeds where the second fails.
-    [TestCase("WITH t(x) AS (VALUES(9223372036854775807),(1),(-1.0)) SELECT typeof(sum(x)), sum(x) FROM t")]
+    // total() and avg() promote to a compensated real accumulator after integer overflow.
     [TestCase("WITH t(x) AS (VALUES(9223372036854775807),(1)) SELECT typeof(total(x)), total(x) FROM t")]
     [TestCase("WITH t(x) AS (VALUES(9223372036854775807),(1)) SELECT typeof(avg(x)), avg(x) FROM t")]
-    public void OverflowFlagOnlyAffectsSumMatchingSqlite(string sql) => AssertMatchesSqlite(sql);
+    public void TotalAndAveragePromoteAfterIntegerOverflowLikeSqlite(string sql) => AssertMatchesSqlite(sql);
+
+    // Turso's Numeric::Integer AggStep fails immediately on overflow. A later REAL cannot reach
+    // sum() to turn the accumulator approximate, unlike stock SQLite's deferred overflow flag.
+    [Test]
+    public void SumFailsBeforeLaterRealInputLikeTurso()
+    {
+        const string sql =
+            "WITH t(x) AS (VALUES(9223372036854775807),(1),(-1.0)) "
+            + "SELECT typeof(sum(x)), sum(x) FROM t";
+
+        RunManaged(sql).Should().StartWith("ERR:").And.Contain("integer overflow");
+    }
+
+    // Turso's Text conversion path is deliberately distinct from Numeric::Integer: a text integer
+    // promotes on overflow and sum() returns a real result rather than raising the integer error.
+    [Test]
+    public void TextIntegerOverflowPromotesSumLikeTurso()
+    {
+        const string sql =
+            "WITH t(x) AS (VALUES('9223372036854775807'),('1')) "
+            + "SELECT typeof(sum(x)), sum(x) FROM t";
+
+        RunManaged(sql).Should().StartWith("real|");
+    }
 
     // The flag is sticky across later integer inputs, so the third case still fails even though the
     // mathematical total fits in 64 bits.

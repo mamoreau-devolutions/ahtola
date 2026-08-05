@@ -13,7 +13,7 @@ internal static class SqliteBuiltinFunctions
     private static readonly HashSet<string> Names = new(StringComparer.Ordinal)
     {
         // Built-in aggregates (IsBuiltInAggregate) and managed percentile aggregates.
-        "COUNT", "SUM", "TOTAL", "AVG", "MIN", "MAX", "GROUP_CONCAT", "STRING_AGG",
+        "COUNT", "SUM", "TOTAL", "AVG", "MIN", "MAX", "GROUP_CONCAT", "STRING_AGG", "ARRAY_AGG",
         "JSON_GROUP_ARRAY", "JSON_GROUP_OBJECT", "JSONB_GROUP_ARRAY", "JSONB_GROUP_OBJECT",
         "MEDIAN", "PERCENTILE", "PERCENTILE_CONT", "PERCENTILE_DISC",
         // Built-in window functions (ValidateWindowFunction).

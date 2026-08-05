@@ -15,6 +15,29 @@ public sealed partial class EmbeddedDatabase
         return EvaluateGroupConcat(function, rows, parameters, context);
     }
 
+    private SqlValue EvaluateArrayAgg(
+        FunctionExpression function,
+        IReadOnlyList<SourceRow> rows,
+        SqlValue[] parameters,
+        QueryContext context)
+    {
+        RequireAggregateArgumentCount("array_agg", function.Arguments, 1);
+        if (rows.Count == 0)
+            return SqlValue.Null;
+
+        // Turso's AggFunc::ArrayAgg builds an ImmutableRecord from every input value, including
+        // NULLs. ImmutableRecord uses SQLite's record payload format, so the blob remains usable
+        // by Turso's array functions and other record-aware consumers.
+        var values = new SqlValue[rows.Count];
+        for (var index = 0; index < rows.Count; index++)
+        {
+            context.CheckInterrupt();
+            values[index] = Evaluate(function.Arguments[0], parameters, rows[index], context);
+        }
+
+        return SqlValue.Blob(Storage.SqliteRecordCodec.Encode(values));
+    }
+
     private SqlValue EvaluateJsonGroupArray(
         FunctionExpression function,
         IReadOnlyList<SourceRow> rows,

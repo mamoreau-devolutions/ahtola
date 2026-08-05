@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 128,
-        "closed": 78
+        "open": 126,
+        "closed": 80
       }
     },
     "schema": {
@@ -511,13 +511,13 @@
       "id": "vdbe-aggregate-overflow-semantics",
       "layer": "vdbe",
       "kind": "divergent",
-      "turso_ref": "turso-src/core/vdbe/execute.rs op_agg_step (line ~6647): Sum/Avg/Total overflow and large-float accumulation semantics",
-      "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs AggStep/AggFinal arms (lines ~660-700)",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::{apply_kbn_step,apply_kbn_step_int,update_agg_payload,finalize_agg_payload}; core/vdbe/execute.rs::handle_text_sum",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::{NumericAggregateAccumulator,EvaluateSum,BuildAccumulatorAggregate}; src/Ahtola.Core/Execution/ResumableStatement.cs::{AggStepInstruction,AggFinalizeInstruction}",
       "severity": "s1-correctness",
       "effort": "S",
       "conformance_links": [],
-      "notes": "SUM/TOTAL/AVG over very large REAL values: Ahtola diverges from SQLite/Turso on infinity/overflow results for float aggregates. Verify Kahan/compensated summation and int->real promotion behavior against op_agg_step. (Previously linked keys cleared by earlier wave work: sum-large-float-infinity, total-large-float-infinity, avg-large-float-infinity.)",
-      "status": "open"
+      "notes": "Closed 2026-08-08. SUM/TOTAL/AVG now share a Kahan-Babuska-Neumaier accumulator in evaluator and compiled VDBE paths. Numeric::Integer SUM overflow faults from AggStep before later source rows execute; TOTAL and AVG promote to compensated REAL accumulation. The separate text-conversion path still promotes a text integer overflow, and NaN/infinite cancellation reaches SQL NULL. NumericAggregateParityTests covers compensated precision, infinities, empty inputs, and text/numeric coercion; TursoAggregateStepParityTests proves overflow timing with a side-effecting scalar. No active expected-failure key was linked.",
+      "status": "closed"
     },
     {
       "id": "compile-no-cost-based-join-ordering",
@@ -1634,13 +1634,13 @@
       "id": "func-array-agg-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::AggFunc::ArrayAgg (\"array_agg\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::AggFunc::ArrayAgg; turso-src/core/vdbe/execute.rs::{init_agg_payload,update_agg_payload,finalize_agg_payload}; turso-src/core/types.rs::ImmutableRecord::from_values",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs::EvaluateArrayAgg; src/Ahtola.Core/EmbeddedDatabase.cs::{IsBuiltInAggregate,EvaluateBuiltInAggregate,ValidateWindowFunction,IsAggregateWindowFunction}; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Turso registers array_agg as a built-in aggregate (turso-src/core/function.rs line ~1611). Not present in SqliteBuiltinFunctions.Names or EmbeddedDatabase.AggregateFunctions.cs. Not stock SQLite (Postgres-style), so low urgency for SQLite-compat conformance, but is a real capability gap vs. Turso's registry. No conformance corpus hits found, so effort/impact is small; grouped separately from JSONB because it does not depend on the Jsonb value type.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. array_agg() now preserves every input (including NULL) in Turso's ImmutableRecord/SQLite record BLOB format and returns NULL for empty input. It is registered through ordinary aggregate, window aggregate, and persisted-schema paths, preserving FILTER and DISTINCT behavior supplied by the shared aggregate machinery. TursoArrayAggParityTests cover mixed values, record decoding, empty input, modifiers, window frames, persisted views, and arity diagnostics. No vendored sqltest case covers this Turso extension.",
+      "status": "closed"
     },
     {
       "id": "func-array-postgres-family",

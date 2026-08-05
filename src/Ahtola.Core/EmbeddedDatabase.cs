@@ -17200,6 +17200,23 @@ public sealed partial class EmbeddedDatabase : IDisposable
         QueryContext context,
         SourceRow? outerRow)
     {
+        if (function.Name is "SUM" or "TOTAL" or "AVG" && function.Arguments.Count == 1)
+        {
+            return new VdbeAggregate
+            {
+                Name = function.Name.ToLowerInvariant(),
+                CreateContext = () => new NumericAggregateAccumulator(
+                    forceReal: function.Name == "TOTAL",
+                    average: function.Name == "AVG"),
+                Accumulate = static (contextObject, arguments) =>
+                {
+                    ((NumericAggregateAccumulator)contextObject!).Accumulate(arguments[0]);
+                    return contextObject;
+                },
+                Finalize = static contextObject => ((NumericAggregateAccumulator)contextObject!).Finalize(),
+            };
+        }
+
         return new VdbeAggregate
         {
             Name = function.Name.ToLowerInvariant(),
@@ -27784,7 +27801,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             "GROUP_CONCAT" => function.Arguments.Count is 1 or 2,
             // Arity is validated during evaluation so a wrong-argument-count call reports
             // SQLite's arity diagnostic instead of "no such function".
-            "STRING_AGG" or "JSON_GROUP_ARRAY" or "JSON_GROUP_OBJECT" or "JSONB_GROUP_ARRAY" or "JSONB_GROUP_OBJECT" => true,
+            "STRING_AGG" or "ARRAY_AGG" or "JSON_GROUP_ARRAY" or "JSON_GROUP_OBJECT" or "JSONB_GROUP_ARRAY" or "JSONB_GROUP_OBJECT" => true,
             _ => false,
         };
     }
@@ -28135,6 +28152,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             "MAX" => EvaluateMinMax(function, rows, parameters, context, maximum: true),
             "GROUP_CONCAT" => EvaluateGroupConcat(function, rows, parameters, context),
             "STRING_AGG" => EvaluateStringAgg(function, rows, parameters, context),
+            "ARRAY_AGG" => EvaluateArrayAgg(function, rows, parameters, context),
             "JSON_GROUP_ARRAY" => EvaluateJsonGroupArray(function, rows, parameters, context),
             "JSON_GROUP_OBJECT" => EvaluateJsonGroupObject(function, rows, parameters, context),
             "JSONB_GROUP_ARRAY" => EvaluateJsonGroupArray(function, rows, parameters, context, binary: true),
@@ -28153,85 +28171,95 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         RequireAggregateArgumentCount(function.Name.ToLowerInvariant(), function.Arguments, 1);
 
-        // SQLite's SumCtx keeps an exact 64-bit accumulator for as long as every input is an
-        // integer, and only switches to the Kahan-Babuska-Neumaier compensated double
-        // accumulator when a non-integer arrives or the integer sum overflows. avg() and total()
-        // share that accumulator, so avg(9223372036854775807, -9223372036854775806) is 0.5 and
-        // not the 0.0 that double accumulation produces.
-        var integerTotal = 0L;
-        var realTotal = 0d;
-        var realError = 0d;
-        var approximate = false;
-        var overflowed = false;
-        var count = 0L;
+        var accumulator = new NumericAggregateAccumulator(forceReal, average);
         foreach (var row in rows)
         {
             context.CheckInterrupt();
-            var value = Evaluate(function.Arguments[0], parameters, row, context);
-            if (value.Kind == SqlValueKind.Null)
-                continue;
+            accumulator.Accumulate(Evaluate(function.Arguments[0], parameters, row, context));
+        }
 
-            // SQLite accumulates in integers only while every value is exactly an integer
-            // (sqlite3_value_numeric_type). Anything else - a real, or text such as '12abc' that
-            // merely starts with a number - switches to floating point via sqlite3_value_double.
+        return accumulator.Finalize();
+    }
+
+    private sealed class NumericAggregateAccumulator
+    {
+        private readonly bool _forceReal;
+        private readonly bool _average;
+        private long _integerTotal;
+        private double _realTotal;
+        private double _realError;
+        private bool _approximate;
+        private long _count;
+
+        internal NumericAggregateAccumulator(bool forceReal, bool average)
+        {
+            _forceReal = forceReal;
+            _average = average;
+        }
+
+        internal void Accumulate(SqlValue value)
+        {
+            if (value.Kind == SqlValueKind.Null)
+                return;
+
+            // Turso retains exact integer accumulation where possible. A Numeric::Integer
+            // overflow fails at AggStep, while text that parses as an integer promotes through
+            // its separate text conversion path instead.
             var exact = ApplyComparisonNumericAffinity(value);
-            count++;
+            _count++;
             if (exact.Kind != SqlValueKind.Integer)
             {
                 var real = exact.Kind == SqlValueKind.Real
                     ? AsReal(exact)
                     : AsReal(ApplyNumericAffinity(value));
-                if (!approximate)
-                {
-                    KahanBabuskaNeumaierInit(integerTotal, out realTotal, out realError);
-                    approximate = true;
-                }
-                else
-                {
-                    // A real input clears a previous integer overflow, exactly as sumStep does:
-                    // the running total is already inexact, so the overflow no longer matters.
-                    overflowed = false;
-                }
-
-                KahanBabuskaNeumaierStep(real, ref realTotal, ref realError);
-                continue;
+                PromoteToReal();
+                KahanBabuskaNeumaierStep(real, ref _realTotal, ref _realError);
+                return;
             }
 
             var addend = exact.AsInteger();
-            if (!approximate)
+            if (!_approximate)
             {
-                var candidate = unchecked(integerTotal + addend);
-                if (((integerTotal ^ candidate) & (addend ^ candidate)) >= 0)
+                var candidate = unchecked(_integerTotal + addend);
+                if (((_integerTotal ^ candidate) & (addend ^ candidate)) >= 0)
                 {
-                    integerTotal = candidate;
-                    continue;
+                    _integerTotal = candidate;
+                    return;
                 }
 
-                overflowed = true;
-                KahanBabuskaNeumaierInit(integerTotal, out realTotal, out realError);
-                approximate = true;
+                if (value.Kind == SqlValueKind.Integer && !_forceReal && !_average)
+                    throw new EmbeddedSqlException("integer overflow");
+
+                PromoteToReal();
             }
 
-            KahanBabuskaNeumaierStepInt64(addend, ref realTotal, ref realError);
+            KahanBabuskaNeumaierStepInt64(addend, ref _realTotal, ref _realError);
         }
 
-        var accumulated = approximate
-            ? (double.IsNaN(realError) ? realTotal : realTotal + realError)
-            : integerTotal;
+        internal SqlValue Finalize()
+        {
+            var accumulated = _approximate
+                ? (double.IsNaN(_realError) ? _realTotal : _realTotal + _realError)
+                : _integerTotal;
 
-        if (average)
-            return count == 0 ? SqlValue.Null : SqlValue.Real(accumulated / count);
-        if (forceReal)
-            return SqlValue.Real(count == 0 ? 0 : accumulated);
-        if (count == 0)
-            return SqlValue.Null;
+            if (_average)
+                return _count == 0 ? SqlValue.Null : SqlValue.Real(accumulated / _count);
+            if (_forceReal)
+                return SqlValue.Real(_count == 0 ? 0 : accumulated);
+            if (_count == 0)
+                return SqlValue.Null;
 
-        // Only sum() reports the overflow. avg() and total() are documented to return a real, so
-        // sqlite3's avgFinalize and totalFinalize ignore the flag entirely.
-        if (overflowed)
-            throw new EmbeddedSqlException("integer overflow");
+            return _approximate ? SqlValue.Real(accumulated) : SqlValue.Integer(_integerTotal);
+        }
 
-        return approximate ? SqlValue.Real(accumulated) : SqlValue.Integer(integerTotal);
+        private void PromoteToReal()
+        {
+            if (_approximate)
+                return;
+
+            KahanBabuskaNeumaierInit(_integerTotal, out _realTotal, out _realError);
+            _approximate = true;
+        }
     }
 
     /// <summary>Seeds the compensated accumulator from an exact 64-bit running total.</summary>
@@ -31312,6 +31340,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 if (function.Arguments.Count is < 1 or > 2 || function.CountStar)
                     ThrowWrongWindowArgumentCount(function);
                 break;
+            case "ARRAY_AGG":
+                RequireWindowArgumentCount(function, 1);
+                break;
             case "STRING_AGG":
             case "JSON_GROUP_OBJECT":
             case "JSONB_GROUP_OBJECT":
@@ -31465,7 +31496,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         var name = function.Name.ToUpperInvariant();
         return name is "COUNT" or "SUM" or "TOTAL" or "AVG" or "MIN" or "MAX" or "GROUP_CONCAT"
-            or "STRING_AGG" or "JSON_GROUP_ARRAY" or "JSON_GROUP_OBJECT" or "JSONB_GROUP_ARRAY" or "JSONB_GROUP_OBJECT"
+            or "STRING_AGG" or "ARRAY_AGG" or "JSON_GROUP_ARRAY" or "JSON_GROUP_OBJECT" or "JSONB_GROUP_ARRAY" or "JSONB_GROUP_OBJECT"
             || TryGetAggregateFunction(function.Name, function.Arguments.Count, out _);
     }
 
