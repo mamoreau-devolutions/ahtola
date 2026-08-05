@@ -28,11 +28,11 @@
         "sync": 18
       },
       "by_kind": {
-        "missing": 99,
+        "missing": 98,
         "divergent": 68,
         "partial": 27,
         "extension": 8,
-        "parity": 2
+        "parity": 3
       },
       "by_severity": {
         "s3-perf": 34,
@@ -46,8 +46,8 @@
         "S": 93
       },
       "by_status": {
-        "open": 137,
-        "closed": 67
+        "open": 136,
+        "closed": 68
       }
     },
     "schema": {
@@ -378,16 +378,14 @@
     {
       "id": "vdbe-checkpoint-opcode",
       "layer": "vdbe",
-      "kind": "missing",
+      "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/execute.rs::op_checkpoint (line 563: PASSIVE/FULL/RESTART/TRUNCATE modes)",
-      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalWriterCheckpointCoordinator.cs (internal checkpoint machinery; no SQL/opcode entry point)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecutePragmaWalCheckpoint",
       "severity": "s2-capability",
       "effort": "S",
-      "conformance_links": [
-        "temp_tables.sqltest::pragma-temp-wal-checkpoint-without-temp-db-matches-sqlite"
-      ],
-      "notes": "Checkpoint coordination exists internally (storage layer) but there is no Checkpoint opcode, so `PRAGMA wal_checkpoint(...)` has no execution path — directly causes the three wal_checkpoint conformance failures (stacked on the parser-layer pragma catch-all gap).",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. ExecutePragmaWalCheckpoint accepts PASSIVE/FULL/RESTART/TRUNCATE and returns the SQLite/Turso busy, log, and checkpointed row shape. The managed engine commits inline, so main checkpoints report 0|0|0; temp has no WAL and correctly reports 0|-1|-1. The temp-schema corpus case passes. This is behavioral parity through the evaluator path rather than a separate VDBE Checkpoint instruction.",
+      "status": "closed"
     },
     {
       "id": "vdbe-integrity-check-opcode",
