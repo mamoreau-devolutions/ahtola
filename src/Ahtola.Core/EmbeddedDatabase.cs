@@ -5133,6 +5133,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         var values = Enumerable.Repeat(SqlValue.Null, columns.Count).ToList();
         Dictionary<string, int>? qualifiedColumns = null;
+        IReadOnlySet<string>? ambiguousQualifiedColumns = null;
         long? rowId = null;
         string? rowIdQualifier = null;
         if (source is not null)
@@ -5140,6 +5141,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             qualifiedColumns = new Dictionary<string, int>(
                 GetQualifiedColumns(source, context),
                 StringComparer.OrdinalIgnoreCase);
+            ambiguousQualifiedColumns = GetAmbiguousQualifiedColumns(source, context);
             AppendSchemaRowidBindings(source, context, values, qualifiedColumns);
             if (source is NamedTableSource named
                 && !context.CommonTableExpressions.ContainsKey(named.Name)
@@ -5158,7 +5160,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             outerRow,
             outputColumns,
             rowId,
-            rowIdQualifier);
+            rowIdQualifier,
+            AmbiguousQualifiedColumns: ambiguousQualifiedColumns);
     }
 
     private static void AppendSchemaRowidBindings(
@@ -22334,6 +22337,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var qualifiedColumnDefinitions = GetSourceQualifiedColumnDefinitions(source, context);
         var columns = left.Columns.Concat(right.Columns).ToArray();
         var outputColumns = GetOutputColumns(source, context);
+        var ambiguousQualifiedColumns = GetAmbiguousQualifiedColumns(source, context);
         var leftWidth = left.Columns.Length;
         var joinPairs = BuildJoinPairs(source, context);
         var joinHashIndex = TryBuildJoinHashIndex(source, right, context);
@@ -22372,7 +22376,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         left.Columns.Length,
                         right.Columns.Length,
                         columnDefinitions),
-                    QualifiedColumnDefinitions: qualifiedColumnDefinitions);
+                    QualifiedColumnDefinitions: qualifiedColumnDefinitions,
+                    AmbiguousQualifiedColumns: ambiguousQualifiedColumns);
                 if (source.Condition is not null
                     && !JoinConditionMatches(source, joinPairs, row, leftRow, rightRow, parameters, context))
                 {
@@ -22406,7 +22411,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         left.Columns.Length,
                         right.Columns.Length,
                         columnDefinitions),
-                    QualifiedColumnDefinitions: qualifiedColumnDefinitions));
+                    QualifiedColumnDefinitions: qualifiedColumnDefinitions,
+                    AmbiguousQualifiedColumns: ambiguousQualifiedColumns));
                 if (maximumRows is not null && rows.Count >= maximumRows.Value)
                     return new SourceData(columns, rows);
             }
@@ -22438,7 +22444,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         left.Columns.Length,
                         right.Columns.Length,
                         columnDefinitions),
-                    QualifiedColumnDefinitions: qualifiedColumnDefinitions));
+                    QualifiedColumnDefinitions: qualifiedColumnDefinitions,
+                    AmbiguousQualifiedColumns: ambiguousQualifiedColumns));
                 if (maximumRows is not null && rows.Count >= maximumRows.Value)
                     return new SourceData(columns, rows);
             }
@@ -22988,6 +22995,30 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 GetSourceColumns(join.Left, context).Length),
             _ => throw new EmbeddedSqlException($"Unsupported table source {source.GetType().Name}."),
         };
+    }
+
+    private static IReadOnlySet<string>? GetAmbiguousQualifiedColumns(
+        TableSource source,
+        QueryContext context)
+    {
+        if (source is not JoinTableSource join)
+            return null;
+
+        var ambiguous = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (GetAmbiguousQualifiedColumns(join.Left, context) is { } leftAmbiguous)
+            ambiguous.UnionWith(leftAmbiguous);
+        if (GetAmbiguousQualifiedColumns(join.Right, context) is { } rightAmbiguous)
+            ambiguous.UnionWith(rightAmbiguous);
+
+        var leftColumns = GetQualifiedColumns(join.Left, context);
+        var rightColumns = GetQualifiedColumns(join.Right, context);
+        foreach (var name in leftColumns.Keys)
+        {
+            if (rightColumns.ContainsKey(name))
+                ambiguous.Add(name);
+        }
+
+        return ambiguous.Count == 0 ? null : ambiguous;
     }
 
     private static IReadOnlyList<EmbeddedColumn?> GetSourceColumnDefinitions(

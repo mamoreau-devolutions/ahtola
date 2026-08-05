@@ -99,7 +99,6 @@ save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery | expected success but got error: managed execution exceeded 30 seconds
 select/memory.sqltest::select-intersect-union-with-limit | expected 3 row(s), got 3 row(s); row 0 expected 'a/a' but was 'z/z'
 select/memory.sqltest::select-except-union | expected 3 row(s), got 3 row(s); row 0 expected 'x/x' but was 'y/y'
-select/memory.sqltest::duplicate-alias-ambiguous-column | error 'ambiguous column name: f1' does not match pattern 'ambiguous column name: A.f1'
 select/memory.sqltest::collate-compound-1 | expected 1 row(s), got 1 row(s); row 0 expected 'ABC' but was 'abc'
 select/memory.sqltest::collate-compound-5 | expected 1 row(s), got 1 row(s); row 0 expected 'ABC' but was 'abc'
 select/memory.sqltest::collate-compound-7 | expected 2 row(s), got 2 row(s); row 0 expected 'A' but was 'a'
