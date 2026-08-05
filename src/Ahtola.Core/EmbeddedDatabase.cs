@@ -7316,6 +7316,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         EmbeddedTable table,
         UpsertClause upsert)
     {
+        ValidateUpsertTargetColumnQualifiers(upsert.Target, tableName);
         var target = upsert.Target;
         if (target.Count == 0)
         {
@@ -7386,6 +7387,26 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         throw new EmbeddedSqlException(
             $"ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint on table {tableName}.");
+    }
+
+    private static void ValidateUpsertTargetColumnQualifiers(
+        IReadOnlyList<UpsertTargetColumn> target,
+        string tableName)
+    {
+        _ = ManagedSchemaName.TrySplit(tableName, out _, out var unqualifiedTableName);
+        foreach (var column in target)
+        {
+            if (column.Qualifier is null
+                || string.Equals(column.Qualifier, unqualifiedTableName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var qualifiedName = column.Schema is null
+                ? $"{column.Qualifier}.{column.Name}"
+                : $"{column.Schema}.{column.Qualifier}.{column.Name}";
+            throw new EmbeddedSqlException($"no such column: {qualifiedName}");
+        }
     }
 
     private static void ValidateUpsertTargetQualifiers(

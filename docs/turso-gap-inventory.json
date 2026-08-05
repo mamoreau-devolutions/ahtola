@@ -1233,9 +1233,12 @@
         "trigger_attach_regression.sqltest::trigger-cross-db-join",
         "trigger_attach_regression.sqltest::trigger-doubly-qualified-expr-runtime-error",
         "trigger_attach_regression.sqltest::trigger-doubly-qualified-when-runtime-error",
-        "alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message"
+        "alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message",
+        "upsert.sqltest::upsert-qualified-target",
+        "upsert.sqltest::upsert-current-qualified_1",
+        "upsert.sqltest::upsert-doubly-qualified-target"
       ],
-      "notes": "SQLite/Turso expressions accept a 3-part `schema.table.column` reference anywhere a column can appear (e.g. `main.t1.val`), even though most call sites then reject it semantically (generated columns forbid the '.' operator; triggers forbid cross-db column refs). Fixed 2026-08-04: ParsePrimary preserves the schema separately while resolving through the table qualifier, so `main.test.col` executes in DML and generated-column validation receives the qualified AST instead of a parse error. Same-table qualified partial-index predicates are accepted by IndexExpressionSemantics. Remaining cited cases require ATTACH/cross-database trigger semantics and exact runtime diagnostic parity rather than expression parsing.",
+      "notes": "SQLite/Turso expressions accept a 3-part `schema.table.column` reference anywhere a column can appear (e.g. `main.t1.val`), even though most call sites then reject it semantically (generated columns forbid the '.' operator; triggers forbid cross-db column refs). Fixed 2026-08-04: ParsePrimary preserves the schema separately while resolving through the table qualifier, so `main.test.col` executes in DML and generated-column validation receives the qualified AST instead of a parse error. Same-table qualified partial-index predicates are accepted by IndexExpressionSemantics. UPSERT target lowering now similarly recognizes qualified column terms as their underlying target columns while preserving a mismatch diagnostic for a different table qualifier. Remaining cited cases require ATTACH/cross-database trigger semantics and exact runtime diagnostic parity rather than expression parsing.",
       "status": "open"
     },
     {

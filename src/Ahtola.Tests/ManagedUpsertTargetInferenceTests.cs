@@ -129,6 +129,28 @@ public sealed class ManagedUpsertTargetInferenceTests
                     """,
                 ],
                 "SELECT code, value FROM t");
+            yield return Case(
+                "qualified-conflict-target",
+                [
+                    "CREATE TABLE t(code TEXT UNIQUE, value INTEGER)",
+                    "INSERT INTO t VALUES ('key', 1)",
+                    """
+                    INSERT INTO t VALUES ('key', 2)
+                    ON CONFLICT(t.code) DO UPDATE SET value = excluded.value
+                    """,
+                ],
+                "SELECT code, value FROM t");
+            yield return Case(
+                "three-part-qualified-conflict-target",
+                [
+                    "CREATE TABLE t(code TEXT UNIQUE, value INTEGER)",
+                    "INSERT INTO t VALUES ('key', 1)",
+                    """
+                    INSERT INTO t VALUES ('key', 2)
+                    ON CONFLICT(main.t.code) DO UPDATE SET value = excluded.value
+                    """,
+                ],
+                "SELECT code, value FROM t");
         }
     }
 

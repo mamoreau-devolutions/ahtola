@@ -1588,12 +1588,15 @@ internal sealed class SqlParser
             do
             {
                 var term = ParseIndexedColumn();
+                var column = term.Expression as ColumnExpression;
                 target.Add(new UpsertTargetColumn(
-                    term.Name,
+                    column?.UnqualifiedName ?? term.Name,
                     term.Collation,
                     term.Descending,
-                    term.Expression,
-                    term.ExpressionSql));
+                    column is null ? term.Expression : null,
+                    column is null ? term.ExpressionSql : null,
+                    column?.Qualifier,
+                    column?.Schema));
             }
             while (Consume(TokenKind.Comma));
             Expect(TokenKind.RightParen);

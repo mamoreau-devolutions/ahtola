@@ -167,9 +167,6 @@ update_attached_db_index.sqltest::update-attached-db-integrity-after-rowid-chang
 update_attached_db_index.sqltest::update-attached-db-non-rowid-column | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 upsert.sqltest::upsert-select-single | expected success but got error: Managed UPSERT supports VALUES rows only and does not support INSERT ... SELECT or CTE sources.
 upsert.sqltest::upsert-multilple-conflict-targets | expected success but got error: Expected End. At SQL offset 183.
-upsert.sqltest::upsert-qualified-target | expected success but got error: ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint on table qt.
-upsert.sqltest::upsert-current-qualified_1 | expected success but got error: ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint on table dq.
-upsert.sqltest::upsert-doubly-qualified-target | expected success but got error: ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint on table dq.
 upsert.sqltest::upsert-targets-chain | expected success but got error: Expected End. At SQL offset 215.
 views.sqltest::view-rejects-aggregate-order-by | expected an error but the statement succeeded
 window/dense_rank.sqltest::dense-rank-column-declared-collation | expected 3 row(s), got 3 row(s); row 0 expected '2/1/1' but was '1/1/2'

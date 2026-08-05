@@ -183,7 +183,9 @@ internal sealed record UpsertTargetColumn(
     string? Collation,
     bool Descending = false,
     Expression? Expression = null,
-    string? ExpressionSql = null)
+    string? ExpressionSql = null,
+    string? Qualifier = null,
+    string? Schema = null)
 {
     public bool IsExpression => Expression is not null;
 }
