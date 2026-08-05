@@ -16123,6 +16123,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
             return false;
         if (limit == 0)
             return false;
+        if (limit is >= 0
+            && windowFunctions.Any(static function =>
+                function.Name.Equals("NTH_VALUE", StringComparison.OrdinalIgnoreCase)))
+        {
+            // The buffered VDBE evaluates its complete input before LimitOffsetProgramBuilder runs.
+            // Use the evaluator below, which can retain SQLite's lazy nth_value error timing.
+            return false;
+        }
 
         var baseSelect = select.Limit is null && select.Offset is null
             ? select
@@ -31232,11 +31240,20 @@ public sealed partial class EmbeddedDatabase : IDisposable
         QueryContext context)
     {
         var rowCount = selectedRows.Count;
+        var evaluationSourceIndexes = GetLimitedNthValueEvaluationSourceIndexes(
+            statement,
+            selectedRows,
+            windowFunctions,
+            offset,
+            limit,
+            parameters,
+            context);
         var valueRows = ComputeWindowFunctionValueRows(
             windowFunctions,
             selectedRows,
             parameters,
-            context);
+            context,
+            evaluationSourceIndexes);
         var windowValues = new Dictionary<FunctionExpression, SqlValue>[rowCount];
         for (var index = 0; index < rowCount; index++)
         {
@@ -31335,6 +31352,65 @@ public sealed partial class EmbeddedDatabase : IDisposable
             0);
     }
 
+    // SQLite's window pipeline can stop after a finite LIMIT, so an invalid nth_value position in
+    // an unobserved trailing row must not fail the statement. Retain eager evaluation where ordering
+    // needs a window value or has arbitrary expressions, because then the trailing row can affect output.
+    private IReadOnlySet<int>? GetLimitedNthValueEvaluationSourceIndexes(
+        SelectStatement statement,
+        IReadOnlyList<SourceRow> selectedRows,
+        IReadOnlyList<FunctionExpression> windowFunctions,
+        long offset,
+        long? limit,
+        SqlValue[] parameters,
+        QueryContext context)
+    {
+        if (statement.Distinct
+            || limit is not >= 0
+            || !windowFunctions.Any(static function =>
+                function.Name.Equals("NTH_VALUE", StringComparison.OrdinalIgnoreCase)))
+        {
+            return null;
+        }
+
+        var orderBy = ResolveOrderBy(statement.OrderBy, statement.Projections);
+        IReadOnlyList<OrderByTerm>? emissionOrder = orderBy.Count > 0
+            ? orderBy
+            : FirstWindowEmissionOrder(windowFunctions);
+        if (emissionOrder is { Count: > 0 }
+            && emissionOrder.Any(term =>
+                ContainsWindowFunction(term.Expression)
+                || UnwrapCollation(term.Expression) is not ColumnExpression))
+        {
+            return null;
+        }
+
+        var indices = Enumerable.Range(0, selectedRows.Count).ToList();
+        if (emissionOrder is { Count: > 0 })
+        {
+            var collations = emissionOrder
+                .Select(term => GetEffectiveCollation(term.Expression, context))
+                .ToArray();
+            var keys = new SqlValue[selectedRows.Count][];
+            for (var index = 0; index < selectedRows.Count; index++)
+            {
+                keys[index] = emissionOrder
+                    .Select(term => Evaluate(term.Expression, parameters, selectedRows[index], context))
+                    .ToArray();
+            }
+
+            indices = StableSortIndices(indices, (left, right) =>
+                orderBy.Count > 0
+                    ? CompareOrderKeys(keys[left], keys[right], orderBy, collations)
+                    : CompareWindowOrderKeys(keys[left], keys[right], emissionOrder, collations));
+        }
+
+        var requiredCount = limit.Value > long.MaxValue - offset
+            ? long.MaxValue
+            : offset + limit.Value;
+        requiredCount = Math.Min(requiredCount, selectedRows.Count);
+        return indices.Take((int)requiredCount).ToHashSet();
+    }
+
     // Computes each collected window function's value for every selected row, aligned by function ordinal.
     // Window calls are grouped by identical OVER spec so one partition/order/frame pass serves every
     // function sharing a spec, which is how a statement carrying several different windows is evaluated.
@@ -31344,7 +31420,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         IReadOnlyList<FunctionExpression> windowFunctions,
         IReadOnlyList<SourceRow> rows,
         SqlValue[] parameters,
-        QueryContext context)
+        QueryContext context,
+        IReadOnlySet<int>? evaluationSourceIndexes = null)
     {
         return ComputeWindowFunctionValueRows(
             windowFunctions,
@@ -31352,7 +31429,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             (index, expression) => Evaluate(expression, parameters, rows[index], context),
             parameters,
             context,
-            FirstWindowEmissionOrder(windowFunctions));
+            FirstWindowEmissionOrder(windowFunctions),
+            evaluationSourceIndexes);
     }
 
     // The window pass reads every one of its inputs - arguments, FILTER, PARTITION BY and window
@@ -31365,7 +31443,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         WindowInputEvaluator evaluate,
         SqlValue[] parameters,
         QueryContext context,
-        IReadOnlyList<OrderByTerm>? emissionOrder = null)
+        IReadOnlyList<OrderByTerm>? emissionOrder = null,
+        IReadOnlySet<int>? evaluationSourceIndexes = null)
     {
         var values = new SqlValue[rowCount][];
         for (var index = 0; index < rowCount; index++)
@@ -31393,7 +31472,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             var functions = group.Select(ordinal => windowFunctions[ordinal]).ToArray();
             var computed = ComputeWindowFunctions(
-                functions, rowCount, evaluate, inputs, parameters, context, emissionOrder);
+                functions,
+                rowCount,
+                evaluate,
+                inputs,
+                parameters,
+                context,
+                emissionOrder,
+                evaluationSourceIndexes);
             for (var position = 0; position < functions.Length; position++)
             {
                 var series = computed[functions[position]];
@@ -31538,7 +31624,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         IReadOnlyDictionary<FunctionExpression, WindowFunctionInput[]> inputs,
         SqlValue[] parameters,
         QueryContext context,
-        IReadOnlyList<OrderByTerm>? emissionOrder)
+        IReadOnlyList<OrderByTerm>? emissionOrder,
+        IReadOnlySet<int>? evaluationSourceIndexes)
     {
         var spec = functions[0].Window!;
         var results = new Dictionary<FunctionExpression, SqlValue[]>();
@@ -31663,6 +31750,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
             for (var position = 0; position < entries.Count; position++)
             {
                 context.CheckInterrupt();
+                if (evaluationSourceIndexes is not null
+                    && !evaluationSourceIndexes.Contains(entries[position].SourceIndex))
+                {
+                    continue;
+                }
+
                 var framePositions = needsFrame
                     ? ResolveWindowFramePositions(
                         spec,
