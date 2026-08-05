@@ -67,7 +67,6 @@ returning.sqltest::update-returning-after-trigger-same-row-subquery | expected 2
 returning.sqltest::delete-returning-target-selfread-reruns-per-row | expected 2 row(s), got 2 row(s); row 0 expected '1/2' but was '1/3'
 returning.sqltest::delete-returning-target-selfread-correlated-group-count | expected 2 row(s), got 2 row(s); row 0 expected '1/1' but was '1/2'
 returning.sqltest::insert-returning-target-selfread-reruns-per-row | expected 2 row(s), got 2 row(s); row 0 expected '2/2' but was '2/3'
-rollback.sqltest::schema-change-rollback-2-2 | expected 2 row(s), got 2 row(s); row 0 expected 'before' but was 'after'
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery | expected success but got error: managed execution exceeded 30 seconds

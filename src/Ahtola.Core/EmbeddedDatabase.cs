@@ -23924,7 +23924,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var columns = new[] { "type", "name", "tbl_name", "rootpage", "sql" };
         var qualifiedColumns = BuildQualifiedColumns(source.Alias ?? source.Name, columns);
         var rows = new List<SourceRow>();
-        foreach (var entry in tables.OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase))
+        foreach (var entry in tables)
         {
             rows.Add(new SourceRow(
                 columns,

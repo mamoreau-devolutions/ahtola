@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 123,
+    "current_conformance_expected_failures": 122,
     "last_reconciled": "2026-08-08",
     "entry_count": 208,
     "counts": {
@@ -46,8 +46,8 @@
         "S": 96
       },
       "by_status": {
-        "open": 112,
-        "closed": 96
+        "open": 111,
+        "closed": 97
       }
     },
     "schema": {
@@ -2457,11 +2457,9 @@
       "ahtola_ref": "not located; see src/Ahtola.Core/EmbeddedDatabase.cs schema-versioning code",
       "severity": "s3-perf",
       "effort": "M",
-      "conformance_links": [
-        "rollback.sqltest::schema-change-rollback-2-2"
-      ],
-      "notes": "Turso's Transaction opcode checks a schema cookie on every BEGIN (and separately manages an MVCC schema generation counter, conn.mvcc_begin_schema_generation, so concurrent-mode connections re-prepare statements when the schema changed underneath them). Of the five original rollback.sqltest links, four (schema-alter-rollback, schema-alter-rollback-and-repeat, schema-create-index-rollback, schema-drop-table-rollback) turned out to be cosmetic schema-SQL quoting divergences and were closed 2026-08-04 by compile-schema-sql-always-quotes-identifiers — DDL rollback itself works. What remains is schema-change-rollback-2-2: an actual before/after mismatch suggesting a DDL rollback does not fully restore prior schema state, still a genuine transaction-rollback-boundary symptom needing joint triage with the schema/DDL layer.",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-08. Turso rebuilds its schema by rewinding and scanning the sqlite_schema B-tree, which naturally yields schema record order. Managed GetSchemaTableRows was instead sorting table names alphabetically, making a correctly rolled-back table appear after a subsequently created one. It now preserves the catalog's creation order, and the complete rollback.sqltest schema-rollback cluster passes. Turso's Transaction opcode still checks a schema cookie on every BEGIN (and separately manages an MVCC schema generation counter, conn.mvcc_begin_schema_generation, so concurrent-mode connections re-prepare statements when the schema changed underneath them); that wider cross-connection concern is tracked separately.",
+      "status": "closed"
     },
     {
       "id": "mvcc-statement-level-rollback-on-constraint-violation",
