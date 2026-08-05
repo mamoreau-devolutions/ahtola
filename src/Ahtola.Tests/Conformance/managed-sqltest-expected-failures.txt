@@ -212,7 +212,6 @@ upsert.sqltest::upsert-unresolved-table-reference | error 'no such table: other'
 upsert.sqltest::upsert-unresolved-table-in-where | error 'no such table: other' does not match pattern '.*no such column.*'
 views.sqltest::view-rejects-aggregate-order-by | expected an error but the statement succeeded
 window/dense_rank.sqltest::dense-rank-column-declared-collation | expected 3 row(s), got 3 row(s); row 0 expected '2/1/1' but was '1/1/2'
-window/filter-over.sqltest::filter-over-scalar-function-rejected | error 'ABS is not a supported window function' does not match pattern 'may not be used as a window function'
 window/filter-over.sqltest::filter-over-repeated-nondeterministic-call | expected success but got error: no such function: TEST_NONDET_COUNTER
 window/filter-over.sqltest::filter-over-mixed-deterministic-and-nondeterministic-dedup | expected success but got error: no such function: TEST_NONDET_COUNTER
 window/lag_lead.sqltest::lag-lead-negative-offset-multi | expected 5 row(s), got 5 row(s); row 0 expected '1//' but was '1/4/'

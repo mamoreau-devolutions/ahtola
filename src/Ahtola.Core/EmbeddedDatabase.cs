@@ -30619,7 +30619,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (!isBuiltInWindow && !isAggregate)
         {
             throw new EmbeddedSqlException(
-                $"{function.Name} is not a supported window function");
+                $"{function.Name} may not be used as a window function");
         }
 
         if (function.Filter is not null && !isAggregate)

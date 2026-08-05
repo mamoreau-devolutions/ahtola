@@ -14,13 +14,13 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 217,
+    "current_conformance_expected_failures": 216,
     "last_reconciled": "2026-08-04",
-    "entry_count": 188,
+    "entry_count": 189,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 50,
+        "compilation": 51,
         "parser": 24,
         "functions": 26,
         "storage": 20,
@@ -29,25 +29,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 52,
+        "divergent": 53,
         "partial": 27,
         "extension": 8,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 97,
+        "s2-capability": 98,
         "s4-intentional": 33,
         "s1-correctness": 24
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 78
+        "S": 79
       },
       "by_status": {
         "open": 141,
-        "closed": 47
+        "closed": 48
       }
     },
     "schema": {
@@ -1707,6 +1707,20 @@
         "glob/memory.sqltest::glob-embedded-nul-2"
       ],
       "notes": "SQLite treats text as NUL-terminated C strings, so GLOB/LIKE must stop at the first embedded NUL in both the pattern and the matched text. Turso's exec_glob/exec_like call sqlite_text_prefix on both operands before pattern_compare, so '?'/'_/'*' never match a NUL character. Ahtola's IsGlobMatch/IsLikeMatch matched over the full .NET string including NUL, so 'a\\0b' GLOB 'a?b' wrongly returned 1. Fixed 2026-08-04: added SqliteTextPrefix (mirrors sqlite_text_prefix) and applied it to both operands at the entry of IsGlobMatch and IsLikeMatch, so the matchers now operate on the NUL-truncated prefixes. Both tracked glob-embedded-nul cases removed from the expected-failure baseline; focused GLOB/LIKE NUL regressions added.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-window-non-window-function-diagnostic",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/planner.rs:335,387 (\"{} may not be used as a window function\")",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateWindowFunction",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "window/filter-over.sqltest::filter-over-scalar-function-rejected"
+      ],
+      "notes": "Turso rejects a scalar function used with an OVER clause with the diagnostic \"<name> may not be used as a window function\" (planner.rs:335/387). Ahtola's ValidateWindowFunction emitted \"<name> is not a supported window function\", which did not match the conformance corpus pattern. Fixed 2026-08-04: aligned the error message with Turso's wording so the filter-over-scalar-function-rejected case matches. The tracked case removed from the expected-failure baseline.",
       "status": "closed"
     },
     {
