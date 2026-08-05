@@ -113,7 +113,61 @@ internal static class AlterTableSqlRewriter
         if (nameSpan is not { } name)
             return null;
 
-        return ReplaceSpan(sql, name, QuoteIdentifier(newName));
+        var edits = new List<SqlSourceSpan> { name };
+        if (parsed is CreateTableStatement table)
+        {
+            // A CHECK expression is evaluated against the renamed table's row, so table-qualified
+            // references in it must follow the CREATE TABLE name token.
+            var collector = new TableReferenceCollector(spans, table.Name);
+            foreach (var column in table.Columns)
+            {
+                foreach (var check in column.CheckConstraints)
+                    collector.CollectExpression(check.Expression);
+            }
+            foreach (var check in table.CheckConstraints ?? [])
+                collector.CollectExpression(check.Expression);
+
+            if (collector.Aborted)
+                return null;
+
+            edits.AddRange(collector.Spans);
+        }
+
+        var replacement = QuoteIdentifier(newName);
+        foreach (var edit in edits.Distinct().OrderByDescending(static span => span.Start))
+            sql = ReplaceSpan(sql, edit, replacement);
+        return sql;
+    }
+
+    /// <summary>
+    /// Rewrites table qualifiers in a standalone table-owned expression such as a CHECK body.
+    /// This is deliberately expression-scoped: a CHECK cannot bind aliases or another table, so
+    /// any matching qualifier identifies the table being renamed.
+    /// </summary>
+    public static string? RenameTableExpressionReferences(string sql, string oldName, string newName)
+    {
+        Expression expression;
+        SqlSourceSpans spans;
+        try
+        {
+            expression = SqlParser.ParseExpressionWithSpans(sql, out spans);
+        }
+        catch (EmbeddedSqlException)
+        {
+            return null;
+        }
+
+        var collector = new TableReferenceCollector(spans, oldName);
+        collector.CollectExpression(expression);
+        if (collector.Aborted)
+            return null;
+        if (collector.Spans.Count == 0)
+            return sql;
+
+        var replacement = QuoteIdentifier(newName);
+        foreach (var span in collector.Spans.OrderByDescending(static span => span.Start))
+            sql = ReplaceSpan(sql, span, replacement);
+        return sql;
     }
 
     /// <summary>

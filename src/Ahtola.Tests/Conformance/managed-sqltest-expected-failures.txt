@@ -21,7 +21,6 @@ alter_table.sqltest::alter-table-drop-column-invalid-temp-trigger-missing-main-t
 autoincr.sqltest::autoinc-create-sequence-table | expected 3 row(s), got 2 row(s); row 0 expected '__turso_internal_seq___turso_internal_autoincrement_t1' but was 'sqlite_sequence'
 before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorrelated-subquery | expected 3 row(s), got 3 row(s); row 1 expected '2/600' but was '2/1100'
 bracket-quoting.sqltest::bracket-analyze-table-name | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
-check_constraint.sqltest::check_constraint_rename_table_qualified_ref | expected success but got error: ALTER TABLE RENAME cannot rewrite table-qualified CHECK expressions until managed schema token rewriting is implemented.
 delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'memory'
 detach/transaction.sqltest::detach-fails-with-active-read-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
 detach/transaction.sqltest::detach-fails-with-active-write-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'

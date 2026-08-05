@@ -4178,19 +4178,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
             throw new EmbeddedSqlException($"there is already an index named {statement.NewName}");
         if (!tables.TryGetValue(statement.TableName, out var table))
             throw new EmbeddedSqlException($"no such table: {statement.TableName}");
-        if (table.HasQualifiedCheckReferences())
-        {
-            throw new EmbeddedSqlException(
-                "ALTER TABLE RENAME cannot rewrite table-qualified CHECK expressions until "
-                + "managed schema token rewriting is implemented.");
-        }
-
         var candidateTables = new Dictionary<string, EmbeddedTable>(
             tables,
             StringComparer.OrdinalIgnoreCase);
-        var candidateTable = table.Clone();
+        var hasQualifiedCheckReferences = table.HasQualifiedCheckReferences();
+        var candidateTable = hasQualifiedCheckReferences
+            ? table.CloneWithRenamedCheckTableReferences(table.Name, statement.NewName)
+            : table.Clone();
         candidateTables.Remove(statement.TableName);
-        candidateTable.Rename(statement.NewName);
+        if (!hasQualifiedCheckReferences)
+            candidateTable.Rename(statement.NewName);
         candidateTables.Add(statement.NewName, candidateTable);
 
         // Dependent views and triggers must follow the rename the way SQLite rewrites them
@@ -4269,10 +4266,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (!tables.Remove(statement.TableName))
             throw new InvalidOperationException($"Table '{statement.TableName}' disappeared during rename.");
         var previousName = table.Name;
-        table.Rename(statement.NewName);
-        tables.Add(statement.NewName, table);
-        RewriteRenamedTableSql(tables, table, previousName, statement.NewName);
-        if (table.IsAutoIncrement)
+        tables.Add(statement.NewName, candidateTable);
+        RewriteRenamedTableSql(tables, candidateTable, previousName, statement.NewName);
+        if (candidateTable.IsAutoIncrement)
             RenameSqliteSequenceRows(tables, previousName, statement.NewName);
         if (candidateViews is not null)
         {
@@ -43055,6 +43051,68 @@ internal sealed class EmbeddedTable
         clone.Indexes.RemoveAll(index => index.Origin == EmbeddedIndexOrigin.Explicit);
         clone.Indexes.AddRange(Indexes.Where(index => index.Origin == EmbeddedIndexOrigin.Explicit));
         return clone;
+    }
+
+    /// <summary>
+    /// Clones this table with every self-qualified CHECK expression rebound to a renamed table.
+    /// The matching stored CREATE TABLE token rewrite happens separately in
+    /// <see cref="AlterTableSqlRewriter.RenameTable"/>.
+    /// </summary>
+    public EmbeddedTable CloneWithRenamedCheckTableReferences(string oldName, string newName)
+    {
+        var columns = ColumnDefinitions
+            .Select(column => column.CheckConstraints.Count == 0
+                ? column
+                : column.WithConstraints(
+                    RewriteChecks(column.CheckConstraints),
+                    column.ForeignKey,
+                    column.AdditionalForeignKeys))
+            .ToArray();
+        var clone = new EmbeddedTable(
+            newName,
+            columns,
+            WithoutRowid,
+            TableLevelPrimaryKey,
+            TableUniqueConstraints,
+            RewriteChecks(CheckConstraints),
+            TablePrimaryKeyConflictAlgorithm,
+            TablePrimaryKeyConstraintName,
+            TablePrimaryKeyDeclarationOrder,
+            TableForeignKeys,
+            Strict);
+        clone.SchemaSqlCompact = SchemaSqlCompact;
+        clone.Sql = Sql;
+        foreach (var row in Rows)
+            clone.Rows.Add(row.ToArray());
+
+        clone.RowIds.AddRange(RowIds);
+        clone.Indexes.RemoveAll(index => index.Origin == EmbeddedIndexOrigin.Explicit);
+        clone.Indexes.AddRange(Indexes.Where(index => index.Origin == EmbeddedIndexOrigin.Explicit));
+        return clone;
+
+        IReadOnlyList<CheckConstraint> RewriteChecks(IReadOnlyList<CheckConstraint> checks)
+            => checks
+                .Select(check =>
+                {
+                    var sql = AlterTableSqlRewriter.RenameTableExpressionReferences(
+                        check.Sql,
+                        oldName,
+                        newName);
+                    if (sql is null)
+                    {
+                        throw new EmbeddedSqlException(
+                            "ALTER TABLE RENAME cannot rewrite table-qualified CHECK expressions.");
+                    }
+
+                    return string.Equals(sql, check.Sql, StringComparison.Ordinal)
+                        ? check
+                        : check with
+                        {
+                            Sql = sql,
+                            Expression = SqlParser.ParseExpressionWithSpans(sql, out _),
+                        };
+                })
+                .ToArray();
     }
 
     // Shallow snapshot for DML statement rollback: a fresh table shell with a fresh

@@ -622,7 +622,7 @@ public sealed class ManagedConstraintSemanticsTests
     }
 
     [Test]
-    public void TableRenameRejectsQualifiedChecksBeforeMutation()
+    public void TableRenameRewritesQualifiedChecksAndSurvivesReopen()
     {
         var path = CreateDatabasePath();
         try
@@ -631,29 +631,31 @@ public sealed class ManagedConstraintSemanticsTests
             using (var connection = database.Connect())
             {
                 Execute(connection, "CREATE TABLE old_name(value INTEGER, CHECK(old_name.value > 0));");
-                Action rename = () => Execute(connection, "ALTER TABLE old_name RENAME TO new_name;");
-                rename.Should().Throw<EmbeddedSqlException>()
-                    .WithMessage("*table-qualified CHECK expressions*");
+                Execute(connection, "ALTER TABLE old_name RENAME TO new_name;");
 
-                Execute(connection, "INSERT INTO old_name VALUES (1);");
-                Action invalid = () => Execute(connection, "INSERT INTO old_name VALUES (0);");
+                ScalarText(connection, "SELECT sql FROM sqlite_schema WHERE name = 'new_name';")
+                    .Should().Contain("CHECK(\"new_name\".value > 0)");
+                Execute(connection, "INSERT INTO new_name VALUES (1);");
+                Action invalid = () => Execute(connection, "INSERT INTO new_name VALUES (0);");
                 invalid.Should().Throw<EmbeddedSqlException>()
-                    .WithMessage("CHECK constraint failed: old_name.value > 0");
+                    .WithMessage("CHECK constraint failed: \"new_name\".value > 0");
             }
 
             using (var reopened = EmbeddedDatabase.OpenFile(path))
             using (var reopenedConnection = reopened.Connect())
             {
-                Action reopenedInvalid = () => Execute(reopenedConnection, "INSERT INTO old_name VALUES (-1);");
+                Action reopenedInvalid = () => Execute(reopenedConnection, "INSERT INTO new_name VALUES (-1);");
                 reopenedInvalid.Should().Throw<EmbeddedSqlException>()
-                    .WithMessage("CHECK constraint failed: old_name.value > 0");
+                    .WithMessage("CHECK constraint failed: \"new_name\".value > 0");
             }
 
             using var sqlite = new MsData.SqliteConnection($"Data Source={path};Pooling=False");
             sqlite.Open();
             ScalarText(sqlite, "PRAGMA integrity_check;").Should().Be("ok");
-            ScalarInteger(sqlite, "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'old_name';").Should().Be(1);
-            ScalarInteger(sqlite, "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'new_name';").Should().Be(0);
+            ScalarInteger(sqlite, "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'old_name';").Should().Be(0);
+            ScalarInteger(sqlite, "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'new_name';").Should().Be(1);
+            ScalarText(sqlite, "SELECT sql FROM sqlite_schema WHERE name = 'new_name';")
+                .Should().Contain("CHECK(\"new_name\".value > 0)");
         }
         finally
         {
