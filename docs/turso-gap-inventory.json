@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 195,
-    "last_reconciled": "2026-08-07",
-    "entry_count": 198,
+    "current_conformance_expected_failures": 192,
+    "last_reconciled": "2026-08-08",
+    "entry_count": 199,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 56,
+        "compilation": 57,
         "parser": 28,
         "functions": 26,
         "storage": 20,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 61,
+        "divergent": 63,
         "partial": 27,
         "extension": 8,
         "parity": 2
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 103,
         "s4-intentional": 33,
-        "s1-correctness": 24
+        "s1-correctness": 29
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 90
+        "S": 89
       },
       "by_status": {
-        "open": 136,
-        "closed": 59
+        "open": 141,
+        "closed": 58
       }
     },
     "schema": {
@@ -2934,6 +2934,22 @@
        "trigger_on_conflict.sqltest::trigger-upsert-new-in-where-no-update"
      ],
      "notes": "Closed 2026-08-07. ValidateUpsertUpdateExpression rejected any qualifier other than excluded/target table, so a trigger-body UPSERT DO UPDATE SET/WHERE referencing NEW.column errored with 'no such column: NEW.delta'. Added allowTriggerQualifiers=context.InsideTrigger to ValidateUpsertUpdateExpressions/ValidateUpsertUpdateExpression (with default false); the ColumnExpression branch now returns for NEW/OLD (case-insensitive) when inside a trigger, and TriggerRowFrame.GetValue resolves the column at runtime (erroring with 'no such column' if the NEW/OLD row lacks it). The recursive validator propagates the flag through all composite expression cases, covering both SET and WHERE. Backed by ManagedTriggerRowSemanticsTests.TriggerBodyUpsert* (differential AssertMatchesSqlite vs real Microsoft.Data.Sqlite). Conformance baseline 198 -> 195; all three linked cases removed, 0 added; full suite 3804/0/47.",
+     "status": "closed"
+   },
+   {
+     "id": "compile-index-expression-deterministic-datetime",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/schema.rs::is_deterministic_schema_function_call - date/time functions are deterministic only when they cannot read the wall clock or the local timezone (no 'now' time value, no 'localtime'/'utc' modifiers)",
+     "ahtola_ref": "src/Ahtola.Core/IndexSemantics.cs::IndexExpressionSemantics.IsDeterministicBuiltin now delegates to EmbeddedTable.IsDeterministicSchemaFunction (shared with generated-column validation, EmbeddedDatabase.cs), which routes the date/time family through IsDeterministicDateTimeCall",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "create_index.sqltest::create-index-strftime-with-column",
+       "create_index.sqltest::create-index-date-literal",
+       "alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel"
+     ],
+     "notes": "Closed 2026-08-07. IndexExpressionSemantics.IsDeterministicBuiltin called SqliteBuiltinFunctions.IsDeterministic(name) directly, which marks the entire date/time family (date/time/datetime/unixepoch/julianday/strftime/timediff) as non-deterministic because they CAN read 'now'. That rejected deterministic calls such as strftime('%Y-%m-%d %H:00:00', \"created\") and date('2020-01-02') in index expressions. Extracted the existing generated-column check (IsDeterministicGenerationFunction / IsDeterministicDateTimeCall / IsCurrentTimeLiteral / IsUnsafeDateTimeModifier) into a shared internal EmbeddedTable.IsDeterministicSchemaFunction and routed the index-expression validator through it. strftime(format, column) and date(literal) now pass; strftime(format, 'now') and date() with no args still fail (non-deterministic), matching create-index-strftime-now-remains-rejected. Backed by DurableIndexSemanticsTests.IndexExpression* (accept deterministic strftime-with-column, accept deterministic date-literal, reject strftime-with-'now'). Conformance baseline 195 -> 192; all three linked cases removed, 0 added; full suite 3807/0/47.",
      "status": "closed"
    }
  ]

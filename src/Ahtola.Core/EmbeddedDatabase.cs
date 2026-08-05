@@ -40840,7 +40840,10 @@ internal sealed class EmbeddedTable
     // Mirrors Turso's is_deterministic_schema_function_call (schema.rs): a generated-column
     // call is allowed when it resolves to a deterministic built-in scalar. The date/time
     // family is deterministic only when it cannot read the wall clock or the local timezone.
-    private static bool IsDeterministicGenerationFunction(FunctionExpression function)
+    // Shared by generated-column validation (schema.rs) and index-expression
+    // validation: date/time functions are deterministic only when they cannot
+    // read the wall clock or the local timezone.
+    internal static bool IsDeterministicSchemaFunction(FunctionExpression function)
     {
         var upperName = function.Name.ToUpperInvariant();
         if (upperName is "DATE" or "TIME" or "DATETIME" or "UNIXEPOCH" or "JULIANDAY"
@@ -40851,6 +40854,9 @@ internal sealed class EmbeddedTable
 
         return SqliteBuiltinFunctions.IsDeterministic(function.Name);
     }
+
+    private static bool IsDeterministicGenerationFunction(FunctionExpression function)
+        => IsDeterministicSchemaFunction(function);
 
     private static bool IsDeterministicDateTimeCall(string upperName, IReadOnlyList<Expression> arguments)
     {

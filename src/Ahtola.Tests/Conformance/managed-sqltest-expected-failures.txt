@@ -15,7 +15,6 @@ alter_table.sqltest::alter-table-rename-column-view-attached-db-qualified | erro
 alter_table.sqltest::alter-table-rename-column-trigger-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 alter_table.sqltest::alter-add-column-invalid-collation | expected an error but the statement succeeded
-alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel | expected success but got error: non-deterministic functions are prohibited in index expressions
 alter_table.sqltest::alter-table-rename-column-temp-trigger-main-cross-table | expected success but got error: no such column: b
 alter_table.sqltest::alter-table-rename-column-temp-trigger-main-alias-cross-table | expected success but got error: no such column: u.b
 alter_table.sqltest::alter-table-rename-temp-table-invalid-temp-trigger-missing-main-table | expected an error but the statement succeeded
@@ -33,8 +32,6 @@ before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorre
 bracket-quoting.sqltest::bracket-analyze-table-name | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 check_constraint.sqltest::check_constraint_rename_table_qualified_ref | expected success but got error: ALTER TABLE RENAME cannot rewrite table-qualified CHECK expressions until managed schema token rewriting is implemented.
 compound-select-orderby.sqltest::three-way-union-order-by | expected 11 row(s), got 11 row(s); row 0 expected '1/alpha' but was '1/apple'
-create_index.sqltest::create-index-strftime-with-column | expected success but got error: non-deterministic functions are prohibited in index expressions
-create_index.sqltest::create-index-date-literal | expected success but got error: non-deterministic functions are prohibited in index expressions
 cte.sqltest::cte-update-direct-ref-keyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
 cte.sqltest::cte-update-direct-ref-nonkeyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
 cte.sqltest::cte-unreferenced-column-mismatch-delete | expected success but got error: Managed CTE DML requires every CTE to contribute to the DML statement; cte is unused.

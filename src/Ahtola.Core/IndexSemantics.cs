@@ -567,7 +567,9 @@ internal static class IndexExpressionSemantics
             return false;
         }
 
-        return SqliteBuiltinFunctions.IsDeterministic(function.Name);
+        // Date/time functions are deterministic only when they cannot read the
+        // wall clock or the local timezone (mirrors generated-column validation).
+        return EmbeddedTable.IsDeterministicSchemaFunction(function);
     }
 
     private static void ValidateCollation(string indexName, string name)

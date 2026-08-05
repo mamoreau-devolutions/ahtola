@@ -1386,6 +1386,60 @@ public sealed class DurableIndexSemanticsTests
             .WithMessage("*not a valid supported SQLite index b-tree*");
     }
 
+    [Test]
+    public void IndexExpressionAcceptsDeterministicStrftimeWithColumn()
+    {
+        // strftime(format, column) is deterministic (no 'now' time value, no
+        // localtime/utc modifiers) and is therefore permitted in an index
+        // expression, mirroring SQLite/Turso.
+        using var database = EmbeddedDatabase.OpenFile(
+            CreateDatabasePath("idx-strftime-column"),
+            new InMemoryFileSystem());
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE logs(\"created\" TEXT NOT NULL);");
+        Execute(
+            connection,
+            "CREATE INDEX idx_logs_created_hour ON logs(strftime('%Y-%m-%d %H:00:00', \"created\"));");
+        Execute(connection, "INSERT INTO logs VALUES ('2024-01-01 12:34:56');");
+        ReadValue(connection, "SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_logs_created_hour';")
+            .Should().Be(SqlValue.Text("idx_logs_created_hour"));
+    }
+
+    [Test]
+    public void IndexExpressionAcceptsDeterministicDateLiteral()
+    {
+        // date('2020-01-02') is a fully literal, deterministic call and is
+        // permitted in an index expression.
+        using var database = EmbeddedDatabase.OpenFile(
+            CreateDatabasePath("idx-date-literal"),
+            new InMemoryFileSystem());
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE logs(\"created\" TEXT NOT NULL);");
+        Execute(
+            connection,
+            "CREATE INDEX idx_logs_date_literal ON logs(date('2020-01-02'));");
+        Execute(connection, "INSERT INTO logs VALUES ('2024-01-01 12:34:56');");
+        ReadValue(connection, "SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_logs_date_literal';")
+            .Should().Be(SqlValue.Text("idx_logs_date_literal"));
+    }
+
+    [Test]
+    public void IndexExpressionRejectsStrftimeWithNowTimeValue()
+    {
+        // strftime(format, 'now') reads the wall clock and remains
+        // non-deterministic, so it is rejected for index expressions.
+        using var database = EmbeddedDatabase.OpenFile(
+            CreateDatabasePath("idx-strftime-now"),
+            new InMemoryFileSystem());
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE logs(\"created\" TEXT NOT NULL);");
+        Action create = () => Execute(
+            connection,
+            "CREATE INDEX idx_logs_created_hour ON logs(strftime('%Y-%m-%d %H:00:00', 'now'));");
+        create.Should().Throw<EmbeddedSqlException>()
+            .WithMessage("*non-deterministic functions*");
+    }
+
     private static int ReadIndexHeight(
         SqlitePageStore store,
         uint pageNumber,
