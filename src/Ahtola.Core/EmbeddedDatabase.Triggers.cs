@@ -1341,7 +1341,8 @@ public sealed partial class EmbeddedDatabase
             ValidateUpsertUpdateExpressions(
                 statement.TableName,
                 updateAction.Assignments,
-                updateAction.Where);
+                updateAction.Where,
+                allowTriggerQualifiers: context.InsideTrigger);
             ValidateForeignKeyActionTriggerPrograms(
                 doUpdateContext,
                 statement.TableName,

@@ -2688,6 +2688,56 @@ public sealed class ManagedTriggerRowSemanticsTests
         ReadRows(connection, "PRAGMA table_info(window_target)").Should().HaveCount(2);
     }
 
+    [Test]
+    public void TriggerBodyUpsertDoUpdateSetMayReferenceNewColumns()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE balances(id INTEGER PRIMARY KEY, amount INTEGER)",
+                "CREATE TABLE transactions(id INTEGER PRIMARY KEY, account_id INTEGER, delta INTEGER)",
+                "INSERT INTO balances VALUES (1, 100)",
+                "CREATE TRIGGER apply_txn AFTER INSERT ON transactions BEGIN "
+                    + "INSERT INTO balances VALUES (NEW.account_id, NEW.delta) "
+                    + "ON CONFLICT(id) DO UPDATE SET amount = amount + NEW.delta; END",
+                "INSERT INTO transactions VALUES (1, 1, 50)",
+            ],
+            "SELECT * FROM balances");
+    }
+
+    [Test]
+    public void TriggerBodyUpsertDoUpdateWhereMayReferenceNewColumns()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE balances(id INTEGER PRIMARY KEY, amount INTEGER)",
+                "CREATE TABLE transactions(id INTEGER PRIMARY KEY, account_id INTEGER, delta INTEGER)",
+                "INSERT INTO balances VALUES (1, 100)",
+                "CREATE TRIGGER apply_txn AFTER INSERT ON transactions BEGIN "
+                    + "INSERT INTO balances VALUES (NEW.account_id, NEW.delta) "
+                    + "ON CONFLICT(id) DO UPDATE SET amount = amount + NEW.delta "
+                    + "WHERE NEW.delta > 0; END",
+                "INSERT INTO transactions VALUES (1, 1, 50)",
+            ],
+            "SELECT * FROM balances");
+    }
+
+    [Test]
+    public void TriggerBodyUpsertDoUpdateWhereFiltersOutNegativeDeltaLikeSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE balances(id INTEGER PRIMARY KEY, amount INTEGER)",
+                "CREATE TABLE transactions(id INTEGER PRIMARY KEY, account_id INTEGER, delta INTEGER)",
+                "INSERT INTO balances VALUES (1, 100)",
+                "CREATE TRIGGER apply_txn AFTER INSERT ON transactions BEGIN "
+                    + "INSERT INTO balances VALUES (NEW.account_id, NEW.delta) "
+                    + "ON CONFLICT(id) DO UPDATE SET amount = amount + NEW.delta "
+                    + "WHERE NEW.delta > 0; END",
+                "INSERT INTO transactions VALUES (1, 1, -50)",
+            ],
+            "SELECT * FROM balances");
+    }
+
     private static void AssertMatchesSqlite(IReadOnlyList<string> setup, string query)
     {
         using var database = new EmbeddedDatabase();

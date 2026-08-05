@@ -6713,7 +6713,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             var updateStatement = new UpdateStatement(statement.TableName, updateAction.Assignments, Where: null);
             updatePlan = PrepareUpdate(updateStatement, table, context);
-            ValidateUpsertUpdateExpressions(statement.TableName, updateAction.Assignments, updateAction.Where);
+            ValidateUpsertUpdateExpressions(
+                statement.TableName,
+                updateAction.Assignments,
+                updateAction.Where,
+                allowTriggerQualifiers: context.InsideTrigger);
         }
 
         var beforeInsertTriggers = GetMatchingTriggers(
@@ -7611,16 +7615,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private void ValidateUpsertUpdateExpressions(
         string tableName,
         IReadOnlyList<ColumnAssignment> assignments,
-        Expression? where)
+        Expression? where,
+        bool allowTriggerQualifiers = false)
     {
         foreach (var assignment in assignments)
-            ValidateUpsertUpdateExpression(tableName, assignment.Value);
+            ValidateUpsertUpdateExpression(tableName, assignment.Value, allowTriggerQualifiers);
 
         if (where is not null)
-            ValidateUpsertUpdateExpression(tableName, where);
+            ValidateUpsertUpdateExpression(tableName, where, allowTriggerQualifiers);
     }
 
-    private void ValidateUpsertUpdateExpression(string tableName, Expression expression)
+    private void ValidateUpsertUpdateExpression(string tableName, Expression expression, bool allowTriggerQualifiers = false)
     {
         if (ContainsAggregate(expression)
             || ContainsWindowFunction(expression))
@@ -7636,7 +7641,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return;
             case RowValueExpression rowValue:
                 foreach (var value in rowValue.Values)
-                    ValidateUpsertUpdateExpression(tableName, value);
+                    ValidateUpsertUpdateExpression(tableName, value, allowTriggerQualifiers);
                 return;
             case ColumnExpression column:
                 {
@@ -7653,6 +7658,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
                             "Managed UPSERT DO UPDATE does not support excluded.rowid references.");
                     }
 
+                    // Inside a trigger body, NEW.column/OLD.column refer to the trigger's row
+                    // images and are resolved at runtime by TriggerRowFrame.GetValue; allow them
+                    // through validation so a trigger-body UPSERT can reference the firing row.
+                    if (allowTriggerQualifiers
+                        && (qualifier.Equals("NEW", StringComparison.OrdinalIgnoreCase)
+                            || qualifier.Equals("OLD", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return;
+                    }
+
                     if (!qualifier.Equals("excluded", StringComparison.OrdinalIgnoreCase)
                         && !qualifier.Equals(tableName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -7667,51 +7682,51 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     "Managed UPSERT DO UPDATE does not support subquery expressions.");
             case FunctionExpression function:
                 foreach (var argument in function.Arguments)
-                    ValidateUpsertUpdateExpression(tableName, argument);
+                    ValidateUpsertUpdateExpression(tableName, argument, allowTriggerQualifiers);
                 return;
             case CollationExpression collation:
-                ValidateUpsertUpdateExpression(tableName, collation.Expression);
+                ValidateUpsertUpdateExpression(tableName, collation.Expression, allowTriggerQualifiers);
                 return;
             case CastExpression cast:
-                ValidateUpsertUpdateExpression(tableName, cast.Expression);
+                ValidateUpsertUpdateExpression(tableName, cast.Expression, allowTriggerQualifiers);
                 return;
             case CaseExpression @case:
                 if (@case.Operand is not null)
-                    ValidateUpsertUpdateExpression(tableName, @case.Operand);
+                    ValidateUpsertUpdateExpression(tableName, @case.Operand, allowTriggerQualifiers);
                 foreach (var clause in @case.Clauses)
                 {
-                    ValidateUpsertUpdateExpression(tableName, clause.When);
-                    ValidateUpsertUpdateExpression(tableName, clause.Then);
+                    ValidateUpsertUpdateExpression(tableName, clause.When, allowTriggerQualifiers);
+                    ValidateUpsertUpdateExpression(tableName, clause.Then, allowTriggerQualifiers);
                 }
                 if (@case.Else is not null)
-                    ValidateUpsertUpdateExpression(tableName, @case.Else);
+                    ValidateUpsertUpdateExpression(tableName, @case.Else, allowTriggerQualifiers);
                 return;
             case LikeExpression like:
-                ValidateUpsertUpdateExpression(tableName, like.Value);
-                ValidateUpsertUpdateExpression(tableName, like.Pattern);
+                ValidateUpsertUpdateExpression(tableName, like.Value, allowTriggerQualifiers);
+                ValidateUpsertUpdateExpression(tableName, like.Pattern, allowTriggerQualifiers);
                 if (like.Escape is not null)
-                    ValidateUpsertUpdateExpression(tableName, like.Escape);
+                    ValidateUpsertUpdateExpression(tableName, like.Escape, allowTriggerQualifiers);
                 return;
             case GlobExpression glob:
-                ValidateUpsertUpdateExpression(tableName, glob.Value);
-                ValidateUpsertUpdateExpression(tableName, glob.Pattern);
+                ValidateUpsertUpdateExpression(tableName, glob.Value, allowTriggerQualifiers);
+                ValidateUpsertUpdateExpression(tableName, glob.Pattern, allowTriggerQualifiers);
                 return;
             case InExpression @in:
-                ValidateUpsertUpdateExpression(tableName, @in.Value);
+                ValidateUpsertUpdateExpression(tableName, @in.Value, allowTriggerQualifiers);
                 foreach (var value in @in.Values)
-                    ValidateUpsertUpdateExpression(tableName, value);
+                    ValidateUpsertUpdateExpression(tableName, value, allowTriggerQualifiers);
                 return;
             case BetweenExpression between:
-                ValidateUpsertUpdateExpression(tableName, between.Value);
-                ValidateUpsertUpdateExpression(tableName, between.Lower);
-                ValidateUpsertUpdateExpression(tableName, between.Upper);
+                ValidateUpsertUpdateExpression(tableName, between.Value, allowTriggerQualifiers);
+                ValidateUpsertUpdateExpression(tableName, between.Lower, allowTriggerQualifiers);
+                ValidateUpsertUpdateExpression(tableName, between.Upper, allowTriggerQualifiers);
                 return;
             case UnaryExpression unary:
-                ValidateUpsertUpdateExpression(tableName, unary.Operand);
+                ValidateUpsertUpdateExpression(tableName, unary.Operand, allowTriggerQualifiers);
                 return;
             case BinaryExpression binary:
-                ValidateUpsertUpdateExpression(tableName, binary.Left);
-                ValidateUpsertUpdateExpression(tableName, binary.Right);
+                ValidateUpsertUpdateExpression(tableName, binary.Left, allowTriggerQualifiers);
+                ValidateUpsertUpdateExpression(tableName, binary.Right, allowTriggerQualifiers);
                 return;
             case StarExpression or QualifiedStarExpression:
                 throw new EmbeddedSqlException("row value misused");

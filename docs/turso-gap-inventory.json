@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 198,
+    "current_conformance_expected_failures": 195,
     "last_reconciled": "2026-08-07",
-    "entry_count": 197,
+    "entry_count": 198,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 55,
+        "compilation": 56,
         "parser": 28,
         "functions": 26,
         "storage": 20,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 60,
+        "divergent": 61,
         "partial": 27,
         "extension": 8,
         "parity": 2
@@ -43,11 +43,11 @@
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 87
+        "S": 90
       },
       "by_status": {
-        "open": 139,
-        "closed": 56
+        "open": 136,
+        "closed": 59
       }
     },
     "schema": {
@@ -2918,6 +2918,22 @@
        "alter_table.sqltest::alter-rename-col-schema-update-cmd-from"
      ],
      "notes": "Closed 2026-08-07. ALTER TABLE ... RENAME COLUMN rewrites trigger bodies through RenameColumnRewriter.WalkUpdate, which walked assignments, WHERE, RETURNING, and ORDER BY but never bound update.From (the UPDATE...FROM clause) into scope. A qualified reference like SET z = src.b FROM src therefore resolved src as Unresolved and threw 'no such column: src.b' instead of rewriting b to c. WalkUpdate now calls BindSource(update.From, scope) after creating the target table scope, mirroring WalkSelect's handling of select.Source, and also walks Limit/Offset. ResolveColumns returns the pre-rename column shape for the target table, so src.b matches and IsRenameTarget flags the binding for rewrite to src.c. Backed by ManagedDdlBoundaryTests.ManagedEngineRewritesUpdateFromTriggerBodyOnRenameColumn. Conformance baseline 199 -> 198; full suite 3801/0/47.",
+     "status": "closed"
+   },
+   {
+     "id": "compile-upsert-do-update-trigger-new-column-reference",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/emitter/mod.rs - UPSERT DO UPDATE expressions may reference NEW.column/OLD.column inside a trigger body (resolved against the trigger row frame at runtime)",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateUpsertUpdateExpression (ColumnExpression branch) now allows NEW/OLD qualifiers when allowTriggerQualifiers (context.InsideTrigger) is set; both call sites (PerformUpsertEvaluated in EmbeddedDatabase.cs, PerformRowTriggeredUpsert in EmbeddedDatabase.Triggers.cs) pass context.InsideTrigger",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "trigger_on_conflict.sqltest::trigger-upsert-new-column",
+       "trigger_on_conflict.sqltest::trigger-upsert-new-in-where",
+       "trigger_on_conflict.sqltest::trigger-upsert-new-in-where-no-update"
+     ],
+     "notes": "Closed 2026-08-07. ValidateUpsertUpdateExpression rejected any qualifier other than excluded/target table, so a trigger-body UPSERT DO UPDATE SET/WHERE referencing NEW.column errored with 'no such column: NEW.delta'. Added allowTriggerQualifiers=context.InsideTrigger to ValidateUpsertUpdateExpressions/ValidateUpsertUpdateExpression (with default false); the ColumnExpression branch now returns for NEW/OLD (case-insensitive) when inside a trigger, and TriggerRowFrame.GetValue resolves the column at runtime (erroring with 'no such column' if the NEW/OLD row lacks it). The recursive validator propagates the flag through all composite expression cases, covering both SET and WHERE. Backed by ManagedTriggerRowSemanticsTests.TriggerBodyUpsert* (differential AssertMatchesSqlite vs real Microsoft.Data.Sqlite). Conformance baseline 198 -> 195; all three linked cases removed, 0 added; full suite 3804/0/47.",
      "status": "closed"
    }
  ]
