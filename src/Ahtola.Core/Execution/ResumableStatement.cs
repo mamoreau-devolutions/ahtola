@@ -46,6 +46,7 @@ public sealed class ResumableStatement : IDisposable
     private readonly List<SqlValue[]>?[] _distinctSets;
     private readonly Dictionary<SqlValue[], int>?[] _groupIndexes;
     private readonly int[] _rowSetPositions;
+    private readonly Dictionary<int, IntegerRowSet> _integerRowSets = [];
     private readonly WorkTableRuntime?[] _workTables;
     private readonly WindowBufferRuntime?[] _windowBuffers;
     private readonly IReadOnlyList<VdbeCursorSource?>? _cursorSources;
@@ -882,6 +883,37 @@ public sealed class ResumableStatement : IDisposable
 
                         break;
                     }
+                case RowSetTestInstruction rowSetTest:
+                    {
+                        try
+                        {
+                            var value = _registers[rowSetTest.ValueRegister.Index];
+                            if (value.Kind != SqlValueKind.Integer)
+                                throw new InvalidOperationException("RowSetTest: P3 must be an integer");
+
+                            var rowSet = _integerRowSets.TryGetValue(rowSetTest.RowSetRegister.Index, out var existing)
+                                ? existing
+                                : _integerRowSets[rowSetTest.RowSetRegister.Index] = new IntegerRowSet();
+                            if (rowSetTest.Batch != 0 && rowSet.ContainsEarlierBatch(value.AsInteger(), rowSetTest.Batch))
+                            {
+                                _instructionPointer = rowSetTest.FoundTarget;
+                            }
+                            else
+                            {
+                                if (rowSetTest.Batch != -1)
+                                    rowSet.Insert(value.AsInteger());
+
+                                AdvanceInstructionPointer();
+                            }
+                        }
+                        catch
+                        {
+                            State = ResumableStatementState.Faulted;
+                            throw;
+                        }
+
+                        break;
+                    }
                 case CompoundResultRowInstruction compoundRow:
                     {
                         // Emit the candidate only when it satisfies the membership condition against every
@@ -1183,6 +1215,7 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_distinctSets);
         Array.Clear(_groupIndexes);
         Array.Clear(_rowSetPositions);
+        _integerRowSets.Clear();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
         _transaction.Reset();
@@ -1250,6 +1283,7 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_distinctSets);
         Array.Clear(_groupIndexes);
         Array.Clear(_rowSetPositions);
+        _integerRowSets.Clear();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
         _transaction.Reset();
@@ -1576,6 +1610,31 @@ public sealed class ResumableStatement : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    // Turso's RowSetTest keeps inserts from the current batch separate so a batch cannot match itself.
+    // It is deliberately not shared with _distinctSets: that store has tuple equality and drain semantics.
+    private sealed class IntegerRowSet
+    {
+        private readonly List<long> _pending = [];
+        private readonly HashSet<long> _priorBatchValues = [];
+        private int _batch;
+
+        public void Insert(long value) => _pending.Add(value);
+
+        public bool ContainsEarlierBatch(long value, int batch)
+        {
+            if (_batch != batch)
+            {
+                foreach (var pending in _pending)
+                    _priorBatchValues.Add(pending);
+
+                _pending.Clear();
+                _batch = batch;
+            }
+
+            return _priorBatchValues.Contains(value);
+        }
     }
 
     private sealed class GroupKeyEqualityComparer(

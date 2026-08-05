@@ -259,13 +259,13 @@
     {
       "id": "vdbe-rowset-test",
       "layer": "vdbe",
-      "kind": "missing",
+      "kind": "partial",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::RowSetTest (dedup probe: jump if rowid already in set)",
-      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::RowSetInsertInstruction, RowSetRewindInstruction, RowSetNextInstruction",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::RowSetTestInstruction; src/Ahtola.Core/Execution/ResumableStatement.cs::IntegerRowSet",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Ahtola's RowSet trio maps Turso's RowSetAdd/RowSetRead (insert + drain) but lacks RowSetTest, the membership probe used to deduplicate rowids from OR'd index scans. Without it, multi-index OR plans cannot dedup — consistent with the compilation-layer finding that OR-index-union plans are absent.",
+      "notes": "Fixed in part 2026-08-05: Ahtola now implements the Turso-compatible RowSetTest integer membership opcode, including batch-aware prior-batch probing, batch 0 insertion, batch -1 probe-only behavior, validation, EXPLAIN output, and reset/dispose cleanup. It deliberately remains separate from Ahtola's tuple row sets for compound queries. The entry stays open because no Ahtola program builder emits it yet: multi-index OR planning/lowering and its index-union cursor machinery are still absent.",
       "status": "open"
     },
     {

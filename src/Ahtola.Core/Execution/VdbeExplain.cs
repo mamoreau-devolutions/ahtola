@@ -346,6 +346,12 @@ public static class VdbeExplain
                 rowSetNext.Destination.Start.Index,
                 FormatRange(rowSetNext.Destination),
                 $"{FormatRange(rowSetNext.Destination)}=row set {rowSetNext.RowSetIndex} next, goto {rowSetNext.LoopTarget.Offset} if present"),
+            RowSetTestInstruction rowSetTest => (
+                rowSetTest.RowSetRegister.Index,
+                rowSetTest.FoundTarget.Offset,
+                rowSetTest.ValueRegister.Index,
+                rowSetTest.Batch.ToString(CultureInfo.InvariantCulture),
+                $"goto {rowSetTest.FoundTarget.Offset} if r[{rowSetTest.ValueRegister.Index}] is in integer row set r[{rowSetTest.RowSetRegister.Index}] from an earlier batch"),
             CompoundResultRowInstruction compound => (
                 compound.Values.Start.Index,
                 compound.Values.Count,

@@ -231,6 +231,7 @@ public enum VdbeOpcode
     RowCount = 71,
     Last = 72,
     Prev = 73,
+    RowSetTest = 74,
 }
 
 /// <summary>
@@ -1567,6 +1568,23 @@ public sealed record RowSetNextInstruction(
 }
 
 /// <summary>
+/// Tests the integer rowid in <paramref name="ValueRegister"/> against an integer row set associated with
+/// <paramref name="RowSetRegister"/>. A match in an earlier batch jumps to <paramref name="FoundTarget"/>.
+/// Batch <c>0</c> skips the membership probe and inserts the value; a positive batch probes only values
+/// inserted by earlier batches and then inserts the value; batch <c>-1</c> probes only and never inserts.
+/// This is Turso's <c>RowSetTest</c> primitive for multi-index scans. It is intentionally separate from the
+/// tuple row sets used by compound queries.
+/// </summary>
+public sealed record RowSetTestInstruction(
+    Register RowSetRegister,
+    ProgramCounter FoundTarget,
+    Register ValueRegister,
+    int Batch) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.RowSetTest;
+}
+
+/// <summary>
 /// Emits the tuple held in the register block <paramref name="Values"/> as a result row for a compound
 /// set operation, but only the first time an equal tuple both satisfies the membership condition
 /// <paramref name="Mode"/> against the probe sets <paramref name="MembershipSetIndices"/> and is novel to
@@ -2498,6 +2516,11 @@ public sealed class VdbeProgram
                     ValidateDistinctSet(rowSetNext.RowSetIndex, instructionIndex);
                     ValidateRegisterRange(rowSetNext.Destination, instructionIndex);
                     ValidateJumpTarget(rowSetNext.LoopTarget, instructionIndex);
+                    break;
+                case RowSetTestInstruction rowSetTest:
+                    ValidateRegister(rowSetTest.RowSetRegister, instructionIndex);
+                    ValidateJumpTarget(rowSetTest.FoundTarget, instructionIndex);
+                    ValidateRegister(rowSetTest.ValueRegister, instructionIndex);
                     break;
                 case CompoundResultRowInstruction compoundRow:
                     ValidateRegisterRange(compoundRow.Values, instructionIndex);
