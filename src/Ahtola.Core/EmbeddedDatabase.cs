@@ -38449,6 +38449,12 @@ public sealed class EmbeddedConnection : IDisposable
 
     private void BeginTransaction(bool openedBySavepoint, TransactionMode mode)
     {
+        if (mode == TransactionMode.Concurrent)
+        {
+            throw new EmbeddedSqlException(
+                "Concurrent transaction mode is only supported when MVCC is enabled");
+        }
+
         var databases = _attachedDatabases.Values
             .OrderBy(attachment => attachment.PathIdentity, StringComparer.OrdinalIgnoreCase)
             .Select(attachment => attachment.Database)

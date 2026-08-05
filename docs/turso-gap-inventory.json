@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 176,
+    "current_conformance_expected_failures": 175,
     "last_reconciled": "2026-08-08",
     "entry_count": 204,
     "counts": {
@@ -1319,10 +1319,9 @@
       "conformance_links": [
         "mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors",
         "mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors",
-        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors",
-        "temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc"
+        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors"
       ],
-      "notes": "Turso's MVCC engine adds `BEGIN CONCURRENT` as a fourth transaction-mode keyword alongside DEFERRED/IMMEDIATE/EXCLUSIVE. Ahtola's TransactionMode enum and BEGIN parsing (SqlParser.cs 110-124) only recognize the three stock SQLite keywords, so `BEGIN CONCURRENT` leaves CONCURRENT unconsumed and the statement fails with a generic 'Expected End' instead of the specific semantic error the conformance tests expect (e.g. 'cannot start a transaction within a transaction').",
+      "notes": "Turso's MVCC engine adds `BEGIN CONCURRENT` as a fourth transaction-mode keyword alongside DEFERRED/IMMEDIATE/EXCLUSIVE. Ahtola now parses it and, when no transaction is active, returns Turso's explicit 'Concurrent transaction mode is only supported when MVCC is enabled' diagnostic rather than a generic parse error (closing temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc). The remaining three cases require an actual MVCC journal mode: their first BEGIN CONCURRENT must succeed so the second BEGIN reports nested-transaction state. Ahtola has no MVCC journal implementation yet, so those cases remain open.",
       "status": "open"
     },
     {

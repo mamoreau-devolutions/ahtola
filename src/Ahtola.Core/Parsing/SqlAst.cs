@@ -402,6 +402,9 @@ internal enum TransactionMode
     /// <summary>Take the write lock lazily, at the first write.</summary>
     Deferred,
 
+    /// <summary>Use Turso's MVCC-only concurrent transaction mode.</summary>
+    Concurrent,
+
     /// <summary>Take the write lock at <c>BEGIN</c>.</summary>
     Immediate,
 

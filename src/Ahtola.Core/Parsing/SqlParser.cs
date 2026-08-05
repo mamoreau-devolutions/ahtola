@@ -114,6 +114,8 @@ internal sealed class SqlParser
             var mode = TransactionMode.Deferred;
             if (ConsumeKeyword("DEFERRED"))
                 mode = TransactionMode.Deferred;
+            else if (ConsumeKeyword("CONCURRENT"))
+                mode = TransactionMode.Concurrent;
             else if (ConsumeKeyword("IMMEDIATE"))
                 mode = TransactionMode.Immediate;
             else if (ConsumeKeyword("EXCLUSIVE"))

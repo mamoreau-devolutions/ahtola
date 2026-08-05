@@ -115,7 +115,6 @@ subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-u
 subquery/memory.sqltest::subquery-correlated-outer-ref-in-nested-group-by-subquery | expected an error but the statement succeeded
 temp_tables.sqltest::temp-table-join-can-distinguish-main-and-temp | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 temp_tables_mvcc.sqltest::pragma-temp-journal-mode-mvcc-is-ignored | expected 2 row(s), got 2 row(s); row 0 expected 'wal' but was 'memory'
-temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc | error 'Expected End. At SQL offset 6.' does not match pattern 'Concurrent transaction mode is only supported when MVCC is enabled'
 temp_tables_mvcc.sqltest::temp-autoincrement-is-allowed-when-main-db-is-mvcc | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'wal'
 transactions.sqltest::temp-and-main-table-in-immediate-tx | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 trigger_attach_regression.sqltest::trigger-cross-db-subquery-reject | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern 'trigger trg_cross_subquery cannot reference objects in database aux

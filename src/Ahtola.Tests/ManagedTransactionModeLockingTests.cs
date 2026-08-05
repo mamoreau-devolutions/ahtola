@@ -418,6 +418,21 @@ public class ManagedTransactionModeLockingTests
     }
 
     [Test]
+    public void ConcurrentTransactionReportsMvccRequirementWithoutOpeningATransaction()
+    {
+        using var db = new ManagedFileDatabase();
+        using var connection = db.Connect();
+
+        var error = Capture(() => connection.ExecuteNonQuery("BEGIN CONCURRENT;"));
+
+        error.Should().NotBeNull();
+        error!.Message.Should().Contain("Concurrent transaction mode is only supported when MVCC is enabled");
+
+        connection.ExecuteNonQuery("BEGIN;");
+        connection.ExecuteNonQuery("ROLLBACK;");
+    }
+
+    [Test]
     public void RepeatedTransactionModeKeywordIsRejected()
     {
         using var db = new ManagedFileDatabase();
