@@ -28,11 +28,11 @@
         "sync": 18
       },
       "by_kind": {
-        "missing": 98,
+        "missing": 97,
         "divergent": 68,
         "partial": 27,
         "extension": 8,
-        "parity": 3
+        "parity": 4
       },
       "by_severity": {
         "s3-perf": 34,
@@ -46,8 +46,8 @@
         "S": 93
       },
       "by_status": {
-        "open": 136,
-        "closed": 68
+        "open": 135,
+        "closed": 69
       }
     },
     "schema": {
@@ -686,18 +686,14 @@
     {
       "id": "compile-trigger-new-not-visible-in-upsert-clause",
       "layer": "compilation",
-      "kind": "missing",
+      "kind": "parity",
       "turso_ref": "turso-src/core/translate/trigger.rs, upsert.rs (NEW/OLD pseudo-tables visible inside a trigger body's own UPSERT statement)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation/DmlStatementCompiler.cs (UPSERT), EmbeddedDatabase.Triggers.cs (NEW/OLD row binding)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateUpsertUpdateExpressions, ValidateUpsertUpdateExpression",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [
-        "trigger_on_conflict.sqltest::trigger-upsert-new-column",
-        "trigger_on_conflict.sqltest::trigger-upsert-new-in-where",
-        "trigger_on_conflict.sqltest::trigger-upsert-new-in-where-no-update"
-      ],
-      "notes": "When a trigger body contains an INSERT ... ON CONFLICT DO UPDATE SET x = NEW.col statement, Ahtola fails with \"no such table: NEW\" -- the trigger's NEW/OLD pseudo-table binding is not threaded into the nested UPSERT statement's compilation scope, though it works for plain INSERT/UPDATE/DELETE bodies.",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. The managed UPSERT expression validator now preserves NEW/OLD pseudo-row qualifiers inside trigger bodies, including DO UPDATE assignments and WHERE clauses. The full trigger_on_conflict.sqltest corpus passes, covering all three former links.",
+      "status": "closed"
     },
     {
       "id": "compile-order-by-aggregate-misuse-not-rejected",
