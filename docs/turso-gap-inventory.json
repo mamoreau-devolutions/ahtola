@@ -46,8 +46,8 @@
         "S": 93
       },
       "by_status": {
-        "open": 139,
-        "closed": 65
+        "open": 138,
+        "closed": 66
       }
     },
     "schema": {
@@ -2402,19 +2402,13 @@
       "id": "mvcc-savepoint-cache-size-pragma-gap",
       "layer": "mvcc",
       "kind": "partial",
-      "turso_ref": "turso-src/core/vdbe/execute.rs (Savepoint opcode arm, load_insn!(Savepoint { op, name }, insn))",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (SAVEPOINT keyword parsing), src/Ahtola.Core/Execution/VdbeTransaction.cs::Savepoint/Release/RollbackTo",
+      "turso_ref": "turso-src/core/translate/pragma.rs::update_cache_size, turso-src/core/vdbe/execute.rs (Savepoint opcode arm, load_insn!(Savepoint { op, name }, insn))",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecutePragmaCacheSize, NormalizeCacheSize; src/Ahtola.Core/Execution/VdbeTransaction.cs::Savepoint/Release/RollbackTo",
       "severity": "s2-capability",
       "effort": "S",
-      "conformance_links": [
-        "savepoint.sqltest::savepoint-rollback-overflow-issue-6352",
-        "savepoint.sqltest::savepoint-rollback-overflow-nested-issue-6352",
-        "savepoint.sqltest::savepoint-rollback-overflow-repeated-issue-6352",
-        "savepoint.sqltest::savepoint-rollback-overflow-grow-issue-6352",
-        "savepoint.sqltest::savepoint-rollback-cache-spill-issue-6351"
-      ],
-      "notes": "Ahtola's core SAVEPOINT/RELEASE/ROLLBACK TO grammar and nested-frame semantics are implemented and unit-tested (VdbeTransactionContextSavepointNameMatchingTests.cs, TransactionOpcodeExecutionTests.cs) and match SQLite's case-insensitive topmost-match rule. However, five conformance cases that exercise savepoint rollback under overflow/cache-spill conditions (upstream issues #6351/#6352) all fail for an unrelated reason: `PRAGMA cache_size` is unsupported ('Unsupported PRAGMA cache_size. At SQL offset 18'), so the test setup itself cannot run, masking whether the underlying savepoint-rollback-under-cache-pressure behavior is even correct. This is filed under mvcc/transactions rather than the pragma layer because the observable symptom is 'savepoint tests fail', but the root cause is a PRAGMA gap; closing PRAGMA cache_size support would unblock verifying real savepoint behavior here.",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. Ahtola already accepts and reads back PRAGMA cache_size as a connection-scoped hint, including Turso-aligned negative-KiB and minimum-size normalization. The managed pager does not evict at that hint yet, but the setting is advisory. The full savepoint.sqltest corpus, including the five issue #6351/#6352 overflow and cache-spill regressions, now passes and no expected-failure line remains.",
+      "status": "closed"
     },
     {
       "id": "mvcc-deferred-fk-across-statement-boundaries",
