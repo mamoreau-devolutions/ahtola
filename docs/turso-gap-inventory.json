@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 122,
-        "closed": 84
+        "open": 121,
+        "closed": 85
       }
     },
     "schema": {
@@ -1947,13 +1947,13 @@
       "id": "func-agg-arg-collation-typeof-spotcheck",
       "layer": "functions",
       "kind": "divergent",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Typeof; turso-src/core/types.rs affinity rules used by SUM/TOTAL/AVG",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs; src/Ahtola.Core/SqlValue.cs",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Typeof; turso-src/core/vdbe/execute.rs::{handle_text_sum,update_agg_payload,finalize_agg_payload}; turso-src/core/types.rs numeric affinity",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::{NumericAggregateAccumulator,EvaluateSum}; src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs; src/Ahtola.Core/SqlValue.cs",
       "severity": "s1-correctness",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Requested spot-check area: typeof() results and numeric affinity coercion inside SUM/TOTAL/AVG when mixing TEXT-that-looks-numeric, REAL, and INTEGER inputs. No concrete conformance-file citation was found pinpointing a live divergence in the current expected-failures list (the two 'no such function' JSONB entries and the TEST_NONDET_COUNTER entries are the only agg/scalar related lines), so this entry records the spot-check as inconclusive/needs-follow-up rather than a confirmed bug; keep open for a follow-up pass once JSONB and octet_length gaps are closed and the corpus can be re-run to look for newly-surfaced numeric-affinity failures.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. The aggregate affinity audit found no remaining divergence after the shared Turso-compatible NumericAggregateAccumulator port. NumericAffinityParityTests exercises strict numeric-affinity inputs, TEXT numeric prefixes, BLOBs, result types, and SUM/TOTAL/AVG coercion; NumericAggregateParityTests covers compensated REAL accumulation, TYPEOF outputs, NULL/Infinity behavior, exact integer totals, and Turso's distinct native-integer versus text-overflow paths. TursoAggregateStepParityTests verifies the compiled AggStep overflow timing. The 49-test focused audit passed with no new expected-failure key.",
+      "status": "closed"
     },
     {
       "id": "func-math-result-type-divergence",
