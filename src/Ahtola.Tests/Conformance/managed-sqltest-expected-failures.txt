@@ -59,7 +59,6 @@ join/outer_hash_join.sqltest::full-outer-with-where-equijoin | expected 4 row(s)
 joins/derived_subquery_on_predicate.sqltest::issue-7372-text-range-join-after-analyze | setup 'issue-7372-schema' failed: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 json/json-insert-replace-odd-args.sqltest::jsonb-insert-path-only-errors | error 'no such function: JSONB_INSERT' does not match pattern 'json_insert\(\) needs an odd number of arguments'
 json/json-insert-replace-odd-args.sqltest::jsonb-replace-path-only-errors | error 'no such function: JSONB_REPLACE' does not match pattern 'json_replace\(\) needs an odd number of arguments'
-last_insert_rowid.sqltest::last-insert-rowid-after-insert-returning | expected 5 row(s), got 5 row(s); row 1 expected '20' but was '10'
 mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors | error 'Expected End. At SQL offset 6.' does not match pattern 'cannot start a transaction within a transaction'
 mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors | error 'Expected End. At SQL offset 6.' does not match pattern 'cannot start a transaction within a transaction'
 mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors | error 'Expected End. At SQL offset 6.' does not match pattern 'cannot start a transaction within a transaction'
@@ -89,7 +88,6 @@ returning.sqltest::update-returning-after-trigger-same-row-direct | expected 2 r
 returning.sqltest::update-returning-after-trigger-same-row-subquery | expected 2 row(s), got 2 row(s); row 0 expected '120/120' but was '20/20'
 returning.sqltest::delete-returning-target-selfread-reruns-per-row | expected 2 row(s), got 2 row(s); row 0 expected '1/2' but was '1/3'
 returning.sqltest::delete-returning-target-selfread-correlated-group-count | expected 2 row(s), got 2 row(s); row 0 expected '1/1' but was '1/2'
-returning.sqltest::insert-returning-last-insert-rowid | expected 1 row(s), got 1 row(s); row 0 expected '1' but was '0'
 returning.sqltest::insert-returning-target-selfread-reruns-per-row | expected 2 row(s), got 2 row(s); row 0 expected '2/2' but was '2/3'
 rollback.sqltest::schema-change-rollback-2-2 | expected 2 row(s), got 2 row(s); row 0 expected 'before' but was 'after'
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition | expected success but got error: managed execution exceeded 30 seconds

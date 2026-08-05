@@ -8227,7 +8227,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 rowsToInsert.Count > 0,
                 parameters,
                 context,
-                lastInsertRowId);
+                lastInsertRowId,
+                table.HasRowid
+                    ? insertedRowIds.Cast<long?>().ToArray()
+                    : null);
         }
 
         return new ExecutionResult([], [], rowsToInsert.Count, rowsToInsert.Count > 0)
@@ -8306,7 +8309,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 rowsToInsert.Count > 0,
                 parameters,
                 context,
-                lastInsertRowId);
+                lastInsertRowId,
+                table.HasRowid
+                    ? insertedRowIds.Cast<long?>().ToArray()
+                    : null);
         }
 
         return new ExecutionResult([], [], rowsToInsert.Count, rowsToInsert.Count > 0)
