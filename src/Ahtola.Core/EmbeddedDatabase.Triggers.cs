@@ -2128,7 +2128,7 @@ public sealed partial class EmbeddedDatabase
             case null:
                 return;
             case NamedTableSource named:
-                if (!commonTableExpressions.Contains(named.Name)
+                if ((!named.IsSchemaQualified && !commonTableExpressions.Contains(named.Name))
                     && !context.Tables.ContainsKey(named.Name)
                     && context.Views?.ContainsKey(named.Name) != true
                     && !IsSchemaTable(named.Name))

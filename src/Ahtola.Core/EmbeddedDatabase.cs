@@ -5156,7 +5156,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ambiguousQualifiedColumns = GetAmbiguousQualifiedColumns(source, context);
             AppendSchemaRowidBindings(source, context, values, qualifiedColumns);
             if (source is NamedTableSource named
-                && !context.CommonTableExpressions.ContainsKey(named.Name)
+                && !IsCommonTableExpression(named, context)
                 && context.Tables.TryGetValue(named.Name, out var table)
                 && table.HasRowid)
             {
@@ -5185,7 +5185,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         switch (source)
         {
             case NamedTableSource named
-                when !context.CommonTableExpressions.ContainsKey(named.Name)
+                when !IsCommonTableExpression(named, context)
                      && context.Tables.TryGetValue(named.Name, out var table)
                      && table.HasRowid:
                 var rowIdIndex = values.Count;
@@ -9339,7 +9339,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         void Add(NamedTableSource named)
         {
-            var isCommonTableExpression = context.CommonTableExpressions.ContainsKey(named.Name);
+            var isCommonTableExpression = IsCommonTableExpression(named, context);
             var qualifier = named.Alias
                 ?? (isCommonTableExpression ? named.Name : ManagedSchemaName.Display(named.Name));
             if (seen.Add(qualifier))
@@ -17037,7 +17037,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (named.IndexDirective is IndexedByDirective)
             return null;
         if (IsSchemaTable(named.Name)
-            || context.CommonTableExpressions.ContainsKey(named.Name)
+            || IsCommonTableExpression(named, context)
             || TryGetView(context, named.Name, out _))
         {
             return null;
@@ -19595,7 +19595,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         QueryContext context)
     {
         if (source is not NamedTableSource named
-            || context.CommonTableExpressions.ContainsKey(named.Name)
+            || IsCommonTableExpression(named, context)
             || !context.Tables.TryGetValue(named.Name, out var table)
             || !table.HasRowid)
         {
@@ -19638,7 +19638,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         if (outerRow is not null
             || statement.Source is not NamedTableSource named
-            || context.CommonTableExpressions.ContainsKey(named.Name)
+            || IsCommonTableExpression(named, context)
             || TryGetView(context, named.Name, out _))
         {
             return false;
@@ -19846,7 +19846,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         switch (source)
         {
-            case NamedTableSource named when context.CommonTableExpressions.TryGetValue(named.Name, out var commonTableExpression):
+            case NamedTableSource named when TryGetCommonTableExpression(named, context, out var commonTableExpression):
                 {
                     var qualifier = named.Alias ?? named.Name;
                     if (!string.Equals(column.Qualifier, qualifier, StringComparison.OrdinalIgnoreCase))
@@ -20753,7 +20753,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         return source switch
         {
-            NamedTableSource named when string.Equals(
+            NamedTableSource named when !named.IsSchemaQualified && string.Equals(
                 named.Name,
                 name,
                 StringComparison.OrdinalIgnoreCase) => true,
@@ -21034,6 +21034,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             && select.Limit is null
             && select.Offset is null
             && select.Source is NamedTableSource named
+            && !named.IsSchemaQualified
             && string.Equals(named.Name, name, StringComparison.OrdinalIgnoreCase);
 
     private static bool TryGetNotMaterializedPassThrough(
@@ -21283,7 +21284,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return source switch
         {
             null => 0,
-            NamedTableSource named => string.Equals(named.Name, name, StringComparison.OrdinalIgnoreCase) ? 1 : 0,
+            NamedTableSource named => !named.IsSchemaQualified
+                && string.Equals(named.Name, name, StringComparison.OrdinalIgnoreCase) ? 1 : 0,
             JoinTableSource join => CountDirectFromReferences(join.Left, name) + CountDirectFromReferences(join.Right, name),
             _ => 0,
         };
@@ -21352,7 +21354,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return source switch
         {
             null => 0,
-            NamedTableSource named => string.Equals(named.Name, name, StringComparison.OrdinalIgnoreCase) ? 1 : 0,
+            NamedTableSource named => !named.IsSchemaQualified
+                && string.Equals(named.Name, name, StringComparison.OrdinalIgnoreCase) ? 1 : 0,
             DerivedTableSource derived => CountAllReferences(derived.Query, name),
             JoinTableSource join => CountReferencesInTableSource(join.Left, name)
                 + CountReferencesInTableSource(join.Right, name)
@@ -21666,7 +21669,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             null => [],
             NamedTableSource named when IsSchemaTable(named.Name) => ["type", "name", "tbl_name", "rootpage", "sql"],
-            NamedTableSource named when context.CommonTableExpressions.TryGetValue(named.Name, out var commonTableExpression)
+            NamedTableSource named when TryGetCommonTableExpression(named, context, out var commonTableExpression)
                 => commonTableExpression.Columns,
             NamedTableSource named when TryGetView(context, named.Name, out var view)
                 => ResolveViewColumns(view, EnterView(context, view.Name)),
@@ -21691,7 +21694,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return [];
             case NamedTableSource named when IsSchemaTable(named.Name):
                 return BuildOutputColumns(named.Alias ?? named.Name, ["type", "name", "tbl_name", "rootpage", "sql"], source);
-            case NamedTableSource named when context.CommonTableExpressions.TryGetValue(named.Name, out var commonTableExpression):
+            case NamedTableSource named when TryGetCommonTableExpression(named, context, out var commonTableExpression):
                 return BuildOutputColumns(named.Alias ?? named.Name, commonTableExpression.Columns, source);
             case NamedTableSource named when TryGetView(context, named.Name, out var view):
                 return BuildOutputColumns(named.Alias ?? view.Name, ResolveViewColumns(view, EnterView(context, view.Name)), source);
@@ -21854,6 +21857,23 @@ public sealed partial class EmbeddedDatabase : IDisposable
         int offset)
         => indices is null ? null : indices.Select(index => index + offset).ToArray();
 
+    private static bool IsCommonTableExpression(NamedTableSource source, QueryContext context)
+        => !source.IsSchemaQualified && context.CommonTableExpressions.ContainsKey(source.Name);
+
+    private static bool TryGetCommonTableExpression(
+        NamedTableSource source,
+        QueryContext context,
+        out SourceData commonTableExpression)
+    {
+        if (source.IsSchemaQualified)
+        {
+            commonTableExpression = null!;
+            return false;
+        }
+
+        return context.CommonTableExpressions.TryGetValue(source.Name, out commonTableExpression!);
+    }
+
     private SourceData GetSourceRows(
         TableSource? source,
         SqlValue[] parameters,
@@ -21866,7 +21886,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         return source switch
         {
-            NamedTableSource named when context.CommonTableExpressions.TryGetValue(named.Name, out var commonTableExpression)
+            NamedTableSource named when TryGetCommonTableExpression(named, context, out var commonTableExpression)
                 => GetCommonTableExpressionRows(named, commonTableExpression, outerRow, maximumRows),
             NamedTableSource named when TryGetView(context, named.Name, out var view)
                 => GetViewRows(named, view, parameters, context, maximumRows, outerRow),
@@ -22117,7 +22137,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             || predicate is null
             || context.StatementState is not { } statementState
             || IsSchemaTable(named.Name)
-            || context.CommonTableExpressions.ContainsKey(named.Name)
+            || IsCommonTableExpression(named, context)
             || context.Views?.ContainsKey(named.Name) == true
             || !context.Tables.TryGetValue(named.Name, out var table)
             || !TryCreateTransientEqualityLookup(named, table, predicate, context, out var lookup))
@@ -23053,7 +23073,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             NamedTableSource named when IsSchemaTable(named.Name) => BuildQualifiedColumns(
                 named.Alias ?? named.Name,
                 ["type", "name", "tbl_name", "rootpage", "sql"]),
-            NamedTableSource named when context.CommonTableExpressions.TryGetValue(named.Name, out var commonTableExpression)
+            NamedTableSource named when TryGetCommonTableExpression(named, context, out var commonTableExpression)
                 => BuildQualifiedColumns(named.Alias ?? named.Name, commonTableExpression.Columns),
             NamedTableSource named when TryGetView(context, named.Name, out var view)
                 => BuildQualifiedColumns(named.Alias ?? view.Name, ResolveViewColumns(view, EnterView(context, view.Name))),
@@ -24319,7 +24339,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 new(named.Alias ?? named.Name, "rootpage", ColumnAffinity.Integer),
                 new(named.Alias ?? named.Name, "sql", ColumnAffinity.Text),
             ],
-            NamedTableSource named when commonTableExpressions.TryGetValue(named.Name, out var cte)
+            NamedTableSource named when !named.IsSchemaQualified
+                && commonTableExpressions.TryGetValue(named.Name, out var cte)
                 => QualifyAffinityColumns(cte, named.Alias ?? named.Name),
             NamedTableSource named when TryGetView(context, named.Name, out var view)
                 => QualifyAffinityColumns(
@@ -26789,7 +26810,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return source switch
         {
             NamedTableSource named
-                when !context.CommonTableExpressions.ContainsKey(named.Name)
+                when !IsCommonTableExpression(named, context)
                      && context.Tables.TryGetValue(named.Name, out var table)
                      && table.HasRowid
                 => new[] { "rowid", "_rowid_", "oid" }
@@ -30168,7 +30189,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (source is NamedTableSource named
             && !IsSchemaTable(named.Name)
             && !context.Tables.ContainsKey(named.Name)
-            && !context.CommonTableExpressions.ContainsKey(named.Name)
+            && !IsCommonTableExpression(named, context)
             && !TryGetView(context, named.Name, out _))
         {
             if (memo is not null)
@@ -37830,7 +37851,7 @@ public sealed class EmbeddedConnection : IDisposable
             case NamedTableSource named:
                 if (ManagedSchemaName.TrySplit(named.Name, out var schema, out _))
                     schemas.Add(schema);
-                else if (!commonTableExpressions.Contains(named.Name))
+                else if (named.IsSchemaQualified || !commonTableExpressions.Contains(named.Name))
                     schemas.Add(UnqualifiedSchemaMarker + named.Name);
                 break;
             case DerivedTableSource derived:
@@ -38186,7 +38207,8 @@ public sealed class EmbeddedConnection : IDisposable
         return source switch
         {
             null => null,
-            NamedTableSource named => commonTableExpressions.Contains(named.Name)
+            NamedTableSource named => !named.IsSchemaQualified
+                && commonTableExpressions.Contains(named.Name)
                 ? named
                 : named with { Name = RewriteSourceObjectName(named.Name, schema) },
             DerivedTableSource derived => derived with

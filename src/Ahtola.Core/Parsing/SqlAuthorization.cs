@@ -561,7 +561,7 @@ internal static class SqlAuthorization
                 case NamedTableSource named:
                     {
                         var (schema, name) = Split(named.Name);
-                        if (schema is null && _cteNames.Contains(name))
+                        if (schema is null && !named.IsSchemaQualified && _cteNames.Contains(name))
                         {
                             Current.Add(new Scope(null, name, named.Alias, [], IsBaseTable: false));
                             return named;

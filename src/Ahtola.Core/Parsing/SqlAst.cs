@@ -433,7 +433,8 @@ internal abstract record TableSource;
 internal sealed record NamedTableSource(
     string Name,
     string? Alias = null,
-    TableIndexDirective? IndexDirective = null) : TableSource;
+    TableIndexDirective? IndexDirective = null,
+    bool IsSchemaQualified = false) : TableSource;
 
 internal abstract record TableIndexDirective;
 

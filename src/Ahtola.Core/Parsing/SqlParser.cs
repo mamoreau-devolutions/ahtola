@@ -2590,7 +2590,11 @@ internal sealed class SqlParser
         if (_lexer.Current.Kind != TokenKind.LeftParen)
         {
             var alias = ParseTableAlias();
-            var namedSource = new NamedTableSource(name, alias, ParseTableIndexDirective());
+            var namedSource = new NamedTableSource(
+                name,
+                alias,
+                ParseTableIndexDirective(),
+                ManagedSchemaName.TrySplit(name, out _, out _));
             _spans?.RecordName(namedSource, tableSourceToken);
             return namedSource;
         }

@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 164,
+    "current_conformance_expected_failures": 163,
     "last_reconciled": "2026-08-08",
     "entry_count": 204,
     "counts": {
