@@ -176,5 +176,3 @@ upsert.sqltest::upsert-doubly-qualified-target | expected success but got error:
 upsert.sqltest::upsert-targets-chain | expected success but got error: Expected End. At SQL offset 215.
 views.sqltest::view-rejects-aggregate-order-by | expected an error but the statement succeeded
 window/dense_rank.sqltest::dense-rank-column-declared-collation | expected 3 row(s), got 3 row(s); row 0 expected '2/1/1' but was '1/1/2'
-window/lag_lead.sqltest::lag-lead-negative-offset-multi | expected 5 row(s), got 5 row(s); row 0 expected '1//' but was '1/4/'
-window/lag_lead.sqltest::lag-lead-per-row-mixed-sign-offset | expected 5 row(s), got 5 row(s); row 2 expected '3/-2//1' but was '3/-2/5/1'

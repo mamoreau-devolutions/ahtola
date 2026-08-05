@@ -135,6 +135,27 @@ public sealed class WindowFunctionSemanticsTests
     }
 
     [Test]
+    public void NegativeLagOffsetsMatchSqliteNavigationSemantics()
+    {
+        string[] setup =
+        [
+            "CREATE TABLE offsets(x INTEGER, offset_value INTEGER);",
+            "INSERT INTO offsets VALUES (1, -1), (2, 2), (3, -2), (4, 1), (5, -3);",
+        ];
+
+        AssertMatchesSqlite(
+            setup,
+            """
+            SELECT x,
+                   lag(x, -3) OVER (ORDER BY x),
+                   lead(x, -3) OVER (ORDER BY x),
+                   lag(x, offset_value) OVER (ORDER BY x),
+                   lead(x, offset_value) OVER (ORDER BY x)
+            FROM offsets;
+            """);
+    }
+
+    [Test]
     public void NamedWindowChainingFilteringAndComposedResultsMatchSqlite()
     {
         AssertMatchesSqlite(

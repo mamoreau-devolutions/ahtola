@@ -32275,9 +32275,19 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (offsetValue.Kind != SqlValueKind.Null
             && TryGetExactWindowInteger(offsetValue, out var offset))
         {
-            target = function.Name.Equals("LAG", StringComparison.OrdinalIgnoreCase)
-                ? (decimal)position - offset
-                : (decimal)position + offset;
+            if (function.Name.Equals("LAG", StringComparison.OrdinalIgnoreCase)
+                && offset < -1)
+            {
+                // SQLite only permits lag's special one-row look-ahead for -1.
+                // More-negative offsets miss instead of seeking farther forward.
+                target = null;
+            }
+            else
+            {
+                target = function.Name.Equals("LAG", StringComparison.OrdinalIgnoreCase)
+                    ? (decimal)position - offset
+                    : (decimal)position + offset;
+            }
         }
 
         if (target is >= 0 && target < entries.Count)
