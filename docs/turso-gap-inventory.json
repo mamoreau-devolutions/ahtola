@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 161,
+    "current_conformance_expected_failures": 160,
     "last_reconciled": "2026-08-08",
     "entry_count": 204,
     "counts": {
@@ -1373,16 +1373,16 @@
     {
       "id": "parser-alter-table-alter-column",
       "layer": "parser",
-      "kind": "missing",
-      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::AlterTableBody (Turso extension variant for ALTER COLUMN, beyond stock SQLite's Add/Rename/RenameColumn/DropColumn)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::AlterTableAddColumnStatement / AlterTableRenameStatement / AlterTableRenameColumnStatement / AlterTableDropColumnStatement (no AlterColumn form); src/Ahtola.Core/Parsing/SqlParser.cs 'Expected ADD, DROP, or RENAME after ALTER TABLE.'",
+      "kind": "closed",
+      "turso_ref": "turso-src/core/translate/alter.rs::translate_alter_table (ALTER COLUMN replacement-column handling, physical-layout rewrite, and AUTOINCREMENT sequence cleanup)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::AlterTableAlterColumnStatement; src/Ahtola.Core/Parsing/SqlParser.cs::ParseAlterTable; src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteAlterTableAlterColumn / EmbeddedTable.CreateWithAlteredColumn",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
         "autoincr.sqltest::autoinc-alter-column-clears-sequence-row"
       ],
-      "notes": "`ALTER TABLE t ALTER COLUMN a TO a2 TEXT` (rename + retype a column in one statement) is a Turso extension beyond stock SQLite's ADD COLUMN / RENAME [TO] / RENAME COLUMN / DROP COLUMN. Ahtola's ALTER TABLE dispatch only recognizes those four stock forms and throws 'Expected ADD, DROP, or RENAME after ALTER TABLE.' for ALTER COLUMN. Flagged s2 (capability gap vs. Turso) rather than s4 because the conformance corpus (derived from Turso's own test suite) exercises it, but note it is not part of SQLite's own grammar.",
-      "status": "open"
+      "notes": "Closed 2026-08-05. Ahtola parses and atomically rebuilds supported `ALTER TABLE ... ALTER COLUMN <old> TO <new> <definition>` operations, preserving rows, row order, explicit indexes, table constraints, foreign-key parent-column metadata, and token-aware dependent view/trigger rewrites. It regenerates a consistent CREATE TABLE statement and removes sqlite_sequence state when an AUTOINCREMENT rowid alias is replaced by a non-alias. Replacing with PRIMARY KEY, UNIQUE, generated, or REFERENCES constraints is explicitly rejected because those changes require physical-layout or foreign-key data migration beyond the supported operation.",
+      "status": "closed"
     },
     {
       "id": "parser-numeric-literal-digit-separators",

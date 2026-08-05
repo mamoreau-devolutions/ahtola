@@ -158,6 +158,11 @@ internal sealed record AlterTableRenameColumnStatement(
     string NewName,
     bool QuoteNewName = false) : ParsedStatement;
 
+internal sealed record AlterTableAlterColumnStatement(
+    string TableName,
+    string ColumnName,
+    EmbeddedColumn Column) : ParsedStatement;
+
 internal sealed record AlterTableDropColumnStatement(string TableName, string ColumnName) : ParsedStatement;
 
 internal sealed record InsertStatement(

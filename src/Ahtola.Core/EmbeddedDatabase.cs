@@ -1431,7 +1431,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         or DropTableStatement or CreateIndexStatement or DropIndexStatement
         or CreateViewStatement or DropViewStatement or CreateTriggerStatement or DropTriggerStatement
         or AlterTableAddColumnStatement or AlterTableRenameStatement or AlterTableRenameColumnStatement
-        or AlterTableDropColumnStatement
+        or AlterTableAlterColumnStatement or AlterTableDropColumnStatement
         or InsertStatement or UpdateStatement or DeleteStatement or WithDmlStatement
         or ReindexStatement or VacuumStatement
         or PragmaHeaderIntegerStatement { Value: not null }
@@ -1443,7 +1443,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         or DropTableStatement or CreateIndexStatement or DropIndexStatement
         or CreateViewStatement or DropViewStatement or CreateTriggerStatement or DropTriggerStatement
         or AlterTableAddColumnStatement or AlterTableRenameStatement or AlterTableRenameColumnStatement
-        or AlterTableDropColumnStatement;
+        or AlterTableAlterColumnStatement or AlterTableDropColumnStatement;
 
     /// <summary>
     /// A read-only view over the live schema, used to resolve column ownership while an
@@ -2753,6 +2753,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
             AlterTableRenameColumnStatement renameColumn => ExecuteAlterTableRenameColumn(
                 renameColumn,
                 catalog,
+                context),
+            AlterTableAlterColumnStatement alterColumn => ExecuteAlterTableAlterColumn(
+                alterColumn,
+                catalog,
+                parameters,
                 context),
             AlterTableDropColumnStatement dropColumn => ExecuteAlterTableDropColumn(dropColumn, catalog, context),
             InsertStatement insert => ExecuteDmlWithAutoIncrementState(
@@ -4555,6 +4560,180 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 catalog.Views[entry.Key] = entry.Value;
         }
 
+        if (candidateTriggers is not null)
+        {
+            foreach (var entry in candidateTriggers)
+                catalog.Triggers[entry.Key] = entry.Value;
+        }
+
+        return new ExecutionResult([], [], 0, true);
+    }
+
+    private ExecutionResult ExecuteAlterTableAlterColumn(
+        AlterTableAlterColumnStatement statement,
+        SchemaCatalog catalog,
+        SqlValue[] parameters,
+        QueryContext context)
+    {
+        if (IsSqliteSequenceTable(statement.TableName)
+            && catalog.Tables.ContainsKey(statement.TableName))
+        {
+            throw new EmbeddedSqlException($"table {SqliteSequenceTableName} may not be altered");
+        }
+        if (!catalog.Tables.TryGetValue(statement.TableName, out var table))
+            throw new EmbeddedSqlException($"no such table: {statement.TableName}");
+
+        ValidateCollation(statement.Column.Collation);
+        foreach (var check in statement.Column.CheckConstraints)
+            ValidateCheckConstraintFunctions(check.Expression);
+
+        var oldName = table.Columns[table.GetColumnIndex(statement.ColumnName)];
+        var replacement = table.CreateWithAlteredColumn(
+            statement.ColumnName,
+            statement.Column,
+            context.CancellationToken);
+        var candidateTables = new Dictionary<string, EmbeddedTable>(
+            catalog.Tables,
+            StringComparer.OrdinalIgnoreCase)
+        {
+            [statement.TableName] = replacement,
+        };
+
+        // A replacement name must also become the parent-column spelling in referencing tables.
+        if (!string.Equals(oldName, statement.Column.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var entry in catalog.Tables)
+            {
+                if (string.Equals(entry.Key, statement.TableName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (CreateWithRenamedForeignKeyParentColumn(
+                        entry.Value,
+                        table.Name,
+                        oldName,
+                        statement.Column.Name,
+                        quoteNewName: false) is { } rewritten)
+                {
+                    candidateTables[entry.Key] = rewritten;
+                }
+            }
+        }
+
+        Dictionary<string, ViewDefinition>? candidateViews = null;
+        Dictionary<string, TriggerDefinition>? candidateTriggers = null;
+        if (!string.Equals(oldName, statement.Column.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            var renameSchema = CreateRenameColumnSchema(
+                candidateTables,
+                catalog.Views,
+                table.Name,
+                table.Columns.ToArray());
+            try
+            {
+                foreach (var view in catalog.Views.Values)
+                {
+                    context.CheckInterrupt();
+                    var rewritten = RenameColumnRewriter.RewriteSchemaObject(
+                        view.Sql,
+                        oldName,
+                        statement.Column.Name,
+                        quoteNewName: false,
+                        renameSchema);
+                    if (rewritten is null)
+                        continue;
+
+                    candidateViews ??= new Dictionary<string, ViewDefinition>(
+                        catalog.Views,
+                        StringComparer.OrdinalIgnoreCase);
+                    var parsed = (CreateViewStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
+                    candidateViews[view.Name] = view with { Query = parsed.Query, Sql = parsed.Sql };
+                }
+
+                foreach (var trigger in catalog.Triggers.Values)
+                {
+                    context.CheckInterrupt();
+                    var rewritten = RenameColumnRewriter.RewriteSchemaObject(
+                        trigger.Sql,
+                        oldName,
+                        statement.Column.Name,
+                        quoteNewName: false,
+                        renameSchema);
+                    if (rewritten is null)
+                        continue;
+
+                    candidateTriggers ??= new Dictionary<string, TriggerDefinition>(
+                        catalog.Triggers,
+                        StringComparer.OrdinalIgnoreCase);
+                    var parsed = (CreateTriggerStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
+                    candidateTriggers[trigger.Name] = trigger with
+                    {
+                        UpdateOfColumns = parsed.UpdateOfColumns,
+                        When = parsed.When,
+                        Body = parsed.Body,
+                        Sql = parsed.Sql,
+                    };
+                }
+            }
+            catch (RenameColumnRewriteException exception)
+            {
+                throw new EmbeddedSqlException(exception.Message, exception);
+            }
+        }
+
+        // sqlite_sequence is catalog state, not table data. Clone it before deleting the old
+        // allocator entry so validation failures leave every catalog object untouched.
+        if (table.IsAutoIncrement && !replacement.IsAutoIncrement)
+        {
+            if (!candidateTables.TryGetValue(SqliteSequenceTableName, out var sequence))
+                throw new InvalidOperationException("An AUTOINCREMENT table is missing sqlite_sequence.");
+            candidateTables[SqliteSequenceTableName] = sequence.Clone();
+            DeleteSqliteSequenceRows(candidateTables, table.Name);
+        }
+
+        var candidateCatalog = new SchemaCatalog(
+            candidateTables,
+            candidateViews ?? catalog.Views,
+            candidateTriggers ?? catalog.Triggers);
+        var candidateContext = context with
+        {
+            Tables = candidateTables,
+            Views = candidateCatalog.Views,
+            Triggers = candidateCatalog.Triggers,
+            SchemaValidation = true,
+        };
+
+        replacement.ValidateRows(table.Name, replacement.Rows);
+        ValidateColumnUniqueConstraints(replacement, replacement.Rows);
+        ValidatePrimaryKey(table.Name, replacement, replacement.Rows);
+        ValidateUniqueIndexes(table.Name, replacement, replacement.Rows);
+        for (var rowIndex = 0; rowIndex < replacement.Rows.Count; rowIndex++)
+        {
+            context.CheckInterrupt();
+            var rowid = replacement.RowIds[rowIndex];
+            ValidateCheckConstraints(
+                table.Name,
+                replacement,
+                replacement.Rows[rowIndex],
+                rowid,
+                parameters,
+                candidateContext);
+        }
+
+        ValidateDependentSchema(
+            candidateCatalog,
+            candidateContext,
+            context.CancellationToken,
+            "alter column",
+            catalog,
+            context with { SchemaValidation = true });
+
+        foreach (var entry in candidateTables)
+            catalog.Tables[entry.Key] = entry.Value;
+        if (candidateViews is not null)
+        {
+            foreach (var entry in candidateViews)
+                catalog.Views[entry.Key] = entry.Value;
+        }
         if (candidateTriggers is not null)
         {
             foreach (var entry in candidateTriggers)
@@ -37235,6 +37414,10 @@ public sealed class EmbeddedConnection : IDisposable
                 renameColumn.TableName,
                 ManagedSchemaObjectKind.Table,
                 name => renameColumn with { TableName = name }),
+            AlterTableAlterColumnStatement alterColumn => RouteExistingNamedStatement(
+                alterColumn.TableName,
+                ManagedSchemaObjectKind.Table,
+                name => alterColumn with { TableName = name }),
             AlterTableDropColumnStatement dropColumn => RouteExistingNamedStatement(
                 dropColumn.TableName,
                 ManagedSchemaObjectKind.Table,
@@ -38513,6 +38696,7 @@ public sealed class EmbeddedConnection : IDisposable
             AlterTableAddColumnStatement addColumn => ManagedSchemaName.TrySplit(addColumn.TableName, out _, out _),
             AlterTableRenameStatement rename => ManagedSchemaName.TrySplit(rename.TableName, out _, out _),
             AlterTableRenameColumnStatement renameColumn => ManagedSchemaName.TrySplit(renameColumn.TableName, out _, out _),
+            AlterTableAlterColumnStatement alterColumn => ManagedSchemaName.TrySplit(alterColumn.TableName, out _, out _),
             AlterTableDropColumnStatement dropColumn => ManagedSchemaName.TrySplit(dropColumn.TableName, out _, out _),
             ReindexStatement { Target: { } target } => ManagedSchemaName.TrySplit(target, out _, out _),
             InsertStatement insert => ManagedSchemaName.TrySplit(insert.TableName, out _, out _)
@@ -41587,6 +41771,83 @@ internal sealed class EmbeddedTable
             if (column.IsGenerated)
                 EmbeddedDatabase.ComputeGeneratedColumnsAfterAddColumn(this, Name, row);
         }
+    }
+
+    /// <summary>
+    /// Rebuilds a table for Turso's <c>ALTER COLUMN</c> extension. The replacement owns its
+    /// complete column definition, while table-level constraints and explicit indexes survive.
+    /// A rename first uses the established token-aware rewrite path so dependent expressions,
+    /// self references, and explicit-index text continue to resolve against the replacement name.
+    /// </summary>
+    public EmbeddedTable CreateWithAlteredColumn(
+        string name,
+        EmbeddedColumn replacementColumn,
+        CancellationToken cancellationToken)
+    {
+        var alteredColumnIndex = GetColumnIndex(name);
+        var oldName = Columns[alteredColumnIndex];
+        if (!string.Equals(oldName, replacementColumn.Name, StringComparison.OrdinalIgnoreCase)
+            && _columnIndices.ContainsKey(replacementColumn.Name))
+        {
+            throw new EmbeddedSqlException($"duplicate column name: {replacementColumn.Name}");
+        }
+        if (replacementColumn.PrimaryKey)
+            throw new EmbeddedSqlException("PRIMARY KEY constraint cannot be altered");
+        if (replacementColumn.Unique)
+            throw new EmbeddedSqlException("UNIQUE constraint cannot be altered");
+        if (replacementColumn.IsGenerated)
+            throw new EmbeddedSqlException("ALTER COLUMN to a generated column is not supported");
+        if (replacementColumn.ForeignKeyConstraints.Count > 0)
+            throw new EmbeddedSqlException("ALTER COLUMN with REFERENCES is not supported");
+
+        var renamed = string.Equals(oldName, replacementColumn.Name, StringComparison.Ordinal)
+            ? Clone()
+            : CreateWithRenamedColumn(name, replacementColumn.Name, quoteNewName: false, cancellationToken);
+        var columns = renamed.ColumnDefinitions.ToArray();
+        columns[alteredColumnIndex] = replacementColumn;
+
+        EmbeddedTable altered;
+        try
+        {
+            altered = new EmbeddedTable(
+                Name,
+                columns,
+                WithoutRowid,
+                renamed.TableLevelPrimaryKey,
+                renamed.TableUniqueConstraints,
+                renamed.CheckConstraints,
+                renamed.TablePrimaryKeyConflictAlgorithm,
+                renamed.TablePrimaryKeyConstraintName,
+                renamed.TablePrimaryKeyDeclarationOrder,
+                renamed.TableForeignKeys,
+                Strict);
+        }
+        catch (EmbeddedSqlException exception)
+        {
+            throw new EmbeddedSqlException(
+                $"error in table {Name} after alter column: {exception.Message}",
+                exception);
+        }
+
+        altered.SchemaSqlCompact = SchemaSqlCompact;
+        altered.Sql = EmbeddedDatabase.BuildCreateTableSql(Name, altered);
+        foreach (var index in renamed.Indexes.Where(index => index.Origin == EmbeddedIndexOrigin.Explicit))
+            altered.Indexes.Add(index);
+
+        if (RowIds.Count != Rows.Count)
+            throw new InvalidOperationException($"Table '{Name}' has inconsistent row identity metadata.");
+        for (var rowIndex = 0; rowIndex < renamed.Rows.Count; rowIndex++)
+        {
+            if ((rowIndex & 0xff) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+
+            var row = renamed.Rows[rowIndex].ToArray();
+            row[alteredColumnIndex] = ApplyColumnAffinity(replacementColumn, row[alteredColumnIndex]);
+            altered.Rows.Add(row);
+            EmbeddedDatabase.ComputeGeneratedColumnsAfterAddColumn(altered, Name, row);
+        }
+        altered.RowIds.AddRange(renamed.RowIds);
+        return altered;
     }
 
     public EmbeddedTable CreateWithoutColumn(string name, CancellationToken cancellationToken)

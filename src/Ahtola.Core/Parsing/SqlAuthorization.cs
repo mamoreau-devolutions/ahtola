@@ -189,6 +189,9 @@ internal static class SqlAuthorization
                 case AlterTableRenameColumnStatement alter:
                     AlterTable(alter.TableName);
                     break;
+                case AlterTableAlterColumnStatement alter:
+                    AlterTable(alter.TableName);
+                    break;
                 case AlterTableDropColumnStatement alter:
                     AlterTable(alter.TableName);
                     break;
