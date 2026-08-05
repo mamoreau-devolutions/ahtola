@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 120,
+    "current_conformance_expected_failures": 119,
     "last_reconciled": "2026-08-08",
-    "entry_count": 209,
+    "entry_count": 210,
     "counts": {
       "by_layer": {
         "vdbe": 37,
-        "compilation": 65,
+        "compilation": 66,
         "parser": 29,
         "functions": 26,
         "storage": 20,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 95,
-        "divergent": 70,
+        "divergent": 71,
         "partial": 27,
         "extension": 8,
         "parity": 9
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 104,
         "s4-intentional": 33,
-        "s1-correctness": 38
+        "s1-correctness": 39
       },
       "by_effort": {
         "M": 75,
         "L": 37,
-        "S": 97
+        "S": 98
       },
       "by_status": {
         "open": 111,
-        "closed": 98
+        "closed": 99
       }
     },
     "schema": {
@@ -3089,6 +3089,20 @@
        "before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorrelated-subquery"
      ],
      "notes": "Closed 2026-08-08. A row-triggered UPDATE publishes each changed row before evaluating the next row, which invalidated the statement memo for an uncorrelated SET subquery and caused later rows to observe prior assignments. PerformRowTriggeredUpdate now preserves a memo snapshot only while evaluating SET expressions. ExecuteSubquery therefore reuses the first pre-trigger result for later target rows, while correlated subqueries remain non-memoized and trigger-body queries retain their live per-row execution. ManagedTriggerRowSemanticsTests.UncorrelatedUpdateAssignmentSubqueryUsesThePreTriggerStatementSnapshot verifies parity with SQLite.",
+     "status": "closed"
+   },
+   {
+     "id": "compile-alter-add-column-foreign-key",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/alter.rs::AlterTableBody::AddColumn (adds the column foreign-key definition to the table before emitting Insn::AddColumn)",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::EmbeddedTable.AddColumn and RefreshForeignKeys",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "foreign_keys.sqltest::fk-alter-table-add-column-enforced"
+     ],
+     "notes": "Closed 2026-08-08. ALTER TABLE ADD COLUMN previously rejected every column-level REFERENCES clause even though the table constructor and DML foreign-key validator already supported the resulting metadata. AddColumn now refreshes the live foreign-key projection after adding the column, so both the current table and its reconstructed catalog retain the new constraint. ManagedForeignKeyFileCatalogDurabilityTests.AddedColumnForeignKeyEnforcesBeforeAndAfterReopen covers valid, NULL, invalid, and reopened child values.",
      "status": "closed"
    }
  ]

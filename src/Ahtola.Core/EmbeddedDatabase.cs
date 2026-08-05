@@ -41174,11 +41174,7 @@ internal sealed class EmbeddedTable
         }
 
         GeneratedColumnOrder = ValidateAndOrderGeneratedColumns(ColumnDefinitions, PrimaryKeyColumns, _columnIndices);
-        ForeignKeys = Array.AsReadOnly(
-            ColumnDefinitions
-                .SelectMany(column => column.ForeignKeyConstraints)
-                .Concat(TableForeignKeys)
-                .ToArray());
+        RefreshForeignKeys();
         ValidateForeignKeyChildColumns();
 
         CreateConstraintIndexes();
@@ -41318,6 +41314,15 @@ internal sealed class EmbeddedTable
 
             return true;
         }
+    }
+
+    private void RefreshForeignKeys()
+    {
+        ForeignKeys = Array.AsReadOnly(
+            ColumnDefinitions
+                .SelectMany(column => column.ForeignKeyConstraints)
+                .Concat(TableForeignKeys)
+                .ToArray());
     }
 
     private void CreateWithoutRowidConstraintIndexes()
@@ -41906,7 +41911,7 @@ internal sealed class EmbeddedTable
             || column.NotNullConflictAlgorithm is not null
             || column.UniqueConflictAlgorithm is not null);
 
-    public IReadOnlyList<ForeignKeyDefinition> ForeignKeys { get; }
+    public IReadOnlyList<ForeignKeyDefinition> ForeignKeys { get; private set; } = [];
 
     // The 1-based position of a column within the primary key, or 0 when it is not part of
     // the primary key. Mirrors the value SQLite reports in PRAGMA table_info.pk.
@@ -42510,8 +42515,6 @@ internal sealed class EmbeddedTable
     {
         if (_columnIndices.ContainsKey(column.Name))
             throw new EmbeddedSqlException($"duplicate column name: {column.Name}");
-        if (column.ForeignKeyConstraints.Count > 0)
-            throw new EmbeddedSqlException("ALTER TABLE ADD COLUMN with REFERENCES is not supported.");
         // Mirrors SQLite/Turso: the generated-column PRIMARY-KEY prohibition is diagnosed before
         // the generic ALTER restriction, with its own message.
         if (column.IsGenerated && column.PrimaryKey)
@@ -42560,6 +42563,7 @@ internal sealed class EmbeddedTable
         Columns = [.. Columns, column.Name];
         ColumnDefinitions = [.. ColumnDefinitions, column];
         _columnIndices.Add(column.Name, index);
+        RefreshForeignKeys();
         if (column.IsGenerated)
             GeneratedColumnOrder = [.. GeneratedColumnOrder, index];
         for (var rowIndex = 0; rowIndex < Rows.Count; rowIndex++)
