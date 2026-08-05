@@ -27785,7 +27785,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             "GROUP_CONCAT" => function.Arguments.Count is 1 or 2,
             // Arity is validated during evaluation so a wrong-argument-count call reports
             // SQLite's arity diagnostic instead of "no such function".
-            "STRING_AGG" or "JSON_GROUP_ARRAY" or "JSON_GROUP_OBJECT" => true,
+            "STRING_AGG" or "JSON_GROUP_ARRAY" or "JSON_GROUP_OBJECT" or "JSONB_GROUP_ARRAY" or "JSONB_GROUP_OBJECT" => true,
             _ => false,
         };
     }
@@ -28138,6 +28138,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             "STRING_AGG" => EvaluateStringAgg(function, rows, parameters, context),
             "JSON_GROUP_ARRAY" => EvaluateJsonGroupArray(function, rows, parameters, context),
             "JSON_GROUP_OBJECT" => EvaluateJsonGroupObject(function, rows, parameters, context),
+            "JSONB_GROUP_ARRAY" => EvaluateJsonGroupArray(function, rows, parameters, context, binary: true),
+            "JSONB_GROUP_OBJECT" => EvaluateJsonGroupObject(function, rows, parameters, context, binary: true),
             _ => throw new EmbeddedSqlException($"Unsupported aggregate function {function.Name}()."),
         };
     }
@@ -28675,18 +28677,27 @@ public sealed partial class EmbeddedDatabase : IDisposable
             "IFNULL" => EvaluateIfNull(arguments),
             "INSTR" => EvaluateInstr(arguments),
             "JSON" => SqliteJson.Json(arguments),
+            "JSONB" => SqliteJson.Jsonb(arguments),
             "JSON_ARRAY" => SqliteJson.JsonArray(arguments),
+            "JSONB_ARRAY" => SqliteJson.JsonbArray(arguments),
             "JSON_ARRAY_LENGTH" => SqliteJson.JsonArrayLength(arguments),
             "JSON_ERROR_POSITION" => SqliteJson.JsonErrorPosition(arguments),
             "JSON_EXTRACT" => SqliteJson.JsonExtract(arguments),
+            "JSONB_EXTRACT" => SqliteJson.JsonbExtract(arguments),
             "JSON_INSERT" => SqliteJson.JsonInsert(arguments),
+            "JSONB_INSERT" => SqliteJson.JsonbInsert(arguments),
             "JSON_OBJECT" => SqliteJson.JsonObject(arguments),
+            "JSONB_OBJECT" => SqliteJson.JsonbObject(arguments),
             "JSON_PATCH" => SqliteJson.JsonPatch(arguments),
+            "JSONB_PATCH" => SqliteJson.JsonbPatch(arguments),
             "JSON_PRETTY" => SqliteJson.JsonPretty(arguments),
             "JSON_QUOTE" => SqliteJson.JsonQuote(arguments),
             "JSON_REMOVE" => SqliteJson.JsonRemove(arguments),
+            "JSONB_REMOVE" => SqliteJson.JsonbRemove(arguments),
             "JSON_REPLACE" => SqliteJson.JsonReplace(arguments),
+            "JSONB_REPLACE" => SqliteJson.JsonbReplace(arguments),
             "JSON_SET" => SqliteJson.JsonSet(arguments),
+            "JSONB_SET" => SqliteJson.JsonbSet(arguments),
             "JSON_TYPE" => SqliteJson.JsonType(arguments),
             "JSON_VALID" => SqliteJson.JsonValid(arguments),
             "JULIANDAY" => SqliteDateTime.Execute(arguments, SqliteDateTime.Func.JulianDay),
@@ -31301,9 +31312,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 break;
             case "STRING_AGG":
             case "JSON_GROUP_OBJECT":
+            case "JSONB_GROUP_OBJECT":
                 RequireWindowArgumentCount(function, 2);
                 break;
             case "JSON_GROUP_ARRAY":
+            case "JSONB_GROUP_ARRAY":
                 RequireWindowArgumentCount(function, 1);
                 break;
         }
@@ -31450,7 +31463,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         var name = function.Name.ToUpperInvariant();
         return name is "COUNT" or "SUM" or "TOTAL" or "AVG" or "MIN" or "MAX" or "GROUP_CONCAT"
-            or "STRING_AGG" or "JSON_GROUP_ARRAY" or "JSON_GROUP_OBJECT"
+            or "STRING_AGG" or "JSON_GROUP_ARRAY" or "JSON_GROUP_OBJECT" or "JSONB_GROUP_ARRAY" or "JSONB_GROUP_OBJECT"
             || TryGetAggregateFunction(function.Name, function.Arguments.Count, out _);
     }
 
@@ -34432,6 +34445,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
     // matching the task's requirement to reject unsupported input rather than guess.
     private static partial class SqliteJson
     {
+    private static readonly UTF8Encoding JsonbUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
         private enum JKind
         {
             Null,
@@ -34490,11 +34505,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 case SqlValueKind.Real:
                     return SqlValue.JsonText(FormatJsonReal(value.AsReal()));
                 default:
-                    var node = TryParse(InputText(value));
-                    if (node is null)
-                        throw new EmbeddedSqlException("malformed JSON");
-                    return SqlValue.JsonText(Serialize(node));
+                    return SqlValue.JsonText(Serialize(ParseOrThrow(value)));
             }
+        }
+
+        internal static SqlValue Jsonb(IReadOnlyList<SqlValue> args)
+        {
+            RequireArgumentCount("jsonb", args, 1);
+            return args[0].Kind == SqlValueKind.Null
+                ? SqlValue.Blob([0])
+                : ToJsonb(args[0]);
         }
 
         internal static SqlValue JsonValid(IReadOnlyList<SqlValue> args)
@@ -34606,6 +34626,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
             return SqlValue.JsonText(Serialize(new JNode { Kind = JKind.Array, Items = items }));
         }
 
+        internal static SqlValue JsonbArray(IReadOnlyList<SqlValue> args)
+            => ToJsonb(JsonArray(args));
+
         internal static SqlValue JsonArrayLength(IReadOnlyList<SqlValue> args)
         {
             if (args.Count is < 1 or > 2)
@@ -34647,6 +34670,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
             return SqlValue.JsonText(Serialize(new JNode { Kind = JKind.Object, Members = members }));
         }
+
+        internal static SqlValue JsonbObject(IReadOnlyList<SqlValue> args)
+            => ToJsonb(JsonObject(args));
 
         internal static SqlValue JsonQuote(IReadOnlyList<SqlValue> args)
         {
@@ -34772,14 +34798,26 @@ public sealed partial class EmbeddedDatabase : IDisposable
             return SqlValue.JsonText(Serialize(root));
         }
 
+        internal static SqlValue JsonbRemove(IReadOnlyList<SqlValue> args)
+            => ToJsonb(JsonRemove(args));
+
         internal static SqlValue JsonSet(IReadOnlyList<SqlValue> args)
             => JsonModify(args, MutationMode.Set, "json_set");
+
+        internal static SqlValue JsonbSet(IReadOnlyList<SqlValue> args)
+            => ToJsonb(JsonSet(args));
 
         internal static SqlValue JsonInsert(IReadOnlyList<SqlValue> args)
             => JsonModify(args, MutationMode.Insert, "json_insert");
 
+        internal static SqlValue JsonbInsert(IReadOnlyList<SqlValue> args)
+            => ToJsonb(JsonInsert(args));
+
         internal static SqlValue JsonReplace(IReadOnlyList<SqlValue> args)
             => JsonModify(args, MutationMode.Replace, "json_replace");
+
+        internal static SqlValue JsonbReplace(IReadOnlyList<SqlValue> args)
+            => ToJsonb(JsonReplace(args));
 
         internal static SqlValue JsonPatch(IReadOnlyList<SqlValue> args)
         {
@@ -34788,6 +34826,23 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return SqlValue.Null;
 
             return SqlValue.JsonText(Serialize(MergePatch(ParseOrThrow(args[0]), ParseOrThrow(args[1]))));
+        }
+
+        internal static SqlValue JsonbPatch(IReadOnlyList<SqlValue> args)
+            => ToJsonb(JsonPatch(args));
+
+        internal static SqlValue JsonbExtract(IReadOnlyList<SqlValue> args)
+        {
+            var result = JsonExtract(args);
+            return result.IsJson ? ToJsonb(result) : result;
+        }
+
+        internal static SqlValue ToJsonb(SqlValue value)
+        {
+            if (value.Kind == SqlValueKind.Null)
+                return SqlValue.Null;
+
+            return SqlValue.Blob(SerializeJsonb(ParseOrThrow(value)));
         }
 
         private static SqlValue JsonModify(
@@ -34840,6 +34895,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             if (value.IsJson)
                 return ParseOrThrow(value);
+
+            if (value.Kind == SqlValueKind.Blob && TryParseJsonb(value.AsBlob().Span, out var jsonb))
+                return jsonb;
 
             return value.Kind switch
             {
@@ -35306,6 +35364,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         private static JNode ParseOrThrow(SqlValue value)
         {
+            if (value.Kind == SqlValueKind.Blob && TryParseJsonb(value.AsBlob().Span, out var jsonb))
+                return jsonb;
+
             var node = value.Kind switch
             {
                 SqlValueKind.Integer => TryParse(value.AsInteger().ToString(CultureInfo.InvariantCulture)),
@@ -35403,6 +35464,272 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var sb = new StringBuilder();
             Serialize(node, sb);
             return sb.ToString();
+        }
+
+        // SQLite JSONB stores a type/length header plus either raw scalar bytes or recursively
+        // encoded child values. Keeping this at the JNode boundary lets JSON and JSONB share paths,
+        // mutation rules, and subtype behavior without a second JSON implementation.
+        private static byte[] SerializeJsonb(JNode node)
+        {
+            var data = new List<byte>();
+            AppendJsonbNode(data, node);
+            return data.ToArray();
+        }
+
+        private static void AppendJsonbNode(List<byte> destination, JNode node)
+        {
+            var payload = new List<byte>();
+            int type;
+            switch (node.Kind)
+            {
+                case JKind.Null:
+                    type = 0;
+                    break;
+                case JKind.True:
+                    type = 1;
+                    break;
+                case JKind.False:
+                    type = 2;
+                    break;
+                case JKind.Integer:
+                    type = 3;
+                    payload.AddRange(JsonbUtf8.GetBytes(node.Raw));
+                    break;
+                case JKind.Real:
+                    type = 5;
+                    payload.AddRange(JsonbUtf8.GetBytes(node.Raw));
+                    break;
+                case JKind.Text:
+                    AppendJsonbText(payload, node.Raw, node.Str, out type);
+                    break;
+                case JKind.Array:
+                    type = 11;
+                    foreach (var item in node.Items!)
+                        AppendJsonbNode(payload, item);
+                    break;
+                case JKind.Object:
+                    type = 12;
+                    foreach (var member in node.Members!)
+                    {
+                        AppendJsonbTextNode(payload, member.RawKey, member.Key);
+                        AppendJsonbNode(payload, member.Value);
+                    }
+                    break;
+                default:
+                    throw new InvalidOperationException();
+            }
+
+            WriteJsonbHeader(destination, type, payload.Count);
+            destination.AddRange(payload);
+        }
+
+        private static void AppendJsonbTextNode(List<byte> destination, string raw, string text)
+        {
+            var payload = new List<byte>();
+            AppendJsonbText(payload, raw, text, out var type);
+            WriteJsonbHeader(destination, type, payload.Count);
+            destination.AddRange(payload);
+        }
+
+        private static void AppendJsonbText(List<byte> destination, string raw, string text, out int type)
+        {
+            var payload = raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"'
+                ? raw[1..^1]
+                : text;
+            type = payload.IndexOf('\\') >= 0 ? 8 : 7;
+            destination.AddRange(JsonbUtf8.GetBytes(payload));
+        }
+
+        private static void WriteJsonbHeader(List<byte> destination, int type, int payloadLength)
+        {
+            if (payloadLength <= 11)
+            {
+                destination.Add((byte)(type | (payloadLength << 4)));
+                return;
+            }
+
+            if (payloadLength <= byte.MaxValue)
+            {
+                destination.Add((byte)(type | (12 << 4)));
+                destination.Add((byte)payloadLength);
+                return;
+            }
+
+            if (payloadLength <= ushort.MaxValue)
+            {
+                destination.Add((byte)(type | (13 << 4)));
+                destination.Add((byte)(payloadLength >> 8));
+                destination.Add((byte)payloadLength);
+                return;
+            }
+
+            destination.Add((byte)(type | (14 << 4)));
+            destination.Add((byte)(payloadLength >> 24));
+            destination.Add((byte)(payloadLength >> 16));
+            destination.Add((byte)(payloadLength >> 8));
+            destination.Add((byte)payloadLength);
+        }
+
+        private static bool TryParseJsonb(ReadOnlySpan<byte> data, out JNode node)
+        {
+            var cursor = 0;
+            if (!TryParseJsonbNode(data, ref cursor, data.Length, 0, out node) || cursor != data.Length)
+            {
+                node = null!;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool TryParseJsonbNode(
+            ReadOnlySpan<byte> data,
+            ref int cursor,
+            int limit,
+            int depth,
+            out JNode node)
+        {
+            node = null!;
+            if (depth > 1000 || !TryReadJsonbHeader(data, ref cursor, limit, out var type, out var payloadEnd))
+                return false;
+
+            var payloadStart = cursor;
+            switch (type)
+            {
+                case 0:
+                case 1:
+                case 2:
+                    if (payloadStart != payloadEnd)
+                        return false;
+                    node = new JNode { Kind = type == 0 ? JKind.Null : type == 1 ? JKind.True : JKind.False };
+                    cursor = payloadEnd;
+                    return true;
+                case 3:
+                case 4:
+                case 5:
+                case 6:
+                    if (!TryDecodeJsonbText(data[payloadStart..payloadEnd], out var number)
+                        || TryParse(number) is not { Kind: JKind.Integer or JKind.Real })
+                    {
+                        return false;
+                    }
+                    node = new JNode { Kind = type is 3 or 4 ? JKind.Integer : JKind.Real, Raw = number };
+                    cursor = payloadEnd;
+                    return true;
+                case 7:
+                case 10:
+                    if (!TryDecodeJsonbText(data[payloadStart..payloadEnd], out var text))
+                        return false;
+                    node = new JNode { Kind = JKind.Text, Str = text, Raw = QuoteString(text) };
+                    cursor = payloadEnd;
+                    return true;
+                case 8:
+                    if (!TryDecodeJsonbText(data[payloadStart..payloadEnd], out var escaped)
+                        || TryParse($"\"{escaped}\"") is not { Kind: JKind.Text } escapedText)
+                    {
+                        return false;
+                    }
+                    node = escapedText;
+                    cursor = payloadEnd;
+                    return true;
+                case 11:
+                    {
+                        var items = new List<JNode>();
+                        while (cursor < payloadEnd)
+                        {
+                            if (!TryParseJsonbNode(data, ref cursor, payloadEnd, depth + 1, out var item))
+                                return false;
+                            items.Add(item);
+                        }
+                        node = new JNode { Kind = JKind.Array, Items = items };
+                        return cursor == payloadEnd;
+                    }
+                case 12:
+                    {
+                        var members = new List<JMember>();
+                        while (cursor < payloadEnd)
+                        {
+                            var keyStart = cursor;
+                            if (!TryParseJsonbNode(data, ref cursor, payloadEnd, depth + 1, out var key)
+                                || key.Kind != JKind.Text
+                                || !TryParseJsonbNode(data, ref cursor, payloadEnd, depth + 1, out var value))
+                            {
+                                return false;
+                            }
+
+                            // Object keys may use TEXTJ/TEXT5/TEXTRAW. The parsed node preserves
+                            // the equivalent canonical JSON spelling for the shared tree.
+                            _ = keyStart;
+                            members.Add(new JMember { Key = key.Str, RawKey = key.Raw, Value = value });
+                        }
+                        node = new JNode { Kind = JKind.Object, Members = members };
+                        return cursor == payloadEnd;
+                    }
+                default:
+                    return false;
+            }
+        }
+
+        private static bool TryReadJsonbHeader(
+            ReadOnlySpan<byte> data,
+            ref int cursor,
+            int limit,
+            out int type,
+            out int payloadEnd)
+        {
+            type = 0;
+            payloadEnd = 0;
+            if (cursor >= limit)
+                return false;
+
+            var header = data[cursor++];
+            type = header & 0x0F;
+            if (type > 12)
+                return false;
+
+            var sizeMarker = header >> 4;
+            ulong payloadLength;
+            if (sizeMarker <= 11)
+            {
+                payloadLength = (ulong)sizeMarker;
+            }
+            else
+            {
+                var sizeBytes = sizeMarker switch
+                {
+                    12 => 1,
+                    13 => 2,
+                    14 => 4,
+                    15 => 8,
+                    _ => 0,
+                };
+                if (sizeBytes == 0 || cursor > limit - sizeBytes)
+                    return false;
+
+                payloadLength = 0;
+                for (var i = 0; i < sizeBytes; i++)
+                    payloadLength = (payloadLength << 8) | data[cursor++];
+            }
+
+            if (payloadLength > int.MaxValue || payloadLength > (uint)(limit - cursor))
+                return false;
+
+            payloadEnd = cursor + (int)payloadLength;
+            return true;
+        }
+
+        private static bool TryDecodeJsonbText(ReadOnlySpan<byte> bytes, out string text)
+        {
+            try
+            {
+                text = JsonbUtf8.GetString(bytes);
+                return true;
+            }
+            catch (DecoderFallbackException)
+            {
+                text = string.Empty;
+                return false;
+            }
         }
 
         private static void Serialize(JNode node, StringBuilder sb)

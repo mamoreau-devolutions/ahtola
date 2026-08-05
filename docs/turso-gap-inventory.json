@@ -14,14 +14,14 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 158,
+    "current_conformance_expected_failures": 151,
     "last_reconciled": "2026-08-08",
-    "entry_count": 204,
+    "entry_count": 205,
     "counts": {
       "by_layer": {
         "vdbe": 36,
         "compilation": 62,
-        "parser": 28,
+        "parser": 29,
         "functions": 26,
         "storage": 20,
         "mvcc": 14,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 96,
-        "divergent": 67,
+        "divergent": 68,
         "partial": 27,
         "extension": 8,
         "parity": 6
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 104,
         "s4-intentional": 33,
-        "s1-correctness": 33
+        "s1-correctness": 34
       },
       "by_effort": {
-        "M": 74,
+        "M": 75,
         "L": 37,
         "S": 93
       },
       "by_status": {
-        "open": 133,
-        "closed": 71
+        "open": 129,
+        "closed": 76
       }
     },
     "schema": {
@@ -69,7 +69,7 @@
       "layer": "vdbe",
       "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Filter + Insn::FilterAdd (bloom-filter build/probe pair)",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::SqliteJson (SQLite JSONB encoder/decoder and scalar dispatch); src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [],
@@ -1373,7 +1373,7 @@
     {
       "id": "parser-alter-table-alter-column",
       "layer": "parser",
-      "kind": "closed",
+      "kind": "missing",
       "turso_ref": "turso-src/core/translate/alter.rs::translate_alter_table (ALTER COLUMN replacement-column handling, physical-layout rewrite, and AUTOINCREMENT sequence cleanup)",
       "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::AlterTableAlterColumnStatement; src/Ahtola.Core/Parsing/SqlParser.cs::ParseAlterTable; src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteAlterTableAlterColumn / EmbeddedTable.CreateWithAlteredColumn",
       "severity": "s2-capability",
@@ -1612,23 +1612,23 @@
         "json/json-insert-replace-odd-args.sqltest::jsonb-replace-path-only-errors",
         "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_does_not_stringify_value"
       ],
-      "notes": "Ahtola's SqliteBuiltinFunctions.Names has no JSONB, JSONB_ARRAY, JSONB_EXTRACT, JSONB_OBJECT, JSONB_PATCH, JSONB_REMOVE, JSONB_REPLACE, JSONB_INSERT, or JSONB_SET; grepping src/Ahtola.Core for 'Jsonb'/'JSONB' returns zero hits. Only the JSON (text) family exists. This is the entire binary-JSON encoding family from turso-src/core/json/jsonb.rs, not just the two aggregates called out separately. Every call raises 'no such function: JSONB_*'.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. Ahtola now encodes and decodes SQLite JSONB headers (inline, 8-bit, 16-bit, and 32-bit payload sizes) over its shared JSON tree, preserving binary results for JSONB, JSONB_ARRAY, JSONB_EXTRACT container results, JSONB_OBJECT, and JSONB mutation/patch functions. Text JSON functions accept the generated JSONB blobs, and JSON constructors embed valid JSONB values rather than quoting them. The linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "func-jsonb-aggregates",
       "layer": "functions",
       "kind": "missing",
       "turso_ref": "turso-src/core/function.rs::AggFunc::JsonbGroupArray, AggFunc::JsonbGroupObject",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs::EvaluateJsonGroupArray/EvaluateJsonGroupObject; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateAggregateFunction",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
         "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_integer_label",
         "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_real_label"
       ],
-      "notes": "SqliteBuiltinFunctions.Names lists JSON_GROUP_ARRAY/JSON_GROUP_OBJECT but not JSONB_GROUP_ARRAY/JSONB_GROUP_OBJECT. Expected-failures file confirms 'no such function: JSONB_GROUP_OBJECT' and 'no such function: JSONB_ARRAY' (the latter used inside a jsonb_group_object test). Depends on func-jsonb-scalar-family (same underlying Jsonb value representation) being ported first.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. JSONB_GROUP_ARRAY and JSONB_GROUP_OBJECT share the text aggregate's value and numeric-label coercion rules, then serialize their result as SQLite JSONB. They are registered as aggregate and window functions, preserving their text JSON counterparts' arity diagnostics. The linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "func-array-agg-missing",
@@ -1916,8 +1916,8 @@
         "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_text_numeric_label_unchanged",
         "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_numeric_column_labels"
       ],
-      "notes": "The numeric-label test file targets JSONB_GROUP_OBJECT (missing, see func-jsonb-aggregates), but its title implies numeric object-key stringification/affinity semantics (does a REAL/INTEGER label get its SqliteRealText/canonical-integer text form, or a re-parsed/re-rounded form?) that should be spot-checked against the existing JSON_GROUP_OBJECT implementation once JSONB support lands, since the same key-stringification code path is likely shared between the JSON and JSONB group-object aggregates.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. JSONB_GROUP_OBJECT now shares JSON_GROUP_OBJECT's numeric-label coercion path before encoding the object as JSONB, matching the integer, REAL, text-numeric, and column-affinity cases in the linked corpus. The linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "func-extension-uuid-family",

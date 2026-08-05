@@ -19,9 +19,10 @@ public sealed partial class EmbeddedDatabase
         FunctionExpression function,
         IReadOnlyList<SourceRow> rows,
         SqlValue[] parameters,
-        QueryContext context)
+        QueryContext context,
+        bool binary = false)
     {
-        RequireAggregateArgumentCount("json_group_array", function.Arguments, 1);
+        RequireAggregateArgumentCount(binary ? "jsonb_group_array" : "json_group_array", function.Arguments, 1);
 
         // Unlike group_concat, json_group_array keeps NULL rows as JSON nulls.
         var items = new List<SqlValue>(rows.Count);
@@ -31,16 +32,18 @@ public sealed partial class EmbeddedDatabase
             items.Add(Evaluate(function.Arguments[0], parameters, row, context));
         }
 
-        return SqliteJson.JsonArray(items);
+        var result = SqliteJson.JsonArray(items);
+        return binary ? SqliteJson.ToJsonb(result) : result;
     }
 
     private SqlValue EvaluateJsonGroupObject(
         FunctionExpression function,
         IReadOnlyList<SourceRow> rows,
         SqlValue[] parameters,
-        QueryContext context)
+        QueryContext context,
+        bool binary = false)
     {
-        RequireAggregateArgumentCount("json_group_object", function.Arguments, 2);
+        RequireAggregateArgumentCount(binary ? "jsonb_group_object" : "json_group_object", function.Arguments, 2);
 
         var members = new List<SqlValue>(checked(rows.Count * 2));
         foreach (var row in rows)
@@ -54,6 +57,7 @@ public sealed partial class EmbeddedDatabase
             members.Add(value);
         }
 
-        return SqliteJson.JsonObject(members);
+        var result = SqliteJson.JsonObject(members);
+        return binary ? SqliteJson.ToJsonb(result) : result;
     }
 }
