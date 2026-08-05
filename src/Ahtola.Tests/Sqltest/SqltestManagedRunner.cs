@@ -17,6 +17,9 @@ internal static class SqltestManagedRunner
 {
     private static readonly TimeSpan CaseTimeout = TimeSpan.FromSeconds(30);
 
+    // Mirrors Turso's test-helper-only process-global atomic counter.
+    private static long _testNondeterministicCounter;
+
     public static SqltestOutcome Run(SqltestFile file, SqltestCase test)
     {
         var database = file.Databases[0];
@@ -29,6 +32,10 @@ internal static class SqltestManagedRunner
             using var embedded = temporaryPath is null
                 ? new EmbeddedDatabase()
                 : EmbeddedDatabase.OpenFile(temporaryPath);
+            embedded.RegisterScalarFunction(
+                "test_nondet_counter",
+                0,
+                static _ => SqlValue.Integer(Interlocked.Increment(ref _testNondeterministicCounter) - 1));
             using var connection = embedded.Connect();
             using var timeout = new CancellationTokenSource(CaseTimeout);
 

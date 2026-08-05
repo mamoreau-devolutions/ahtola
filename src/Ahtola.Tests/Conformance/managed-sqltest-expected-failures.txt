@@ -177,8 +177,6 @@ upsert.sqltest::upsert-doubly-qualified-target | expected success but got error:
 upsert.sqltest::upsert-targets-chain | expected success but got error: Expected End. At SQL offset 215.
 views.sqltest::view-rejects-aggregate-order-by | expected an error but the statement succeeded
 window/dense_rank.sqltest::dense-rank-column-declared-collation | expected 3 row(s), got 3 row(s); row 0 expected '2/1/1' but was '1/1/2'
-window/filter-over.sqltest::filter-over-repeated-nondeterministic-call | expected success but got error: no such function: TEST_NONDET_COUNTER
-window/filter-over.sqltest::filter-over-mixed-deterministic-and-nondeterministic-dedup | expected success but got error: no such function: TEST_NONDET_COUNTER
 window/lag_lead.sqltest::lag-lead-negative-offset-multi | expected 5 row(s), got 5 row(s); row 0 expected '1//' but was '1/4/'
 window/lag_lead.sqltest::lag-lead-per-row-mixed-sign-offset | expected 5 row(s), got 5 row(s); row 2 expected '3/-2//1' but was '3/-2/5/1'
 window/nth_value.sqltest::nth-value-limit-stops-before-late-invalid-n | expected success but got error: second argument to nth_value must be a positive integer
