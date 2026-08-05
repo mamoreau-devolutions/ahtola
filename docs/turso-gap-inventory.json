@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 182,
+    "current_conformance_expected_failures": 180,
     "last_reconciled": "2026-08-08",
-    "entry_count": 202,
+    "entry_count": 203,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 60,
+        "compilation": 61,
         "parser": 28,
         "functions": 26,
         "storage": 20,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 66,
+        "divergent": 67,
         "partial": 27,
         "extension": 8,
         "parity": 2
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 103,
         "s4-intentional": 33,
-        "s1-correctness": 32
+        "s1-correctness": 33
       },
       "by_effort": {
-        "M": 73,
+        "M": 74,
         "L": 37,
         "S": 92
       },
       "by_status": {
         "open": 141,
-        "closed": 61
+        "closed": 62
       }
     },
     "schema": {
@@ -628,6 +628,21 @@
       "conformance_links": [],
       "notes": "Turso's subquery.rs distinguishes correlated from uncorrelated subqueries and hoists uncorrelated ones to evaluate once instead of once per outer row. Ahtola recomputes scalar/EXISTS/IN subqueries per outer row unconditionally (no correlation analysis found in EmbeddedDatabase.cs or the Compilation builders), which is correct but can be significantly slower for uncorrelated subqueries in a WHERE clause evaluated over many outer rows.",
       "status": "open"
+    },
+    {
+      "id": "compile-empty-aggregate-correlated-subquery-scope",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/aggregation.rs (empty ungrouped aggregates put source cursors into NullRow state before evaluating scalar expressions)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteSelect / CreateEmptyAggregateRepresentative",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "subquery/memory.sqltest::subquery-correlated-exists-in-select-with-aggregate-empty-table",
+        "subquery/memory.sqltest::correlated-exists-in-ungrouped-aggregate-empty-main-table"
+      ],
+      "notes": "Closed 2026-08-08. Empty ungrouped aggregates previously supplied no representative source row, so scalar expressions evaluated alongside COUNT(*) lost their qualified source binding and correlated EXISTS failed with 'no such column'. CreateEmptyAggregateRepresentative now retains the source schema and parent correlation while providing NULL values, mirroring Turso's NullRow cursor behavior.",
+      "status": "closed"
     },
     {
       "id": "compile-select-compiler-single-table-fast-paths-only",

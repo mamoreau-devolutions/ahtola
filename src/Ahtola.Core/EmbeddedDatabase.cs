@@ -19280,7 +19280,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             if (statement.GroupBy.Count == 0)
             {
-                var representative = GetAggregateRepresentative(statement, selectedRows, parameters, context);
+                var representative = GetAggregateRepresentative(statement, selectedRows, parameters, context)
+                    ?? CreateEmptyAggregateRepresentative(statement, context, outerRow);
                 if (statement.Having is not null
                 && !IsTrue(EvaluateAggregate(
                     statement.Having,
@@ -26636,6 +26637,59 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         // SQLite visits every row for an all-NULL min/max and leaves the final row selected.
         return representative ?? effectiveRows[^1];
+    }
+
+    private static SourceRow CreateEmptyAggregateRepresentative(
+        SelectStatement statement,
+        QueryContext context,
+        SourceRow? outerRow)
+    {
+        var schemaRow = CreateQuerySchemaValidationRow(
+            statement.Source,
+            context,
+            GetSourceColumns(statement.Source, context),
+            GetOutputColumns(statement.Source, context),
+            outerRow);
+        var hiddenRowidAliases = GetUnshadowedHiddenRowidAliases(statement.Source, context);
+        if (hiddenRowidAliases.Count == 0)
+            return schemaRow with
+            {
+                Values = Enumerable.Repeat(SqlValue.Null, schemaRow.Values.Length).ToArray(),
+                RowId = null,
+                RowIdQualifier = null,
+            };
+
+        return schemaRow with
+        {
+            Columns = schemaRow.Columns.Concat(hiddenRowidAliases).ToArray(),
+            Values = Enumerable.Repeat(
+                    SqlValue.Null,
+                    Math.Max(schemaRow.Values.Length, schemaRow.Columns.Length + hiddenRowidAliases.Count))
+                .ToArray(),
+            RowId = null,
+            RowIdQualifier = null,
+        };
+    }
+
+    private static IReadOnlyList<string> GetUnshadowedHiddenRowidAliases(
+        TableSource? source,
+        QueryContext context)
+    {
+        return source switch
+        {
+            NamedTableSource named
+                when !context.CommonTableExpressions.ContainsKey(named.Name)
+                     && context.Tables.TryGetValue(named.Name, out var table)
+                     && table.HasRowid
+                => new[] { "rowid", "_rowid_", "oid" }
+                    .Where(alias => !table.Columns.Contains(alias, StringComparer.OrdinalIgnoreCase))
+                    .ToArray(),
+            JoinTableSource join
+                => GetUnshadowedHiddenRowidAliases(join.Left, context)
+                    .Concat(GetUnshadowedHiddenRowidAliases(join.Right, context))
+                    .ToArray(),
+            _ => [],
+        };
     }
 
     private static FunctionExpression? FindLastExtremumAggregate(Expression? expression)
