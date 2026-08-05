@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 180,
+    "current_conformance_expected_failures": 179,
     "last_reconciled": "2026-08-08",
-    "entry_count": 203,
+    "entry_count": 204,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 61,
+        "compilation": 62,
         "parser": 28,
         "functions": 26,
         "storage": 20,
@@ -29,25 +29,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 67,
+        "divergent": 68,
         "partial": 27,
         "extension": 8,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 103,
+        "s2-capability": 104,
         "s4-intentional": 33,
         "s1-correctness": 33
       },
       "by_effort": {
         "M": 74,
         "L": 37,
-        "S": 92
+        "S": 93
       },
       "by_status": {
         "open": 140,
-        "closed": 63
+        "closed": 64
       }
     },
     "schema": {
@@ -854,6 +854,20 @@
         "alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel"
       ],
       "notes": "Closed 2026-08-08. The retained date(c) expression index survives an unrelated DROP COLUMN and subsequent UPDATE. The earlier deterministic date/time index-expression closure made revalidation during table reconstruction accept date(c); this entry had become stale after that work. Added managed-vs-SQLite coverage for the surviving index and its post-drop mutation.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-alter-add-column-collation-validation",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/alter.rs::AlterTableBody::AddColumn (Column::try_from validates declared column metadata before mutation)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteAlterTableAddColumn",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "alter_table.sqltest::alter-add-column-invalid-collation"
+      ],
+      "notes": "Closed 2026-08-08. ALTER TABLE ... ADD COLUMN now validates a declared COLLATE name against the built-in and registered collation registry before constructing the candidate table, reporting SQLite's 'no such collation sequence' error instead of accepting an unusable schema.",
       "status": "closed"
     },
     {

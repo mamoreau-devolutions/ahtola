@@ -4124,6 +4124,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (!context.Tables.TryGetValue(statement.TableName, out var table))
             throw new EmbeddedSqlException($"no such table: {statement.TableName}");
 
+        ValidateCollation(statement.Column.Collation);
         var candidate = table.Clone();
         candidate.AddColumn(statement.Column);
         for (var position = 0; position < candidate.Rows.Count; position++)

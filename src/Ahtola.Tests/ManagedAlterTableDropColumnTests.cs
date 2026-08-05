@@ -173,6 +173,20 @@ public sealed class ManagedAlterTableDropColumnTests
             .Equal(ReadRows(sqlite, "SELECT a, c, d FROM t;"));
     }
 
+    [Test]
+    public void AddColumnRejectsUnknownCollation()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(c1 INTEGER);");
+
+        Assert.Throws<EmbeddedSqlException>(
+                () => Execute(connection, "ALTER TABLE t ADD COLUMN c2 INTEGER COLLATE compile_options;"))!
+            .Message
+            .Should()
+            .Be("no such collation sequence: compile_options");
+    }
+
     [TestCase(
         "CREATE TABLE t(a);",
         "a",
