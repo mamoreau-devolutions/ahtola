@@ -266,6 +266,29 @@ public sealed class ManagedInsertOrConflictResolutionSliceTests
     }
 
     [Test]
+    public void SchemaLevelRollbackOnUpdateRollsBackTheEntireTransaction()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE items(id INTEGER PRIMARY KEY ON CONFLICT ROLLBACK, value TEXT);");
+        Execute(connection, "INSERT INTO items VALUES (1, 'one'), (2, 'two');");
+        Execute(connection, "BEGIN;");
+        Execute(connection, "UPDATE items SET value = 'changed' WHERE id = 1;");
+
+        Action conflict = () => Execute(connection, "UPDATE items SET id = 1 WHERE id = 2;");
+        conflict.Should().Throw<EmbeddedSqlException>()
+            .WithMessage("UNIQUE constraint failed: items.id");
+
+        AssertRows(
+            ReadRows(connection, "SELECT id, value FROM items ORDER BY id;"),
+            [SqlValue.Integer(1), SqlValue.Text("one")],
+            [SqlValue.Integer(2), SqlValue.Text("two")]);
+        Action commit = () => Execute(connection, "COMMIT;");
+        commit.Should().Throw<EmbeddedSqlException>()
+            .WithMessage("cannot commit - no transaction is active");
+    }
+
+    [Test]
     public void ConstraintConflictFormsAndTriggeredAbortRemainAtomic()
     {
         using var database = new EmbeddedDatabase();

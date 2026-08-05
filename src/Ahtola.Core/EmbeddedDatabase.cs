@@ -9522,10 +9522,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         exception,
                         context.LastInsertRowId);
                 }
-                if (statementAlgorithm == InsertConflictAlgorithm.Rollback)
+                if (algorithm == InsertConflictAlgorithm.Rollback)
                     throw new EmbeddedConflictRollbackException(exception);
                 if (algorithm is InsertConflictAlgorithm.Fail
-                    or InsertConflictAlgorithm.Rollback
                     or InsertConflictAlgorithm.Replace)
                 {
                     throw new EmbeddedSqlException(

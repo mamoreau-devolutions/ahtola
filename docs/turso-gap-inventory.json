@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 138,
+    "current_conformance_expected_failures": 136,
     "last_reconciled": "2026-08-08",
     "entry_count": 206,
     "counts": {
@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 115,
-        "closed": 91
+        "open": 113,
+        "closed": 93
       }
     },
     "schema": {
@@ -680,8 +680,8 @@
         "on_conflict_constraint_def.sqltest::update-pk-rollback",
         "on_conflict_constraint_def.sqltest::update-rollback-terminates-transaction"
       ],
-      "notes": "Ahtola throws \"Managed UPDATE cannot apply schema-level ON CONFLICT ROLLBACK until the pending row-update engine supports partial publication, transaction rollback, and replacement\" -- a documented, intentional carve-out, but it means schema-level `ON CONFLICT ROLLBACK` constraint resolution during UPDATE is unimplemented, unlike Turso which applies the same resolution machinery to both INSERT and UPDATE.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. The evaluated UPDATE path now turns a constraint-selected ROLLBACK policy into EmbeddedConflictRollbackException, exactly as it already did for an explicit UPDATE OR ROLLBACK. EmbeddedConnection's transaction boundary restores the BEGIN snapshot, clears its savepoints, and returns the original constraint error. The two mapped ON CONFLICT constraint-definition cases now pass; ManagedInsertOrConflictResolutionSliceTests also verifies that a prior UPDATE is reverted and COMMIT reports no active transaction.",
+      "status": "closed"
     },
     {
       "id": "compile-trigger-new-not-visible-in-upsert-clause",
@@ -2440,8 +2440,8 @@
         "on_conflict_constraint_def.sqltest::update-pk-rollback",
         "on_conflict_constraint_def.sqltest::update-rollback-terminates-transaction"
       ],
-      "notes": "SQLite's schema-level ON CONFLICT ROLLBACK resolution aborts and rolls back the *entire enclosing transaction*, not just the statement, distinguishing it from the default ABORT behavior (statement-only undo) — this is a transaction-boundary semantic squarely in this layer's scope. Ahtola's own error message confirms the gap directly: 'Managed UPDATE cannot apply schema-level ON CONFLICT ROLLBACK until the pending row-update engine supports partial publication, transaction rollback, and replacement.' This means Ahtola's UPDATE path cannot currently terminate an entire transaction as a side effect of a single row's constraint violation, a capability gap distinct from (and layered on top of) the SAVEPOINT/BEGIN/COMMIT mechanics that do work.",
-      "status": "open"
+      "notes": "Closed 2026-08-08 with compile-on-conflict-rollback-update-unsupported. SQLite's schema-level ON CONFLICT ROLLBACK aborts and rolls back the entire enclosing transaction, unlike default ABORT's statement-only undo. Ahtola now carries the constraint-selected policy through the evaluated UPDATE path as EmbeddedConflictRollbackException; the existing connection transaction boundary restores the BEGIN snapshot and clears the transaction and savepoints. The two linked constraint-definition cases pass.",
+      "status": "closed"
     },
     {
       "id": "sync-no-embedded-sync-engine-port",
