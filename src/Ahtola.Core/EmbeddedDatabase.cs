@@ -12757,6 +12757,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SourceRow? outerRow)
     {
         context.CheckInterrupt();
+        select = ConsumeTursoFullOuterDuplicateEquijoinWhere(select);
         ValidateSelectIndexDirectives(select, context);
         select = StripUnusableForcedIndexForCountStar(select, context);
         select = ResolveSelectBindings(select, context, outerRow);
@@ -12831,6 +12832,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SourceRow? outerRow,
         out CompiledSelect compiled)
     {
+        select = ConsumeTursoFullOuterDuplicateEquijoinWhere(select);
         select = ResolveNamedWindows(select);
         context = EnterCollationSource(context, select.Source);
 
@@ -26999,6 +27001,25 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
             throw new EmbeddedSqlException("FULL OUTER JOIN requires an equality condition in the ON clause");
         }
+    }
+
+    // Turso's hash-join planner consumes a standalone WHERE equality that duplicates a FULL
+    // OUTER JOIN's ON equality as a second hash key. It therefore emits unmatched rows without
+    // re-evaluating that predicate (outer_hash_join.sqltest documents this v0.7.2 limitation).
+    private static SelectStatement ConsumeTursoFullOuterDuplicateEquijoinWhere(SelectStatement statement)
+    {
+        if (statement.Source is not JoinTableSource
+            {
+                Kind: JoinKind.Full,
+                Condition: BinaryExpression { Operator: BinaryOperator.Equal } condition,
+            }
+            || statement.Where is not BinaryExpression { Operator: BinaryOperator.Equal } where
+            || !IndexExpressionSemantics.PredicateTermsEqual(where, condition))
+        {
+            return statement;
+        }
+
+        return statement with { Where = null };
     }
 
     // Turso plans a RIGHT JOIN by swapping the two tables it joins, and the swap only works

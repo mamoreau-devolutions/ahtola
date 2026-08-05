@@ -2199,6 +2199,31 @@ public class EmbeddedEngineTests
     }
 
     [Test]
+    public void FullOuterJoinConsumesDuplicateWhereEquijoinLikeTurso()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(x);");
+        Execute(connection, "CREATE TABLE u(x);");
+        Execute(connection, "INSERT INTO t VALUES (1), (2), (3);");
+        Execute(connection, "INSERT INTO u VALUES (2), (3), (4);");
+
+        // Turso consumes the duplicate WHERE equality as a hash key, so it emits
+        // unmatched rows despite the predicate being null-rejecting in SQLite.
+        var rows = ReadRows(connection, """
+            SELECT t.x, u.x FROM t FULL OUTER JOIN u ON t.x = u.x
+            WHERE t.x = u.x
+            ORDER BY coalesce(t.x, u.x);
+            """);
+
+        rows.Should().SatisfyRespectively(
+            row => row.Should().Equal(SqlValue.Integer(1), SqlValue.Null),
+            row => row.Should().Equal(SqlValue.Integer(2), SqlValue.Integer(2)),
+            row => row.Should().Equal(SqlValue.Integer(3), SqlValue.Integer(3)),
+            row => row.Should().Equal(SqlValue.Null, SqlValue.Integer(4)));
+    }
+
+    [Test]
     public void FullJoinUsingIsRejectedLikeTurso()
     {
         var database = new EmbeddedDatabase();
