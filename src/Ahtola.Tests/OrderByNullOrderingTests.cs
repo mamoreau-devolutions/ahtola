@@ -109,6 +109,37 @@ public sealed class OrderByNullOrderingTests
     }
 
     [Test]
+    public void RedundantOrderBySuffixAfterUniqueRowidMatchesSqlite()
+    {
+        var cases = new[]
+        {
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE primary_key_table(a INTEGER PRIMARY KEY, b TEXT);",
+                    "INSERT INTO primary_key_table VALUES (1, 'x'), (2, 'y');",
+                },
+                Query:
+                    "SELECT a FROM primary_key_table " +
+                    "ORDER BY a DESC, b NOT IN (SELECT a, b FROM primary_key_table);"
+            ),
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE rowid_table(a INTEGER, b TEXT);",
+                    "INSERT INTO rowid_table VALUES (1, 'x'), (2, 'y');",
+                },
+                Query:
+                    "SELECT a FROM rowid_table " +
+                    "ORDER BY rowid DESC, b NOT IN (SELECT a, b FROM rowid_table);"
+            ),
+        };
+
+        foreach (var testCase in cases)
+            AssertMatchesSqlite(testCase.Setup, testCase.Query);
+    }
+
+    [Test]
     public void CompiledAndFallbackWindowOrderingMatchSqlite()
     {
         string[] setup =

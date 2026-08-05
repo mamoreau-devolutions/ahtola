@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 192,
+    "current_conformance_expected_failures": 189,
     "last_reconciled": "2026-08-08",
-    "entry_count": 199,
+    "entry_count": 200,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 57,
+        "compilation": 58,
         "parser": 28,
         "functions": 26,
         "storage": 20,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 63,
+        "divergent": 64,
         "partial": 27,
         "extension": 8,
         "parity": 2
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 103,
         "s4-intentional": 33,
-        "s1-correctness": 29
+        "s1-correctness": 30
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 89
+        "S": 90
       },
       "by_status": {
         "open": 141,
-        "closed": 58
+        "closed": 59
       }
     },
     "schema": {
@@ -2798,6 +2798,21 @@
         "compound-select-orderby.sqltest::union-order-by-expr-no-match"
       ],
       "notes": "Closed 2026-08-06 (Wave F2.10 Batch 2). Out-of-range and no-match ORDER BY ordinal diagnostics diverged from Turso in wording and term numbering. Simple SELECT: an integer-literal ORDER BY term outside [1, result-column count] now throws '1st ORDER BY term out of range - should be between 1 and {count}', matching Turso select.rs:1124's hardcoded '1st' prefix (upstream never pluralizes); in-range ordinals still substitute the result-column expression (re-wrapped in any COLLATE). Compound SELECT: the range message is '{ordinal} ORDER BY term out of range - should be between 1 and {count}' and the no-match message '{OrdinalSuffix(termNumber-1)} ORDER BY term does not match any column in the result set', with 1-based term numbers threaded through SortCompoundRows/ValidateCompoundOrderByCollations; the compound ordinal-literal path is an early pass-through so the rewrite never double-fires. Deliberate non-mirror: Ahtola keeps accepting 'ORDER BY 1 COLLATE NOCASE' on compound SELECTs where Turso rejects it (SQLite-compatible). Oracle 266->260: 6 keys removed, 0 added. orderby_rowid_truncation{,_explicit_rowid} (sub-select 2 columns) and three-way-union-order-by (row order) retained on separate gaps.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-order-by-unique-rowid-suffix",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/optimizer/order.rs::access_path_makes_consumed_prefix_unique (a consumed table-scan rowid term creates a unique order prefix)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (TruncateOrderByAfterUniqueRowid)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "orderby/memory.sqltest::orderby_rowid_truncation",
+        "orderby/memory.sqltest::orderby_rowid_truncation_explicit_rowid"
+      ],
+      "notes": "Closed 2026-08-05. The evaluator eagerly computed every ORDER BY term, including an invalid multi-column IN subquery suffix after an INTEGER PRIMARY KEY or rowid sort key that already defines a unique order. It now removes only suffix terms after a simple named rowid-table source's INTEGER PRIMARY KEY alias or unshadowed rowid pseudo-column, matching Turso's unique-prefix planner rule while retaining evaluation for non-unique order keys.",
       "status": "closed"
     },
     {

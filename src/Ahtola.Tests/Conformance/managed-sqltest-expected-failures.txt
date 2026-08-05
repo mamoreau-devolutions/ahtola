@@ -76,8 +76,6 @@ mvcc-update-noop.sqltest::mvcc-update-different-value | expected 2 row(s), got 2
 on_conflict.sqltest::mvcc-upsert-set-pk-on-conflict-target-resolves | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'memory'
 on_conflict_constraint_def.sqltest::update-pk-rollback | error 'Managed UPDATE cannot apply schema-level ON CONFLICT ROLLBACK until the pending row-update engine supports partial publication, transaction rollback, and replacement.' does not match pattern 'U
 on_conflict_constraint_def.sqltest::update-rollback-terminates-transaction | error 'Managed UPDATE cannot apply schema-level ON CONFLICT ROLLBACK until the pending row-update engine supports partial publication, transaction rollback, and replacement.' does not match pattern 'U
-orderby/memory.sqltest::orderby_rowid_truncation | expected success but got error: sub-select returns 2 columns - expected 1
-orderby/memory.sqltest::orderby_rowid_truncation_explicit_rowid | expected success but got error: sub-select returns 2 columns - expected 1
 partial_idx.sqltest::plan-partial-index-and-where-eq-seek | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SEARCH samples USING INDEX samples_pidx (name=?)' but was '0/0/0/SEARCH samples USING INDEX samples_pidx'
 partial_idx.sqltest::plan-partial-index-and-where-reversed-order | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SEARCH samples USING INDEX samples_pidx (name=?)' but was '0/0/0/SEARCH samples USING INDEX samples_pidx'
 partial_idx.sqltest::plan-partial-index-qualified-where-matches | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SEARCH samples USING INDEX samples_pidx (name=?)' but was '0/0/0/SEARCH samples USING INDEX samples_pidx'

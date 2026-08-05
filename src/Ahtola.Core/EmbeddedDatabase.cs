@@ -19404,13 +19404,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         if (statement.OrderBy.Count > 0)
         {
-            var orderCollations = resolvedOrderBy
+            var effectiveOrderBy = TruncateOrderByAfterUniqueRowid(
+                resolvedOrderBy,
+                statement.Source,
+                context);
+            var orderCollations = effectiveOrderBy
                 .Select(term => GetEffectiveCollation(term.Expression, context))
                 .ToArray();
             var orderedRows = selectedRows
                 .Select((row, index) => new OrderByKeyed<SourceRow>(
                     row,
-                    resolvedOrderBy
+                    effectiveOrderBy
                         .Select(term => EvaluateOrderByKey(
                             term.Expression,
                             parameters,
@@ -19425,7 +19429,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 var comparison = CompareOrderKeys(
                     left.Keys,
                     right.Keys,
-                    resolvedOrderBy,
+                    effectiveOrderBy,
                     orderCollations);
                 // ORDER BY ties follow the scan order the query produced (stable across
                 // all key directions), mirroring SQLite's stable sorter over its b-tree
@@ -19498,6 +19502,48 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
 
         return Evaluate(expression, parameters, row, context);
+    }
+
+    private static IReadOnlyList<OrderByTerm> TruncateOrderByAfterUniqueRowid(
+        IReadOnlyList<OrderByTerm> orderBy,
+        TableSource? source,
+        QueryContext context)
+    {
+        if (source is not NamedTableSource named
+            || context.CommonTableExpressions.ContainsKey(named.Name)
+            || !context.Tables.TryGetValue(named.Name, out var table)
+            || !table.HasRowid)
+        {
+            return orderBy;
+        }
+
+        for (var index = 0; index < orderBy.Count; index++)
+        {
+            if (IsUniqueRowidOrderExpression(orderBy[index].Expression, named, table))
+                return orderBy.Take(index + 1).ToArray();
+        }
+
+        return orderBy;
+    }
+
+    private static bool IsUniqueRowidOrderExpression(
+        Expression expression,
+        NamedTableSource source,
+        EmbeddedTable table)
+    {
+        if (expression is not ColumnExpression column
+            || column.Schema is not null
+            || column.Qualifier is { } qualifier
+                && !string.Equals(qualifier, source.Alias ?? source.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var name = column.UnqualifiedName ?? column.Name;
+        if (table.TryGetColumnIndex(name, out var columnIndex))
+            return columnIndex == table.RowidAliasColumnIndex;
+
+        return EmbeddedTable.IsRowidAliasName(name);
     }
 
     private bool CanStreamProjectionRows(
