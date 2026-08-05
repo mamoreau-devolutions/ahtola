@@ -855,6 +855,9 @@ public sealed class ResumableStatement : IDisposable
                             break;
                         }
 
+                        if (rowSetRewind.Comparer is not null && set.Count > 1)
+                            set.Sort((left, right) => rowSetRewind.Comparer(left, right));
+
                         CopyRowSetRow(set[0], rowSetRewind.Destination);
                         AdvanceInstructionPointer();
                         break;

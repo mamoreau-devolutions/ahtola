@@ -8,7 +8,7 @@ public class CompiledCompoundRecursiveDifferentialTests
 {
     [TestCase("SELECT 1 + 1 AS x UNION ALL VALUES (3), (4)", "Arithmetic")]
     [TestCase("SELECT 2 AS x INTERSECT VALUES (1 + 1)", "Arithmetic")]
-    [TestCase("SELECT * FROM (SELECT 1 AS x UNION SELECT 2) INTERSECT VALUES (2)", "GuardedRow")]
+    [TestCase("SELECT * FROM (SELECT 1 AS x UNION SELECT 2) INTERSECT VALUES (2)", "CompoundResultRow")]
     [TestCase("SELECT * FROM (SELECT 1 AS x INTERSECT SELECT 1) EXCEPT VALUES (2)", "GuardedRow")]
     [TestCase("SELECT * FROM (SELECT 1 AS x EXCEPT SELECT 2) UNION ALL VALUES (3)", "CompoundResultRow")]
     [TestCase("VALUES (1), (2), (2) EXCEPT SELECT 2", "RowSetRewind")]

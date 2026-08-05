@@ -1013,8 +1013,8 @@
         "select/memory.sqltest::select-except-union",
         "compound-select-orderby.sqltest::three-way-union-order-by"
       ],
-      "notes": "Compound SELECT arms return rows in wrong order when LIMIT/ORDER BY wraps the compound; Ahtola evaluates arms independently without SQLite merge/ordering contract. The union-order-by-expr-no-match key was cleared by Wave F2.10 Batch 2 (ORDER BY no-match wording parity, see compile-order-by-ordinal-range-error-parity); the remaining links are row-ordering gaps.",
-      "status": "open"
+      "notes": "Closed: Ahtola now materializes UNION, INTERSECT, and EXCEPT sets in the left-precedence collation key order of SQLite/Turso temporary B-trees before applying a compound ORDER BY, LIMIT, or OFFSET. UNION ALL retains arm order. This also cleared the stale collate-compound-10 and collate-compound-11 expectations. The union-order-by-expr-no-match key was cleared by Wave F2.10 Batch 2 (ORDER BY no-match wording parity, see compile-order-by-ordinal-range-error-parity).",
+      "status": "closed"
     },
     {
       "id": "compile-select-alias-visibility",

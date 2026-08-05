@@ -53,42 +53,54 @@ public static class CompoundProgramBuilder
         => Build(terms, distinctEquality: null);
 
     /// <summary>
-    /// Sequences <paramref name="terms"/> with <c>UNION</c>/<c>DISTINCT</c> semantics: each distinct row
-    /// is emitted once, at its first occurrence across all terms, in arrival order.
-    /// De-duplication uses <paramref name="rowEquality"/>, so the caller owns the exact row-equality
-    /// contract. Requires at least two terms, all projecting the same number of columns.
+    /// Sequences <paramref name="terms"/> with <c>UNION</c>/<c>DISTINCT</c> semantics. De-duplication
+    /// uses <paramref name="rowEquality"/>, so the caller owns the exact row-equality contract. When
+    /// <paramref name="outputComparer"/> is supplied, the distinct rows are materialized and emitted in
+    /// key order, matching SQLite's temporary B-tree traversal; otherwise they retain arrival order for
+    /// generic callers that do not provide SQL ordering semantics. Requires at least two terms, all
+    /// projecting the same number of columns.
     /// </summary>
-    public static CompoundTerm BuildUnionDistinct(IReadOnlyList<CompoundTerm> terms, VdbeRowEquality rowEquality)
+    public static CompoundTerm BuildUnionDistinct(
+        IReadOnlyList<CompoundTerm> terms,
+        VdbeRowEquality rowEquality,
+        VdbeRowComparer? outputComparer = null)
     {
         ArgumentNullException.ThrowIfNull(rowEquality);
-        return Build(terms, rowEquality);
+        return outputComparer is null
+            ? Build(terms, rowEquality)
+            : BuildSetOperation(terms, rowEquality, mode: null, outputComparer);
     }
 
     /// <summary>
-    /// Combines <paramref name="terms"/> with <c>INTERSECT</c> semantics: each distinct row that appears
-    /// in <em>every</em> term is emitted once, in the first-term first-occurrence order the primary term's
-    /// cursors supply. Membership and de-duplication use <paramref name="rowEquality"/>, so the caller owns
-    /// the exact row-equality contract. Requires at least two terms, all projecting the same number of
-    /// columns.
+    /// Combines <paramref name="terms"/> with <c>INTERSECT</c> semantics. Membership and de-duplication
+    /// use <paramref name="rowEquality"/>, so the caller owns the exact row-equality contract. When
+    /// <paramref name="outputComparer"/> is supplied, surviving rows are emitted in temporary B-tree key
+    /// order; otherwise they retain first-term order. Requires at least two terms, all projecting the same
+    /// number of columns.
     /// </summary>
-    public static CompoundTerm BuildIntersect(IReadOnlyList<CompoundTerm> terms, VdbeRowEquality rowEquality)
+    public static CompoundTerm BuildIntersect(
+        IReadOnlyList<CompoundTerm> terms,
+        VdbeRowEquality rowEquality,
+        VdbeRowComparer? outputComparer = null)
     {
         ArgumentNullException.ThrowIfNull(rowEquality);
-        return BuildSetOperation(terms, rowEquality, CompoundMembershipMode.PresentInAll);
+        return BuildSetOperation(terms, rowEquality, CompoundMembershipMode.PresentInAll, outputComparer);
     }
 
     /// <summary>
-    /// Combines <paramref name="terms"/> with left-associative <c>EXCEPT</c> semantics: each distinct row
-    /// of the first term that appears in <em>none</em> of the remaining terms (equivalently, is not in
-    /// their union — <c>A EXCEPT B EXCEPT C</c> is <c>A</c> minus <c>(B ∪ C)</c>) is emitted once, in the
-    /// first-term first-occurrence order the primary term's cursors supply. Membership and de-duplication
-    /// use <paramref name="rowEquality"/>, so the caller owns the exact row-equality contract. Requires at
-    /// least two terms, all projecting the same number of columns.
+    /// Combines <paramref name="terms"/> with left-associative <c>EXCEPT</c> semantics. Membership and
+    /// de-duplication use <paramref name="rowEquality"/>, so the caller owns the exact row-equality
+    /// contract. When <paramref name="outputComparer"/> is supplied, surviving rows are emitted in
+    /// temporary B-tree key order; otherwise they retain first-term order. Requires at least two terms,
+    /// all projecting the same number of columns.
     /// </summary>
-    public static CompoundTerm BuildExcept(IReadOnlyList<CompoundTerm> terms, VdbeRowEquality rowEquality)
+    public static CompoundTerm BuildExcept(
+        IReadOnlyList<CompoundTerm> terms,
+        VdbeRowEquality rowEquality,
+        VdbeRowComparer? outputComparer = null)
     {
         ArgumentNullException.ThrowIfNull(rowEquality);
-        return BuildSetOperation(terms, rowEquality, CompoundMembershipMode.AbsentFromAll);
+        return BuildSetOperation(terms, rowEquality, CompoundMembershipMode.AbsentFromAll, outputComparer);
     }
 
     private static CompoundTerm Build(IReadOnlyList<CompoundTerm> terms, VdbeRowEquality? distinctEquality)
@@ -212,14 +224,14 @@ public static class CompoundProgramBuilder
         return new CompoundTerm(combined, cursorSources);
     }
 
-    // Lowers a homogeneous INTERSECT or EXCEPT chain without reordering its inputs. Every term runs in
-    // SQL source order and captures its result into a distinct row set. Once all terms have completed,
-    // the program rewinds the first term's set and emits rows that satisfy membership against the
-    // remaining sets. This preserves both left-to-right callback/error order and first-term result order.
+    // Lowers a homogeneous set-operation chain without reordering its inputs. Every term runs in SQL
+    // source order, then the output pass traverses the materialized distinct set. UNION captures every
+    // term into one set; INTERSECT and EXCEPT capture their term sets separately for membership tests.
     private static CompoundTerm BuildSetOperation(
         IReadOnlyList<CompoundTerm> terms,
         VdbeRowEquality rowEquality,
-        CompoundMembershipMode mode)
+        CompoundMembershipMode? mode,
+        VdbeRowComparer? outputComparer)
     {
         ArgumentNullException.ThrowIfNull(terms);
         if (terms.Count < 2)
@@ -288,10 +300,13 @@ public static class CompoundProgramBuilder
             totalParameterSlots += program.ParameterSlotCount;
         }
 
+        var capturesSingleSet = mode is null;
         var captureSets = new int[count];
         for (var termIndex = 0; termIndex < count; termIndex++)
-            captureSets[termIndex] = totalDistinctSets + termIndex;
-        var outputSet = totalDistinctSets + count;
+            captureSets[termIndex] = totalDistinctSets + (capturesSingleSet ? 0 : termIndex);
+        var outputSet = capturesSingleSet
+            ? captureSets[0]
+            : totalDistinctSets + count;
         var combinedDistinctSets = outputSet + 1;
 
         var output = new RegisterRange(new Register(totalRegisters), columnCount);
@@ -332,13 +347,16 @@ public static class CompoundProgramBuilder
         instructions.Add(new RowSetRewindInstruction(
             captureSets[0],
             output,
-            new ProgramCounter(haltAddress)));
-        instructions.Add(new CompoundResultRowInstruction(
-            output,
-            rowEquality,
-            outputSet,
-            membershipSets,
-            mode));
+            new ProgramCounter(haltAddress),
+            outputComparer));
+        instructions.Add(mode is { } membershipMode
+            ? new CompoundResultRowInstruction(
+                output,
+                rowEquality,
+                outputSet,
+                membershipSets,
+                membershipMode)
+            : new ResultRowInstruction(output));
         instructions.Add(new RowSetNextInstruction(
             captureSets[0],
             output,
@@ -625,7 +643,8 @@ public static class CompoundProgramBuilder
             RowSetRewindInstruction x => new RowSetRewindInstruction(
                 x.RowSetIndex + distinctBase,
                 Range(x.Destination),
-                Pc(x.EmptyTarget)),
+                Pc(x.EmptyTarget),
+                x.Comparer),
             RowSetNextInstruction x => new RowSetNextInstruction(
                 x.RowSetIndex + distinctBase,
                 Range(x.Destination),

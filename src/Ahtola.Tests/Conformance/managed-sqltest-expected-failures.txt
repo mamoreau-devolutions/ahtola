@@ -22,7 +22,6 @@ autoincr.sqltest::autoinc-create-sequence-table | expected 3 row(s), got 2 row(s
 before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorrelated-subquery | expected 3 row(s), got 3 row(s); row 1 expected '2/600' but was '2/1100'
 bracket-quoting.sqltest::bracket-analyze-table-name | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 check_constraint.sqltest::check_constraint_rename_table_qualified_ref | expected success but got error: ALTER TABLE RENAME cannot rewrite table-qualified CHECK expressions until managed schema token rewriting is implemented.
-compound-select-orderby.sqltest::three-way-union-order-by | expected 11 row(s), got 11 row(s); row 0 expected '1/alpha' but was '1/apple'
 cte.sqltest::cte-update-direct-ref-keyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
 cte.sqltest::cte-update-direct-ref-nonkeyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
 cte.sqltest::cte-unreferenced-column-mismatch-delete | expected success but got error: Managed CTE DML requires every CTE to contribute to the DML statement; cte is unused.
@@ -82,13 +81,9 @@ rollback.sqltest::schema-change-rollback-2-2 | expected 2 row(s), got 2 row(s); 
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery | expected success but got error: managed execution exceeded 30 seconds
-select/memory.sqltest::select-intersect-union-with-limit | expected 3 row(s), got 3 row(s); row 0 expected 'a/a' but was 'z/z'
-select/memory.sqltest::select-except-union | expected 3 row(s), got 3 row(s); row 0 expected 'x/x' but was 'y/y'
 select/memory.sqltest::collate-compound-1 | expected 1 row(s), got 1 row(s); row 0 expected 'ABC' but was 'abc'
 select/memory.sqltest::collate-compound-5 | expected 1 row(s), got 1 row(s); row 0 expected 'ABC' but was 'abc'
 select/memory.sqltest::collate-compound-7 | expected 2 row(s), got 2 row(s); row 0 expected 'A' but was 'a'
-select/memory.sqltest::collate-compound-10 | expected 3 row(s), got 3 row(s); row 0 expected 'ABC' but was 'abc'
-select/memory.sqltest::collate-compound-11 | expected 3 row(s), got 3 row(s); row 0 expected 'BANANA' but was 'apple'
 select/memory.sqltest::collate-compound-13 | expected 1 row(s), got 1 row(s); row 0 expected 'TEST' but was 'Test'
 select/memory.sqltest::collate-compound-14 | expected 2 row(s), got 2 row(s); row 0 expected 'ABC' but was 'abc'
 snapshot_tests/analyze/stat1_rows.sqltest::analyze-indexed-table-does-not-insert-null-stat1-row | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.

@@ -1540,13 +1540,15 @@ public sealed record RowSetInsertInstruction(
 
 /// <summary>
 /// Positions a row set at its first stored row and copies that row into <paramref name="Destination"/>.
-/// Empty sets jump to <paramref name="EmptyTarget"/>. Row sets preserve first-insertion order, so this
-/// begins the output pass of an <c>INTERSECT</c>/<c>EXCEPT</c> after every source term has run.
+/// Empty sets jump to <paramref name="EmptyTarget"/>. When <paramref name="Comparer"/> is present, the
+/// row set is ordered before the output pass; compound set operations use this to mirror SQLite's
+/// temporary B-tree traversal order.
 /// </summary>
 public sealed record RowSetRewindInstruction(
     int RowSetIndex,
     RegisterRange Destination,
-    ProgramCounter EmptyTarget) : VdbeInstruction
+    ProgramCounter EmptyTarget,
+    VdbeRowComparer? Comparer = null) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.RowSetRewind;
 }

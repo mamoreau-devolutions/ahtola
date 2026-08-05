@@ -13836,17 +13836,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
     //    is UNION ALL, UNION/DISTINCT, INTERSECT, or EXCEPT. Such a chain flattens into one builder
     //    call because the evaluator folds it left-associatively into the identical result:
     //      * UNION ALL concatenates every term in order.
-    //      * UNION/DISTINCT keeps each row's first occurrence across all terms in arrival order.
+    //      * UNION/DISTINCT retains each row's first occurrence for its representative value, then emits
+    //        the materialized rows in temporary-B-tree key order.
     //      * INTERSECT emits each distinct first-term row that also appears in every other term, in
-    //        first-term first-occurrence order. A ∩ B ∩ C is associative and commutative, so the
-    //        builder's "present in all probe sets" test reproduces the evaluator's step-by-step fold
-    //        (each step intersects the running distinct set with the next term) exactly.
-    //      * EXCEPT emits each distinct first-term row absent from every other term, in first-term
-    //        first-occurrence order. A EXCEPT B EXCEPT C is left-associative and equals A minus
-    //        (B ∪ C), so the builder's "absent from all probe sets" test reproduces the evaluator's
-    //        fold exactly.
+    //        temporary-B-tree key order. A ∩ B ∩ C is associative and commutative, so the builder's
+    //        "present in all probe sets" test reproduces the evaluator's step-by-step fold (each step
+    //        intersects the running distinct set with the next term) exactly.
+    //      * EXCEPT emits each distinct first-term row absent from every other term, in temporary-B-tree
+    //        key order. A EXCEPT B EXCEPT C is left-associative and equals A minus (B ∪ C), so the
+    //        builder's "absent from all probe sets" test reproduces the evaluator's fold exactly.
     //    These are precisely what BuildUnionAll/BuildUnionDistinct/BuildIntersect/BuildExcept emit,
-    //    so flattening is order-, duplicate-, and membership-identical.
+    //    so flattening is result-order-, duplicate-, and membership-identical.
     //  - every term is a lowerable SELECT, VALUES row set, or nested compound, and every term projects
     //    the same number of result columns. Nested row-set and aggregate group state is retained.
     //  - for UNION/DISTINCT, INTERSECT, and EXCEPT (every operator that de-duplicates or probes rows),
@@ -13857,8 +13857,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
     //    so a star-expanded UNION ALL still routes.
     //
     // Deliberately kept on the evaluator (fallback):
-    //  - ORDER BY / LIMIT / OFFSET on the compound, which reshape the sequenced stream the builder
-    //    only concatenates, de-duplicates, or probes.
+    //  - ORDER BY / LIMIT / OFFSET on the compound, which reshape the keyed set-operation output that
+    //    the builder only concatenates, de-duplicates, or probes.
     //  - mixed operators (e.g. UNION ALL ... UNION ..., or INTERSECT ... EXCEPT ...); the builder
     //    sequences one uniform operator per call and the evaluator's left-associative mixed fold is
     //    not reproduced here.
@@ -13899,9 +13899,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return false;
         }
 
-        // Bytecode set operations de-duplicate while terms emit rows; the evaluator waits
-        // for a later term to complete. Keep callback-capable result collations on the
-        // evaluator so a comparator cannot run before a later term's error.
+        // Bytecode set operations can invoke their row equality and output comparison while materializing
+        // terms. Keep callback-capable result collations on the evaluator so such a callback cannot run
+        // before a later term's error.
         if (compoundOperator != CompoundOperator.UnionAll
             && statement.Terms.Any(term =>
                 HasObservableCompoundResultCollation(term, context)))
@@ -13954,25 +13954,32 @@ public sealed partial class EmbeddedDatabase : IDisposable
         else
         {
             // UNION/DISTINCT, INTERSECT, and EXCEPT all de-duplicate their output and (for the set
-            // operations) probe membership through the evaluator's row-equality: per-output-column
-            // collations from the first term drive RowsEqual (NULL==NULL, otherwise a collation-aware
-            // comparison), so the emitted DistinctResultRow / RowSetInsert / CompoundResultRow opcodes
-            // de-duplicate and test membership exactly as ApplyUnion / ApplyIntersect / ApplyExcept do.
-            // The collation vector only aligns with the row width when the first term projects one
-            // column per output, so a star-expanded first term declines rather than index a too-short
-            // vector (the same range the evaluator's own RowsEqual would fault on).
+            // operations) probe membership through the evaluator's row-equality. SQLite reads their
+            // temporary B-trees in the same per-output-column collation order, so use the corresponding
+            // row comparer for the VDBE output pass as well.
             var collations = GetCompoundCollations(statement.Terms, columnCount, context);
             if (collations.Count != columnCount
                 || collations.Any(collation => !IsStreamingSafeDistinctCollation(collation)))
                 return false;
 
             bool RowEquality(SqlValue[] left, SqlValue[] right) => RowsEqual(left, right, collations);
+            int RowComparison(SqlValue[] left, SqlValue[] right) =>
+                CompareCompoundRows(left, right, collations);
 
             compound = compoundOperator switch
             {
-                CompoundOperator.Union => CompoundProgramBuilder.BuildUnionDistinct(terms, RowEquality),
-                CompoundOperator.Intersect => CompoundProgramBuilder.BuildIntersect(terms, RowEquality),
-                CompoundOperator.Except => CompoundProgramBuilder.BuildExcept(terms, RowEquality),
+                CompoundOperator.Union => CompoundProgramBuilder.BuildUnionDistinct(
+                    terms,
+                    RowEquality,
+                    RowComparison),
+                CompoundOperator.Intersect => CompoundProgramBuilder.BuildIntersect(
+                    terms,
+                    RowEquality,
+                    RowComparison),
+                CompoundOperator.Except => CompoundProgramBuilder.BuildExcept(
+                    terms,
+                    RowEquality,
+                    RowComparison),
                 _ => throw new EmbeddedSqlException($"Unsupported compound operator {compoundOperator}."),
             };
         }
@@ -21765,6 +21772,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var result = new List<SqlValue[]>(left.Count + right.Count);
         AddDistinctRows(result, left, collations);
         AddDistinctRows(result, right, collations);
+        SortCompoundSetRows(result, collations);
         return result;
     }
 
@@ -21783,6 +21791,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             result.Add(row.ToArray());
         }
 
+        SortCompoundSetRows(result, collations);
         return result;
     }
 
@@ -21801,7 +21810,41 @@ public sealed partial class EmbeddedDatabase : IDisposable
             result.Add(row.ToArray());
         }
 
+        SortCompoundSetRows(result, collations);
         return result;
+    }
+
+    // SQLite/Turso materialize UNION, INTERSECT, and EXCEPT sets in a temporary B-tree. The traversal of
+    // that B-tree defines the otherwise-unordered result stream and becomes observable to outer LIMIT and
+    // to stable ties in a later ORDER BY.
+    private void SortCompoundSetRows(List<SqlValue[]> rows, IReadOnlyList<string?> collations)
+    {
+        if (rows.Count > 1)
+            rows.Sort((left, right) => CompareCompoundRows(left, right, collations));
+    }
+
+    private int CompareCompoundRows(
+        IReadOnlyList<SqlValue> left,
+        IReadOnlyList<SqlValue> right,
+        IReadOnlyList<string?> collations)
+    {
+        for (var index = 0; index < left.Count; index++)
+        {
+            var leftValue = left[index];
+            var rightValue = right[index];
+            if (leftValue.Kind == SqlValueKind.Null || rightValue.Kind == SqlValueKind.Null)
+            {
+                if (leftValue.Kind != rightValue.Kind)
+                    return leftValue.Kind == SqlValueKind.Null ? -1 : 1;
+                continue;
+            }
+
+            var comparison = Compare(leftValue, rightValue, collations.ElementAtOrDefault(index));
+            if (comparison != 0)
+                return comparison;
+        }
+
+        return 0;
     }
 
     private void AddDistinctRows(
