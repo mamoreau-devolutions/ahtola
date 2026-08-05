@@ -173,9 +173,9 @@ trigger_attach_regression.sqltest::trigger-attached-db-multi-cmd-same-db | expec
 trigger_attach_regression.sqltest::trigger-attached-db-subquery-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 trigger_attach_regression.sqltest::trigger-attached-db-explicit-qual-subquery | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 trigger_attach_regression.sqltest::trigger-attached-db-cte-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-trigger_on_conflict.sqltest::trigger-upsert-new-column | expected success but got error: no such table: NEW
-trigger_on_conflict.sqltest::trigger-upsert-new-in-where | expected success but got error: no such table: NEW
-trigger_on_conflict.sqltest::trigger-upsert-new-in-where-no-update | expected success but got error: no such table: NEW
+trigger_on_conflict.sqltest::trigger-upsert-new-column | expected success but got error: no such column: NEW.delta
+trigger_on_conflict.sqltest::trigger-upsert-new-in-where | expected success but got error: no such column: NEW.delta
+trigger_on_conflict.sqltest::trigger-upsert-new-in-where-no-update | expected success but got error: no such column: NEW.delta
 update-from.sqltest::update-from-returning-reuses-row-cte-snapshot-after-trigger-mutation | expected 3 row(s), got 3 row(s); row 1 expected '2/100' but was '2/2'
 update-from.sqltest::update-from-attached-constant-where-literal-set | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update-from.sqltest::update-from-attached-constant-where-zero | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
@@ -192,8 +192,6 @@ upsert.sqltest::upsert-qualified-target | expected success but got error: ON CON
 upsert.sqltest::upsert-current-qualified_1 | expected success but got error: ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint on table dq.
 upsert.sqltest::upsert-doubly-qualified-target | expected success but got error: ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint on table dq.
 upsert.sqltest::upsert-targets-chain | expected success but got error: Expected End. At SQL offset 215.
-upsert.sqltest::upsert-unresolved-table-reference | error 'no such table: other' does not match pattern '.*no such column.*'
-upsert.sqltest::upsert-unresolved-table-in-where | error 'no such table: other' does not match pattern '.*no such column.*'
 views.sqltest::view-rejects-aggregate-order-by | expected an error but the statement succeeded
 window/dense_rank.sqltest::dense-rank-column-declared-collation | expected 3 row(s), got 3 row(s); row 0 expected '2/1/1' but was '1/1/2'
 window/filter-over.sqltest::filter-over-repeated-nondeterministic-call | expected success but got error: no such function: TEST_NONDET_COUNTER

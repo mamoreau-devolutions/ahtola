@@ -441,4 +441,37 @@ public sealed class ManagedUpsertCheckConstraintTests
 
         return rows;
     }
+
+    // A DO UPDATE SET / WHERE expression may only reference the target table and
+    // the excluded row; a column qualified by any other table is an unresolvable
+    // column reference, not a missing table. SQLite/Turso emit "no such column".
+    [Test]
+    public void ADoUpdateSetReferencingAnOutOfScopeTableColumnReportsNoSuchColumn()
+    {
+        var error = AssertBothEnginesAgree(
+            [
+                "CREATE TABLE t(id INTEGER PRIMARY KEY, val INTEGER)",
+                "CREATE TABLE other(id INTEGER PRIMARY KEY, val INTEGER)",
+                "INSERT INTO t VALUES(1,10)",
+            ],
+            "INSERT INTO t VALUES(1,20) ON CONFLICT(id) DO UPDATE SET val = other.val",
+            "SELECT id,val FROM t");
+
+        error.Should().Contain("no such column");
+    }
+
+    [Test]
+    public void ADoUpdateWhereReferencingAnOutOfScopeTableColumnReportsNoSuchColumn()
+    {
+        var error = AssertBothEnginesAgree(
+            [
+                "CREATE TABLE t(id INTEGER PRIMARY KEY, val INTEGER)",
+                "CREATE TABLE other(id INTEGER PRIMARY KEY, val INTEGER)",
+                "INSERT INTO t VALUES(1,10)",
+            ],
+            "INSERT INTO t VALUES(1,20) ON CONFLICT(id) DO UPDATE SET val = excluded.val WHERE other.val > 0",
+            "SELECT id,val FROM t");
+
+        error.Should().Contain("no such column");
+    }
 }

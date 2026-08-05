@@ -7657,7 +7657,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         && !qualifier.Equals(tableName, StringComparison.OrdinalIgnoreCase))
                     {
                         throw new EmbeddedSqlException(
-                            $"no such table: {qualifier}");
+                            $"no such column: {column.Name}");
                     }
 
                     return;

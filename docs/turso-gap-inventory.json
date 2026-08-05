@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 200,
+    "current_conformance_expected_failures": 199,
     "last_reconciled": "2026-08-07",
-    "entry_count": 195,
+    "entry_count": 196,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 54,
+        "compilation": 55,
         "parser": 27,
         "functions": 26,
         "storage": 20,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 58,
+        "divergent": 59,
         "partial": 27,
         "extension": 8,
         "parity": 2
@@ -43,11 +43,11 @@
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 85
+        "S": 86
       },
       "by_status": {
-        "open": 141,
-        "closed": 54
+        "open": 140,
+        "closed": 55
       }
     },
     "schema": {
@@ -2890,6 +2890,21 @@
       ],
       "notes": "Closed 2026-08-07. A column-level REFERENCES clause (e.g. CREATE TABLE s(a REFERENCES t(a, c))) silently accepted multiple parent columns; only the table-level FOREIGN KEY form enforced parent/child arity. SQLite/Turso reject a column-level FK naming more than one parent column. ParseColumnDefinition now throws 'foreign key on {child} should reference only one column of table {parent}' when the parsed column-level FK references more than one parent column, matching Turso. Backed by ManagedDdlBoundaryTests.ManagedEngineRejectsColumnLevelForeignKeyWithMultipleParentColumns. The link was previously misattached to vdbe-fk-enforcement-opcodes (a runtime FK enforcement gap); detached because this is a parse-time arity check, not runtime enforcement. Conformance baseline 201 -> 200; full suite 3798/0/50.",
       "status": "closed"
-    }
-  ]
+   },
+   {
+     "id": "compile-upsert-do-update-out-of-scope-column-diagnostic",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/upsert.rs::emit_upsert (DO UPDATE SET/WHERE expressions bind only the target table and the EXCLUDED pseudo-row; a column qualified by any other table is an unresolvable column -> SQLite 'no such column: {qualifier}.{col}')",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateUpsertUpdateExpression (out-of-scope qualifier branch)",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "upsert.sqltest::upsert-unresolved-table-reference",
+       "upsert.sqltest::upsert-unresolved-table-in-where"
+     ],
+     "notes": "Closed 2026-08-07. An UPSERT DO UPDATE SET value or WHERE predicate referencing a table other than the target or EXCLUDED (e.g. SET val = other.val where other is a real but out-of-scope table) produced 'no such table: {qualifier}' instead of SQLite/Turso's 'no such column: {qualifier}.{col}'. ValidateUpsertUpdateExpression now throws 'no such column: {column.Name}' for an out-of-scope qualifier, matching SQLite/Turso. The validator recurses through assignments and the WHERE expression (BinaryExpression and all composite expr cases), so both the SET and WHERE cases are covered. Backed by ManagedUpsertCheckConstraintTests differential harness (AssertBothEnginesAgree vs real Microsoft.Data.Sqlite). Conformance baseline 201 -> 199; both linked cases removed, 0 added.",
+     "status": "closed"
+   }
+ ]
 }
