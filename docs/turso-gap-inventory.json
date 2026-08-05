@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 185,
+    "current_conformance_expected_failures": 182,
     "last_reconciled": "2026-08-08",
-    "entry_count": 201,
+    "entry_count": 202,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 59,
+        "compilation": 60,
         "parser": 28,
         "functions": 26,
         "storage": 20,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 65,
+        "divergent": 66,
         "partial": 27,
         "extension": 8,
         "parity": 2
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 103,
         "s4-intentional": 33,
-        "s1-correctness": 31
+        "s1-correctness": 32
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 91
+        "S": 92
       },
       "by_status": {
         "open": 141,
-        "closed": 60
+        "closed": 61
       }
     },
     "schema": {
@@ -2830,6 +2830,22 @@
         "groupby/constant-expr.sqltest::group-by-view-constant-order-by"
       ],
       "notes": "Closed 2026-08-05. The grouped evaluator called the scalar expression evaluator for a SELECT * projection and failed with an unsupported StarExpression error whenever execution fell back from the compiled path. Grouped projection evaluation now shares normal star expansion, including qualified-star resolution and the expanded result-column collations used by DISTINCT.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-window-ntile-integer-prefix-coercion",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/function.rs::WindowFunc::Ntile (one runtime argument)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (window ntile bucket evaluation via CoerceSqliteInteger)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "window/ntile.sqltest::ntile-n-text-prefix-coerces",
+        "window/ntile.sqltest::ntile-n-scientific-text-is-integer-prefix",
+        "window/ntile.sqltest::ntile-n-blob-read-as-text"
+      ],
+      "notes": "Closed 2026-08-05. ntile used the general numeric converter, which rejected textual numeric prefixes, treated scientific text as a real number, and ignored blobs. Its bucket count now shares the SQLite integer-prefix conversion used for sqlite_sequence values: it reads text/blob bytes through the signed decimal prefix and truncates real values.",
       "status": "closed"
     },
     {

@@ -181,6 +181,23 @@ public sealed class WindowFunctionSemanticsTests
     }
 
     [Test]
+    public void NtileUsesSqliteIntegerPrefixCoercion()
+    {
+        string[] setup =
+        [
+            "CREATE TABLE valueset(value INTEGER);",
+            "INSERT INTO valueset VALUES (1), (2), (3), (4), (5);",
+        ];
+
+        foreach (var bucketCount in new[] { "'2abc'", "'1e2'", "X'33'" })
+        {
+            AssertMatchesSqlite(
+                setup,
+                $"SELECT value, ntile({bucketCount}) OVER (ORDER BY value) FROM valueset;");
+        }
+    }
+
+    [Test]
     public void InvalidParameterizedFrameReportsTheSqliteError()
     {
         const string query =

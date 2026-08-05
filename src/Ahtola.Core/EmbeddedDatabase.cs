@@ -758,7 +758,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
             var originalSequence = sequenceRowIndex < 0
                 ? 0
-                : CoerceSqliteSequenceInteger(sequence.Rows[sequenceRowIndex][1]);
+                : CoerceSqliteInteger(sequence.Rows[sequenceRowIndex][1]);
             tracker = new AutoIncrementTracker(
                 table.Name,
                 sequenceRowIndex < 0 ? null : sequence.RowIds[sequenceRowIndex],
@@ -8654,7 +8654,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         public long? ExplicitRowId { get; set; }
     }
 
-    private static long CoerceSqliteSequenceInteger(SqlValue value)
+    private static long CoerceSqliteInteger(SqlValue value)
     {
         switch (value.Kind)
         {
@@ -31567,7 +31567,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             foreach (var function in functions.Where(function =>
                          function.Name.Equals("NTILE", StringComparison.OrdinalIgnoreCase)))
             {
-                var buckets = ToSqliteInteger(
+                var buckets = CoerceSqliteInteger(
                     inputs[function][entries[0].SourceIndex].Arguments[0]);
                 if (buckets <= 0)
                     throw new EmbeddedSqlException("argument of ntile must be a positive integer");

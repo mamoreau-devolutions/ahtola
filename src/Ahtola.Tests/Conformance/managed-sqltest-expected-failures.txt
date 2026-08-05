@@ -186,6 +186,3 @@ window/filter-over.sqltest::filter-over-mixed-deterministic-and-nondeterministic
 window/lag_lead.sqltest::lag-lead-negative-offset-multi | expected 5 row(s), got 5 row(s); row 0 expected '1//' but was '1/4/'
 window/lag_lead.sqltest::lag-lead-per-row-mixed-sign-offset | expected 5 row(s), got 5 row(s); row 2 expected '3/-2//1' but was '3/-2/5/1'
 window/nth_value.sqltest::nth-value-limit-stops-before-late-invalid-n | expected success but got error: second argument to nth_value must be a positive integer
-window/ntile.sqltest::ntile-n-text-prefix-coerces | expected success but got error: argument of ntile must be a positive integer
-window/ntile.sqltest::ntile-n-scientific-text-is-integer-prefix | expected 4 row(s), got 4 row(s); row 1 expected '2/1' but was '2/2'
-window/ntile.sqltest::ntile-n-blob-read-as-text | expected success but got error: argument of ntile must be a positive integer
