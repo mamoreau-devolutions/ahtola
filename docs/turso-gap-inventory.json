@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 202,
+    "current_conformance_expected_failures": 201,
     "last_reconciled": "2026-08-07",
     "entry_count": 194,
     "counts": {
@@ -2806,14 +2806,15 @@
       "layer": "compilation",
       "kind": "partial",
       "turso_ref": "turso-src/core/schema.rs:4369-4373,4593-4598 (rejects a table with more than one PRIMARY KEY regardless of whether the keys are declared column-inline or table-level)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ResolvePrimaryKeyColumns columnLevel.Count > 1 rejection)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (ParseColumnDefinition duplicate-inline-PK check) + src/Ahtola.Core/EmbeddedDatabase.cs (ResolvePrimaryKeyColumns columnLevel.Count > 1 rejection)",
       "severity": "s1-correctness",
       "effort": "S",
       "conformance_links": [
         "on_conflict_constraint_def.sqltest::ddl-reject-multiple-pk-columns",
-        "create_table.sqltest::create_table_multiple_column_primary_keys"
+        "create_table.sqltest::create_table_multiple_column_primary_keys",
+        "create_table.sqltest::create_table_duplicate_primary_key_clause"
       ],
-      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 3). Ahtola rejected a second table-level PRIMARY KEY at parse and an inline+table-level combination at execution, but silently accepted two column-inline PRIMARY KEYs (CREATE TABLE t(a PRIMARY KEY, b PRIMARY KEY)), producing a table with an ambiguous primary key. ResolvePrimaryKeyColumns now throws 'table has more than one primary key' when more than one column-level PRIMARY KEY is collected, matching SQLite/Turso (the message is intentionally nameless like the two pre-existing Ahtola sites, since sqltest matching is substring-based). Oracle 261->256 across the batch: the 2 PK keys here plus the 3 string-literal keys on compile-index-string-literal-column-resolution, 0 added.",
+      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 3). Ahtola rejected a second table-level PRIMARY KEY at parse and an inline+table-level combination at execution, but silently accepted two column-inline PRIMARY KEYs (CREATE TABLE t(a PRIMARY KEY, b PRIMARY KEY)), producing a table with an ambiguous primary key. ResolvePrimaryKeyColumns now throws 'table has more than one primary key' when more than one column-level PRIMARY KEY is collected, matching SQLite/Turso (the message is intentionally nameless like the two pre-existing Ahtola sites, since sqltest matching is substring-based). Extended 2026-08-07: the same-column inline case (CREATE TABLE t(a primary key primary key)) was still silently accepted because the column-constraint parser set primaryKey=true idempotently; ParseColumnDefinition now throws 'table has more than one primary key' when a second inline PRIMARY KEY is parsed on the same column, closing create_table_duplicate_primary_key_clause. Oracle 261->256 across the batch: the 2 PK keys here plus the 3 string-literal keys on compile-index-string-literal-column-resolution, 0 added.",
       "status": "closed"
     },
     {

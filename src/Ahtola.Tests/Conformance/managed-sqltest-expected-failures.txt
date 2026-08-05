@@ -36,7 +36,6 @@ check_constraint.sqltest::check_constraint_rename_table_qualified_ref | expected
 compound-select-orderby.sqltest::three-way-union-order-by | expected 11 row(s), got 11 row(s); row 0 expected '1/alpha' but was '1/apple'
 create_index.sqltest::create-index-strftime-with-column | expected success but got error: non-deterministic functions are prohibited in index expressions
 create_index.sqltest::create-index-date-literal | expected success but got error: non-deterministic functions are prohibited in index expressions
-create_table.sqltest::create_table_duplicate_primary_key_clause | expected an error but the statement succeeded
 cte.sqltest::cte-update-direct-ref-keyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
 cte.sqltest::cte-update-direct-ref-nonkeyed | error 'Managed CTE DML requires every CTE to contribute to the DML statement; c is unused.' does not match pattern 'no such'
 cte.sqltest::cte-unreferenced-column-mismatch-delete | expected success but got error: Managed CTE DML requires every CTE to contribute to the DML statement; cte is unused.

@@ -3378,6 +3378,8 @@ internal sealed class SqlParser
             if (ConsumeKeyword("PRIMARY"))
             {
                 ExpectKeyword("KEY");
+                if (primaryKey)
+                    throw Error("table has more than one primary key");
                 primaryKey = true;
                 primaryKeyDeclarationOrder ??= keyConstraintOrder++;
                 primaryKeyConstraintName = pendingConstraintName;
