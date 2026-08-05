@@ -27,7 +27,6 @@ alter_table.sqltest::alter-table-rename-column-temp-trigger-attached-cross-table
 alter_table.sqltest::temp-trigger-attached-read-cross-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 alter_table.sqltest::alter-table-drop-column-temp-trigger-invalid | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-drop-column-invalid-temp-trigger-missing-main-table | expected an error but the statement succeeded
-alter_table.sqltest::alter-rename-col-schema-update-cmd-from | expected success but got error: no such column: src.b
 autoincr.sqltest::autoinc-create-sequence-table | expected 3 row(s), got 2 row(s); row 0 expected '__turso_internal_seq___turso_internal_autoincrement_t1' but was 'sqlite_sequence'
 autoincr.sqltest::autoinc-alter-column-clears-sequence-row | expected success but got error: Expected ADD, DROP, or RENAME after ALTER TABLE. At SQL offset 14.
 before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorrelated-subquery | expected 3 row(s), got 3 row(s); row 1 expected '2/600' but was '2/1100'

@@ -393,12 +393,21 @@ internal static class RenameColumnRewriter
         {
             WalkAssignments(update.Assignments, update.TableName);
             var scope = TableScope(update.TableName, outer);
+            // UPDATE...FROM introduces additional table sources whose columns may be
+            // referenced in the SET values, WHERE, ORDER BY, and LIMIT. Bind them into the
+            // same scope so qualified references (e.g. SET z = src.b FROM src) resolve and
+            // get rewritten when src is the rename target.
+            if (update.From is not null)
+                BindSource(update.From, scope);
+
             WalkAssignmentValues(update.Assignments, scope);
             if (update.Where is not null)
                 WalkExpression(update.Where, scope);
 
             WalkProjections(update.Returning, scope);
             WalkOrderBy(update.OrderBy, scope);
+            WalkExpression(update.Limit, scope);
+            WalkExpression(update.Offset, scope);
         }
 
         private void WalkDelete(DeleteStatement delete, Scope? outer)

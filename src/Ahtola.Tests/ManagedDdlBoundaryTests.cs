@@ -64,6 +64,31 @@ public sealed class ManagedDdlBoundaryTests
         error.Message.Should().Contain("should reference only one column");
     }
 
+    // RENAME COLUMN rewrites qualified references inside UPDATE...FROM trigger
+    // bodies, matching SQLite/Turso (alter_table.sqltest::alter-rename-col-schema-update-cmd-from).
+    [Test]
+    public void ManagedEngineRewritesUpdateFromTriggerBodyOnRenameColumn()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        Execute(connection, "CREATE TABLE src (a INTEGER PRIMARY KEY, b);");
+        Execute(connection, "CREATE TABLE aux (a INTEGER PRIMARY KEY, z);");
+        Execute(connection, "CREATE TABLE dst (x);");
+        Execute(connection,
+            """
+            CREATE TRIGGER trig1 AFTER INSERT ON dst BEGIN
+                UPDATE aux SET z = src.b FROM src WHERE aux.a = src.a AND src.a = new.x;
+            END
+            """);
+
+        Execute(connection, "ALTER TABLE src RENAME COLUMN b TO c;");
+
+        var sql = ReadText(connection, "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trig1';");
+        sql.Should().Contain("src.c");
+        sql.Should().NotContain("src.b");
+    }
+
     private static void Execute(EmbeddedConnection connection, string sql)
     {
         using var statement = connection.Prepare(sql);
@@ -75,5 +100,12 @@ public sealed class ManagedDdlBoundaryTests
         using var statement = connection.Prepare(sql);
         statement.Step().Should().Be(StatementStepResult.Row);
         return statement.GetValue(0).AsInteger();
+    }
+
+    private static string ReadText(EmbeddedConnection connection, string sql)
+    {
+        using var statement = connection.Prepare(sql);
+        statement.Step().Should().Be(StatementStepResult.Row);
+        return statement.GetValue(0).AsText();
     }
 }

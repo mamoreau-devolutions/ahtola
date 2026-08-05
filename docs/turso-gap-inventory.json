@@ -14,14 +14,14 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 199,
+    "current_conformance_expected_failures": 198,
     "last_reconciled": "2026-08-07",
-    "entry_count": 196,
+    "entry_count": 197,
     "counts": {
       "by_layer": {
         "vdbe": 36,
         "compilation": 55,
-        "parser": 27,
+        "parser": 28,
         "functions": 26,
         "storage": 20,
         "mvcc": 14,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 59,
+        "divergent": 60,
         "partial": 27,
         "extension": 8,
         "parity": 2
@@ -43,11 +43,11 @@
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 86
+        "S": 87
       },
       "by_status": {
-        "open": 140,
-        "closed": 55
+        "open": 139,
+        "closed": 56
       }
     },
     "schema": {
@@ -2904,6 +2904,20 @@
        "upsert.sqltest::upsert-unresolved-table-in-where"
      ],
      "notes": "Closed 2026-08-07. An UPSERT DO UPDATE SET value or WHERE predicate referencing a table other than the target or EXCLUDED (e.g. SET val = other.val where other is a real but out-of-scope table) produced 'no such table: {qualifier}' instead of SQLite/Turso's 'no such column: {qualifier}.{col}'. ValidateUpsertUpdateExpression now throws 'no such column: {column.Name}' for an out-of-scope qualifier, matching SQLite/Turso. The validator recurses through assignments and the WHERE expression (BinaryExpression and all composite expr cases), so both the SET and WHERE cases are covered. Backed by ManagedUpsertCheckConstraintTests differential harness (AssertBothEnginesAgree vs real Microsoft.Data.Sqlite). Conformance baseline 201 -> 199; both linked cases removed, 0 added.",
+     "status": "closed"
+   },
+   {
+     "id": "parser-rename-column-update-from-trigger-body",
+     "layer": "parser",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/alter.rs (RenameColumn rewrites dependent schema objects; UPDATE...FROM introduces additional table sources whose columns may be referenced in SET/WHERE and must be rewritten when the FROM table is the rename target)",
+     "ahtola_ref": "src/Ahtola.Core/Parsing/RenameColumnRewriter.cs::WalkUpdate (now binds update.From into scope via BindSource before walking assignment values, WHERE, ORDER BY, and LIMIT/OFFSET)",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "alter_table.sqltest::alter-rename-col-schema-update-cmd-from"
+     ],
+     "notes": "Closed 2026-08-07. ALTER TABLE ... RENAME COLUMN rewrites trigger bodies through RenameColumnRewriter.WalkUpdate, which walked assignments, WHERE, RETURNING, and ORDER BY but never bound update.From (the UPDATE...FROM clause) into scope. A qualified reference like SET z = src.b FROM src therefore resolved src as Unresolved and threw 'no such column: src.b' instead of rewriting b to c. WalkUpdate now calls BindSource(update.From, scope) after creating the target table scope, mirroring WalkSelect's handling of select.Source, and also walks Limit/Offset. ResolveColumns returns the pre-rename column shape for the target table, so src.b matches and IsRenameTarget flags the binding for rewrite to src.c. Backed by ManagedDdlBoundaryTests.ManagedEngineRewritesUpdateFromTriggerBodyOnRenameColumn. Conformance baseline 199 -> 198; full suite 3801/0/47.",
      "status": "closed"
    }
  ]
