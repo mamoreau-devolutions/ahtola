@@ -4467,34 +4467,78 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 candidateTables[entry.Key] = rewritten;
         }
 
-        var renameSchema = CreateRenameColumnSchema(
-            candidateTables,
-            catalog.Views,
-            table.Name,
-            table.Columns.ToArray());
+        var originalViewContext = context with
+        {
+            Tables = tables,
+            Views = catalog.Views,
+            SchemaValidation = true,
+        };
+        var viewColumns = catalog.Views.Values.ToDictionary(
+            static view => view.Name,
+            view => TryResolveRenameViewColumns(view, originalViewContext),
+            StringComparer.OrdinalIgnoreCase);
+        var renamedViews = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, ViewDefinition>? candidateViews = null;
         Dictionary<string, TriggerDefinition>? candidateTriggers = null;
         try
         {
-            foreach (var view in catalog.Views.Values)
+            bool addedRenamedView;
+            do
             {
-                context.CheckInterrupt();
-                var rewritten = RenameColumnRewriter.RewriteSchemaObject(
-                    view.Sql,
-                    oldName,
-                    newName,
-                    quoteNewName,
-                    renameSchema);
-                if (rewritten is null)
-                    continue;
-
-                candidateViews ??= new Dictionary<string, ViewDefinition>(
+                addedRenamedView = false;
+                var renameSchema = CreateRenameColumnSchema(
+                    candidateTables,
                     catalog.Views,
-                    StringComparer.OrdinalIgnoreCase);
-                var parsed = (CreateViewStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
-                candidateViews[view.Name] = view with { Query = parsed.Query, Sql = parsed.Sql };
-            }
+                    table.Name,
+                    table.Columns.ToArray(),
+                    viewColumns,
+                    renamedViews);
+                foreach (var originalView in catalog.Views.Values)
+                {
+                    context.CheckInterrupt();
+                    var view = candidateViews?.GetValueOrDefault(originalView.Name) ?? originalView;
+                    var rewritten = RenameColumnRewriter.RewriteSchemaObject(
+                        view.Sql,
+                        oldName,
+                        newName,
+                        quoteNewName,
+                        renameSchema);
+                    if (rewritten is null)
+                        continue;
 
+                    candidateViews ??= new Dictionary<string, ViewDefinition>(
+                        catalog.Views,
+                        StringComparer.OrdinalIgnoreCase);
+                    var parsed = (CreateViewStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
+                    var rewrittenView = view with { Query = parsed.Query, Sql = parsed.Sql };
+                    candidateViews[view.Name] = rewrittenView;
+
+                    if (view.Columns is null
+                        && viewColumns[view.Name] is { } before
+                        && TryResolveRenameViewColumns(
+                            rewrittenView,
+                            context with
+                            {
+                                Tables = candidateTables,
+                                Views = candidateViews,
+                                SchemaValidation = true,
+                            }) is { } after
+                        && ViewOutputColumnWasRenamed(before, after, oldName, newName)
+                        && renamedViews.Add(view.Name))
+                    {
+                        addedRenamedView = true;
+                    }
+                }
+            }
+            while (addedRenamedView);
+
+            var triggerRenameSchema = CreateRenameColumnSchema(
+                candidateTables,
+                catalog.Views,
+                table.Name,
+                table.Columns.ToArray(),
+                viewColumns,
+                renamedViews);
             foreach (var trigger in catalog.Triggers.Values)
             {
                 context.CheckInterrupt();
@@ -4503,7 +4547,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     oldName,
                     newName,
                     quoteNewName,
-                    renameSchema);
+                    triggerRenameSchema);
                 if (rewritten is null)
                     continue;
 
@@ -4747,7 +4791,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
         IReadOnlyDictionary<string, EmbeddedTable> tables,
         IReadOnlyDictionary<string, ViewDefinition> views,
         string renamedTable,
-        IReadOnlyList<string> renamedTableColumns)
+        IReadOnlyList<string> renamedTableColumns,
+        IReadOnlyDictionary<string, IReadOnlyList<string>?>? viewColumns = null,
+        IReadOnlySet<string>? renamedViews = null)
     {
         return new RenameColumnSchema(ResolveColumns, IsRenameTarget);
 
@@ -4761,14 +4807,56 @@ public sealed partial class EmbeddedDatabase : IDisposable
             if (tables.TryGetValue(key, out var found))
                 return found.Columns;
 
+            if (viewColumns?.TryGetValue(key, out var columns) == true)
+                return columns;
+
             return views.TryGetValue(key, out var view) ? view.Columns : null;
         }
 
         bool IsRenameTarget(string name)
-            => string.Equals(UnqualifiedCatalogName(name), renamedTable, StringComparison.OrdinalIgnoreCase);
+        {
+            var key = UnqualifiedCatalogName(name);
+            return string.Equals(key, renamedTable, StringComparison.OrdinalIgnoreCase)
+                || renamedViews?.Contains(key) == true;
+        }
 
         static string UnqualifiedCatalogName(string name)
             => ManagedSchemaName.TrySplit(name, out _, out var bare) ? bare : name;
+    }
+
+    private static IReadOnlyList<string>? TryResolveRenameViewColumns(
+        ViewDefinition view,
+        QueryContext context)
+    {
+        try
+        {
+            return ResolveViewColumns(view, EnterView(context, view.Name));
+        }
+        catch (EmbeddedSqlException)
+        {
+            // A deferred-invalid view cannot provide a reliable source shape for a rename.
+            // Dependent-schema validation will report its existing error after the rewrite.
+            return null;
+        }
+    }
+
+    private static bool ViewOutputColumnWasRenamed(
+        IReadOnlyList<string> before,
+        IReadOnlyList<string> after,
+        string oldName,
+        string newName)
+    {
+        var count = Math.Min(before.Count, after.Count);
+        for (var index = 0; index < count; index++)
+        {
+            if (string.Equals(before[index], oldName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(after[index], newName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -5530,7 +5618,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return;
             case JoinTableSource join:
                 ValidateTableSourceSchema(join.Left, context, outerRow, cancellationToken);
-                ValidateTableSourceSchema(join.Right, context, outerRow, cancellationToken);
+                // Table-valued function arguments on the right side of a join may reference the
+                // preceding source (for example json_each(json_array(t.c))). Validate the right
+                // source against that left-side schema just as execution evaluates it per left row.
+                var leftColumns = GetSourceColumns(join.Left, context);
+                var leftOutputColumns = GetOutputColumns(join.Left, context);
+                var leftRow = CreateQuerySchemaValidationRow(
+                    join.Left,
+                    context,
+                    leftColumns,
+                    leftOutputColumns,
+                    outerRow);
+                ValidateTableSourceSchema(join.Right, context, leftRow, cancellationToken);
                 var columns = GetSourceColumns(join, context);
                 var outputColumns = GetOutputColumns(join, context);
                 // Reuse the query validation row so qualified rowid references on real
@@ -22642,7 +22741,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
         Expression? rightPredicate = null)
     {
         var left = GetSideSourceRows(source.Left, leftPredicate, parameters, context, outerRow);
-        var right = GetSideSourceRows(source.Right, rightPredicate, parameters, context, outerRow);
+        var rightIsCorrelatedTableFunction = source.Right is TableValuedFunctionSource { Arguments.Count: > 0 };
+        var right = rightIsCorrelatedTableFunction
+            ? new SourceData(GetSourceColumns(source.Right, context), [])
+            : GetSideSourceRows(source.Right, rightPredicate, parameters, context, outerRow);
         var leftQualifiedColumns = GetQualifiedColumns(source.Left, context);
         var rightQualifiedColumns = GetQualifiedColumns(source.Right, context);
         var leftQualifiedRowIds = GetQualifiedRowIdPlaceholders(source.Left, context);
@@ -22656,20 +22758,25 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var ambiguousQualifiedColumns = GetAmbiguousQualifiedColumns(source, context);
         var leftWidth = left.Columns.Length;
         var joinPairs = BuildJoinPairs(source, context);
-        var joinHashIndex = TryBuildJoinHashIndex(source, right, context);
+        var joinHashIndex = rightIsCorrelatedTableFunction ? null : TryBuildJoinHashIndex(source, right, context);
         IEnumerable<int>? allRightIndices = null;
 
         var rows = new List<SourceRow>();
         var rightMatched = new bool[right.Rows.Count];
         foreach (var leftRow in left.Rows)
         {
+            var rowsForLeft = rightIsCorrelatedTableFunction
+                ? GetSideSourceRows(source.Right, rightPredicate, parameters, context, leftRow)
+                : right;
             var matched = false;
             var candidateIndices = joinHashIndex is not null
                 ? joinHashIndex.Probe(leftRow)
-                : allRightIndices ??= Enumerable.Range(0, right.Rows.Count);
+                : rightIsCorrelatedTableFunction
+                    ? Enumerable.Range(0, rowsForLeft.Rows.Count)
+                    : allRightIndices ??= Enumerable.Range(0, rowsForLeft.Rows.Count);
             foreach (var rightIndex in candidateIndices)
             {
-                var rightRow = right.Rows[rightIndex];
+                var rightRow = rowsForLeft.Rows[rightIndex];
                 if (source.Condition is null
                     && !JoinConditionMatches(source, joinPairs, combinedRow: null, leftRow, rightRow, parameters, context))
                 {
@@ -22701,7 +22808,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 }
 
                 matched = true;
-                rightMatched[rightIndex] = true;
+                if (!rightIsCorrelatedTableFunction)
+                    rightMatched[rightIndex] = true;
                 rows.Add(row);
                 if (maximumRows is not null && rows.Count >= maximumRows.Value)
                     return new SourceData(columns, rows);
@@ -22723,7 +22831,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         rightQualifiedRowIds),
                     ColumnDefinitions: CombineColumnDefinitions(
                         leftRow,
-                        right.Rows.FirstOrDefault(),
+                        rowsForLeft.Rows.FirstOrDefault(),
                         left.Columns.Length,
                         right.Columns.Length,
                         columnDefinitions),
@@ -22734,7 +22842,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             }
         }
 
-        if (source.Kind is JoinKind.Right or JoinKind.Full)
+        if (!rightIsCorrelatedTableFunction && source.Kind is JoinKind.Right or JoinKind.Full)
         {
             for (var rightIndex = 0; rightIndex < right.Rows.Count; rightIndex++)
             {

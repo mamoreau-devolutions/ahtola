@@ -584,7 +584,7 @@ internal static class RenameColumnRewriter
                     scope.Bindings.Add(new Binding(
                         named.Alias ?? UnqualifiedObjectName(named.Name),
                         schema.ResolveColumns(named.Name),
-                        named.Alias is null && schema.IsRenameTarget(named.Name),
+                        schema.IsRenameTarget(named.Name),
                         QualifiedOnly: false));
                     break;
                 case DerivedTableSource derived:
@@ -597,7 +597,7 @@ internal static class RenameColumnRewriter
                     break;
                 case TableValuedFunctionSource function:
                     foreach (var argument in function.Arguments)
-                        WalkExpression(argument, scope.Parent);
+                        WalkExpression(argument, scope);
 
                     scope.Bindings.Add(new Binding(
                         function.Alias ?? function.Name,

@@ -219,13 +219,11 @@ public class TableValuedFunctionTests
     /// <summary>
     /// SQLite lets a table-valued function argument reference a column of an earlier
     /// <c>FROM</c> entry (an implicit <c>LATERAL</c>), re-evaluating the source per outer
-    /// row. The managed join evaluates each source once, so the correlated form is not
-    /// supported. This pins the boundary: it must fail with a clear unresolved-column
-    /// error rather than silently returning rows computed from the wrong arguments.
-    /// Remove this test when a correlated join path lands.
+    /// row. The managed join must preserve that evaluation boundary rather than materializing
+    /// the function once before the left row is available.
     /// </summary>
     [Test]
-    public void ACorrelatedModuleArgumentFailsInsteadOfReturningAWrongAnswer()
+    public void CorrelatedModuleArgumentsReevaluateForEachLeftRow()
     {
         using var database = new EmbeddedDatabase();
         using var connection = database.Connect();
@@ -237,17 +235,12 @@ public class TableValuedFunctionTests
         Rows(connection, "SELECT value FROM t JOIN json_each('[7]') AS j;")
             .Should().Equal(["7", "7"]);
 
-        foreach (var correlated in new[]
-        {
-            "SELECT value FROM t, json_each(t.b);",
-            "SELECT value FROM t JOIN json_each(t.b) AS j;",
-            "SELECT s.value FROM t JOIN generate_series(1, t.a) AS s;",
-        })
-        {
-            Action query = () => Rows(connection, correlated);
-            query.Should().Throw<EmbeddedSqlException>()
-                .WithMessage("*no such column*", because: "{0} must not fabricate a result", correlated);
-        }
+        Rows(connection, "SELECT value FROM t, json_each(t.b);")
+            .Should().Equal(["7", "8", "9"]);
+        Rows(connection, "SELECT value FROM t JOIN json_each(t.b) AS j;")
+            .Should().Equal(["7", "8", "9"]);
+        Rows(connection, "SELECT s.value FROM t JOIN generate_series(1, t.a) AS s;")
+            .Should().Equal(["1", "1", "2"]);
     }
 
     [Test]

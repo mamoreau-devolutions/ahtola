@@ -9,8 +9,6 @@ agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_real
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_text_numeric_label_unchanged | expected success but got error: no such function: JSONB_GROUP_OBJECT
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_numeric_column_labels | expected success but got error: no such function: JSONB_GROUP_OBJECT
 agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_does_not_stringify_value | expected success but got error: no such function: JSONB_ARRAY
-alter_table.sqltest::alter-table-rename-column-view-on-view | expected success but got error: error in view v2 after rename: no such column: b
-alter_table.sqltest::alter-table-rename-column-view-tablecall-branch | expected success but got error: no such column: t.b
 alter_table.sqltest::alter-table-rename-column-view-attached-db-qualified | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern 'cannot reference'
 alter_table.sqltest::alter-table-rename-column-trigger-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
