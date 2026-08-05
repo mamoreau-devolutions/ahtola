@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 120,
-        "closed": 86
+        "open": 118,
+        "closed": 88
       }
     },
     "schema": {
@@ -367,13 +367,13 @@
       "id": "vdbe-column-default-short-record",
       "layer": "vdbe",
       "kind": "partial",
-      "turso_ref": "turso-src/core/vdbe/execute.rs::op_column (lines 1903-1925: record with fewer columns than schema -> column DEFAULT value operand; null_flag -> NULL)",
-      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::ColumnInstruction (~line 1329: 'Retrieval of a missing column yields NULL')",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Column { default } / execute.rs::op_column",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedFileStore.cs::ReadTableRow (~lines 1175-1205); src/Ahtola.Tests/ManagedAddColumnShortRowTests.cs",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Turso's Column carries the column's DEFAULT as an operand so rows physically written before ALTER TABLE ADD COLUMN read back the default. Ahtola's ColumnInstruction documents NULL for a missing column and has no default operand. alter.sqltest passes except FK cases, so the pager decode likely pads or the shapes tested do not hit short records with defaults — VERIFY: `ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'x'` then SELECT c on pre-existing rows through the pager path. Also no NullRow opcode (LEFT JOIN null-fill is done by join delegates instead — structural, fine).",
-      "status": "open"
+      "notes": "Closed 2026-08-08. Turso's Column instruction supplies its constant default P4 for a short pre-ALTER record. Ahtola performs the equivalent once while materializing a file-backed row: ReadTableRow detects fewer stored fields than the current non-generated schema and fills each missing trailing field from EmbeddedColumn.DefaultValue (or NULL). ManagedAddColumnShortRowTests covers SQLite-authored database reads with NULL and constant defaults, several sequential additions, NOT NULL defaults, WITHOUT ROWID tables, and managed writes before validating the resulting file with ordinary SQLite.",
+      "status": "closed"
     },
     {
       "id": "vdbe-checkpoint-opcode",
@@ -924,12 +924,12 @@
       "layer": "compilation",
       "kind": "missing",
       "turso_ref": "turso-src/core/translate/expr.rs / SQLite dialect grammar (accepts special float literal spellings like 1e400 that overflow to infinity)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs, SqlParser.cs (numeric literal grammar)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs::ReadNumber; src/Ahtola.Core/Parsing/SqlParser.cs::ParsePrimary",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Queries using an overflowing float literal to produce +/-Infinity fail to parse (\"Expected RightParen\") rather than being accepted and yielding an IEEE-754 infinity value the way SQLite's tokenizer permits; this is a parser-level gap that surfaces as a compilation-stage rejection of otherwise-valid aggregate queries. (Previously linked keys cleared by earlier wave work: sum-large-float-infinity, total-large-float-infinity, avg-large-float-infinity.)",
-      "status": "open"
+      "notes": "Closed 2026-08-08. ReadNumber classifies exponent-bearing literals as Real, and ParsePrimary converts them through double.Parse using the invariant culture, yielding IEEE-754 infinity when the exponent overflows. The full agg-functions/sum-large-float.sqltest corpus file passes its sum/total/avg infinity cases; the previously linked keys are no longer active expected failures.",
+      "status": "closed"
     },
     {
       "id": "compile-group-by-expression-index-no-covering-optimization",
