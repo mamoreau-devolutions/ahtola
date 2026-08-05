@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 189,
+    "current_conformance_expected_failures": 185,
     "last_reconciled": "2026-08-08",
-    "entry_count": 200,
+    "entry_count": 201,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 58,
+        "compilation": 59,
         "parser": 28,
         "functions": 26,
         "storage": 20,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 64,
+        "divergent": 65,
         "partial": 27,
         "extension": 8,
         "parity": 2
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 103,
         "s4-intentional": 33,
-        "s1-correctness": 30
+        "s1-correctness": 31
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 90
+        "S": 91
       },
       "by_status": {
         "open": 141,
-        "closed": 59
+        "closed": 60
       }
     },
     "schema": {
@@ -2813,6 +2813,23 @@
         "orderby/memory.sqltest::orderby_rowid_truncation_explicit_rowid"
       ],
       "notes": "Closed 2026-08-05. The evaluator eagerly computed every ORDER BY term, including an invalid multi-column IN subquery suffix after an INTEGER PRIMARY KEY or rowid sort key that already defines a unique order. It now removes only suffix terms after a simple named rowid-table source's INTEGER PRIMARY KEY alias or unshadowed rowid pseudo-column, matching Turso's unique-prefix planner rule while retaining evaluation for non-unique order keys.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-grouped-star-projection",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/result_row.rs::emit_select_result (emits each result column after aggregation)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (EvaluateGroupedProjectionRow + TryAppendProjectionStarValues)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "groupby/constant-expr.sqltest::group-by-order-by-constant-float",
+        "groupby/constant-expr.sqltest::group-by-order-by-constant-string",
+        "groupby/constant-expr.sqltest::group-by-order-by-null",
+        "groupby/constant-expr.sqltest::group-by-view-constant-order-by"
+      ],
+      "notes": "Closed 2026-08-05. The grouped evaluator called the scalar expression evaluator for a SELECT * projection and failed with an unsupported StarExpression error whenever execution fell back from the compiled path. Grouped projection evaluation now shares normal star expansion, including qualified-star resolution and the expanded result-column collations used by DISTINCT.",
       "status": "closed"
     },
     {

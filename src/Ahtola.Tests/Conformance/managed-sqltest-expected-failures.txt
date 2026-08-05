@@ -50,10 +50,6 @@ foreign_keys.sqltest::fk-alter-table-add-column-enforced | expected success but 
 gencol.sqltest::gencol_alter_add_stored_rejected | expected an error but the statement succeeded
 gencol.sqltest::gencol_stored_rejected | expected an error but the statement succeeded
 gencol.sqltest::gencol_stored_generated_always_rejected | expected an error but the statement succeeded
-groupby/constant-expr.sqltest::group-by-order-by-constant-float | expected success but got error: Unsupported expression type StarExpression.
-groupby/constant-expr.sqltest::group-by-order-by-constant-string | expected success but got error: Unsupported expression type StarExpression.
-groupby/constant-expr.sqltest::group-by-order-by-null | expected success but got error: Unsupported expression type StarExpression.
-groupby/constant-expr.sqltest::group-by-view-constant-order-by | expected success but got error: Unsupported expression type StarExpression.
 indexed_by.sqltest::indexed-by-attached-qualified-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 indexed_by.sqltest::indexed-by-attached-update-delete | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 insert.sqltest::insert-explicit-rowid-with-rowidalias | expected 6 row(s), got 6 row(s); row 0 expected '-12/-10/-12/-9' but was '4/2/4/1'

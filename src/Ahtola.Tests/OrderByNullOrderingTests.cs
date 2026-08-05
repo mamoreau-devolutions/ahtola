@@ -140,6 +140,50 @@ public sealed class OrderByNullOrderingTests
     }
 
     [Test]
+    public void GroupedStarProjectionWithConstantOrderByMatchesSqlite()
+    {
+        var cases = new[]
+        {
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE float_order(c1 INT);",
+                    "INSERT INTO float_order VALUES (1), (2);",
+                },
+                Query: "SELECT * FROM float_order GROUP BY c1 ORDER BY 58.058;"
+            ),
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE string_order(c1 INT);",
+                    "INSERT INTO string_order VALUES (1), (2);",
+                },
+                Query: "SELECT * FROM string_order GROUP BY c1 ORDER BY 'hello';"
+            ),
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE null_order(c1 INT);",
+                    "INSERT INTO null_order VALUES (1), (2);",
+                },
+                Query: "SELECT * FROM null_order GROUP BY c1 ORDER BY NULL;"
+            ),
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE view_order(c1 INT);",
+                    "INSERT INTO view_order VALUES (1), (2);",
+                    "CREATE VIEW ordered_view AS SELECT * FROM view_order GROUP BY c1 ORDER BY STRFTIME('test');",
+                },
+                Query: "SELECT * FROM ordered_view;"
+            ),
+        };
+
+        foreach (var testCase in cases)
+            AssertMatchesSqlite(testCase.Setup, testCase.Query);
+    }
+
+    [Test]
     public void CompiledAndFallbackWindowOrderingMatchSqlite()
     {
         string[] setup =

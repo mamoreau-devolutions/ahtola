@@ -19326,16 +19326,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return new GroupedResult(
                     representative,
                     group,
-                    statement.Projections
-                        .Select(projection => ContainsAggregate(projection.Expression)
-                            ? EvaluateAggregate(
-                                projection.Expression,
-                                group,
-                                parameters,
-                                groupContext,
-                                representative)
-                            : Evaluate(projection.Expression, parameters, representative, groupContext))
-                        .ToArray());
+                    EvaluateGroupedProjectionRow(
+                        statement,
+                        representative,
+                        group,
+                        parameters,
+                        groupContext,
+                        outputColumns,
+                        rawOutputColumns));
             }).ToList();
             if (statement.Having is not null)
             {
@@ -19396,9 +19394,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     statement.Distinct,
                     offset,
                     limit,
-                    statement.Projections
-                        .Select(projection => GetEffectiveCollation(projection.Expression, context))
-                        .ToArray()),
+                    GetDistinctProjectionCollations(
+                        statement.Projections,
+                        outputColumns,
+                        rawOutputColumns,
+                        statement.Source,
+                        context)),
                 0);
         }
 
@@ -19569,6 +19570,41 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 || ContainsWindowFunction(projection.Expression));
     }
 
+    private SqlValue[] EvaluateGroupedProjectionRow(
+        SelectStatement statement,
+        SourceRow representative,
+        IReadOnlyList<SourceRow> group,
+        SqlValue[] parameters,
+        QueryContext context,
+        IReadOnlyList<OutputColumn> outputColumns,
+        IReadOnlyList<OutputColumn> rawOutputColumns)
+    {
+        var values = new List<SqlValue>();
+        foreach (var projection in statement.Projections)
+        {
+            if (TryAppendProjectionStarValues(
+                    projection.Expression,
+                    representative,
+                    outputColumns,
+                    rawOutputColumns,
+                    values))
+            {
+                continue;
+            }
+
+            values.Add(ContainsAggregate(projection.Expression)
+                ? EvaluateAggregate(
+                    projection.Expression,
+                    group,
+                    parameters,
+                    context,
+                    representative)
+                : Evaluate(projection.Expression, parameters, representative, context));
+        }
+
+        return values.ToArray();
+    }
+
     private SqlValue[] EvaluateProjectionRow(
         SelectStatement statement,
         SourceRow row,
@@ -19580,41 +19616,58 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var values = new List<SqlValue>();
         foreach (var projection in statement.Projections)
         {
-            switch (projection.Expression)
+            if (!TryAppendProjectionStarValues(
+                    projection.Expression,
+                    row,
+                    outputColumns,
+                    rawOutputColumns,
+                    values))
             {
-                case StarExpression:
-                    foreach (var column in outputColumns)
-                        values.Add(GetOutputValue(row, column));
-                    break;
-                case QualifiedStarExpression qualifiedStar:
-                    var rawMatches = rawOutputColumns
-                        .Where(column => string.Equals(
-                            column.Qualifier,
-                            qualifiedStar.Qualifier,
-                            StringComparison.OrdinalIgnoreCase))
-                        .ToArray();
-                    if (rawMatches.Length == 0)
-                        throw new EmbeddedSqlException($"no such table: {qualifiedStar.Qualifier}");
-
-                    foreach (var raw in rawMatches)
-                    {
-                        var output = outputColumns.FirstOrDefault(column =>
-                            string.Equals(
-                                column.Qualifier,
-                                qualifiedStar.Qualifier,
-                                StringComparison.OrdinalIgnoreCase)
-                            && column.Index == raw.Index) ?? raw;
-                        values.Add(GetOutputValue(row, output));
-                    }
-
-                    break;
-                default:
-                    values.Add(Evaluate(projection.Expression, parameters, row, context));
-                    break;
+                values.Add(Evaluate(projection.Expression, parameters, row, context));
             }
         }
 
         return values.ToArray();
+    }
+
+    private static bool TryAppendProjectionStarValues(
+        Expression expression,
+        SourceRow row,
+        IReadOnlyList<OutputColumn> outputColumns,
+        IReadOnlyList<OutputColumn> rawOutputColumns,
+        List<SqlValue> values)
+    {
+        switch (expression)
+        {
+            case StarExpression:
+                foreach (var column in outputColumns)
+                    values.Add(GetOutputValue(row, column));
+                return true;
+            case QualifiedStarExpression qualifiedStar:
+                var rawMatches = rawOutputColumns
+                    .Where(column => string.Equals(
+                        column.Qualifier,
+                        qualifiedStar.Qualifier,
+                        StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                if (rawMatches.Length == 0)
+                    throw new EmbeddedSqlException($"no such table: {qualifiedStar.Qualifier}");
+
+                foreach (var raw in rawMatches)
+                {
+                    var output = outputColumns.FirstOrDefault(column =>
+                        string.Equals(
+                            column.Qualifier,
+                            qualifiedStar.Qualifier,
+                            StringComparison.OrdinalIgnoreCase)
+                        && column.Index == raw.Index) ?? raw;
+                    values.Add(GetOutputValue(row, output));
+                }
+
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static IReadOnlyList<string?> GetDistinctProjectionCollations(
