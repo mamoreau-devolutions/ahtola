@@ -30,8 +30,6 @@ gencol.sqltest::gencol_stored_rejected | expected an error but the statement suc
 gencol.sqltest::gencol_stored_generated_always_rejected | expected an error but the statement succeeded
 indexed_by.sqltest::indexed-by-attached-qualified-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 indexed_by.sqltest::indexed-by-attached-update-delete | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-insert.sqltest::uniq_constraint | error 'UNIQUE constraint failed: test.id' does not match pattern 'UNIQUE constraint failed: test.id \(19\)'
-insert.sqltest::insert-explicit-rowid-conflict | error 'UNIQUE constraint failed: t.rowid' does not match pattern 'UNIQUE constraint failed: t.rowid \(19\)'
 join/memory.sqltest::correlated-subquery-hash-join-reuse | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 join/outer_hash_join.sqltest::full-outer-with-where-equijoin | expected 4 row(s), got 2 row(s); row 0 expected '1/' but was '2/2'
 joins/derived_subquery_on_predicate.sqltest::issue-7372-text-range-join-after-analyze | setup 'issue-7372-schema' failed: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.

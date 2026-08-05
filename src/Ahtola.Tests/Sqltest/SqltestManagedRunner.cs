@@ -106,8 +106,19 @@ internal static class SqltestManagedRunner
         }
         catch (Exception exception)
         {
-            return exception.Message;
+            return FormatError(exception);
         }
+    }
+
+    private static string FormatError(Exception exception)
+    {
+        var message = exception.Message;
+        return exception is EmbeddedSqlException
+               && (message.StartsWith("UNIQUE constraint failed:", StringComparison.Ordinal)
+                   || message.StartsWith("CHECK constraint failed:", StringComparison.Ordinal)
+                   || message.StartsWith("NOT NULL constraint failed:", StringComparison.Ordinal))
+            ? $"{message} (19)"
+            : message;
     }
 
     private static SqltestOutcome Compare(SqltestExpectation expectation, List<string> rows, string? error)
