@@ -56,6 +56,76 @@ public sealed class ManagedScalarFunctionParityTests
         ReadValue(connection, sql).Should().Be(SqlValue.Integer(expected));
     }
 
+    [TestCase("SELECT ceil(1);", 1L)]
+    [TestCase("SELECT ceiling(1);", 1L)]
+    [TestCase("SELECT floor(1);", 1L)]
+    [TestCase("SELECT trunc(1);", 1L)]
+    [TestCase("SELECT ceil('9223372036854775807');", long.MaxValue)]
+    public void ManagedEnginePreservesIntegerMathOperands(string sql, long expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Integer(expected));
+    }
+
+    [TestCase("SELECT char('not a code point');", "")]
+    [TestCase("SELECT char(65, 1.5, 'ignored', X'42', 66);", "AB")]
+    public void ManagedEngineIgnoresNonIntegerCharArguments(string sql, string expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Text(expected));
+    }
+
+    [TestCase("SELECT substr('a😀b', 2, 1);", "😀")]
+    [TestCase("SELECT substr('a😀b', -2, 1);", "😀")]
+    [TestCase("SELECT substring('a😀b', 2, 2);", "😀b")]
+    public void ManagedEngineCountsSupplementaryCharactersAsSingleSubstringUnits(string sql, string expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Text(expected));
+    }
+
+    [TestCase("SELECT octet_length('ąłóżźć');", 12L)]
+    [TestCase("SELECT octet_length(X'010203');", 3L)]
+    [TestCase("SELECT octet_length(12345);", 5L)]
+    [TestCase("SELECT octet_length(123.456);", 7L)]
+    public void ManagedEngineCountsUtf8BytesForOctetLength(string sql, long expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Integer(expected));
+    }
+
+    [TestCase("SELECT 'a' || char(0) || 'b' GLOB 'a?b';", 0L)]
+    [TestCase("SELECT 'a' || char(0) || 'b' GLOB 'a??';", 0L)]
+    [TestCase("SELECT 'a' || char(0) || 'b' GLOB 'a' || char(0) || 'b';", 1L)]
+    [TestCase("SELECT 'a' || char(0) || 'b' GLOB 'a*';", 1L)]
+    [TestCase("SELECT 'ab' GLOB 'a?';", 1L)]
+    public void ManagedEngineTruncatesGlobAtEmbeddedNul(string sql, long expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Integer(expected));
+    }
+
+    [TestCase("SELECT 'a' || char(0) || 'b' LIKE 'a_b';", 0L)]
+    [TestCase("SELECT 'a' || char(0) || 'b' LIKE 'a__';", 0L)]
+    [TestCase("SELECT 'ab' LIKE 'a_';", 1L)]
+    public void ManagedEngineTruncatesLikeAtEmbeddedNul(string sql, long expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Integer(expected));
+    }
+
     [TestCase("SELECT round(2.567, 1);", 2.6d)]
     [TestCase("SELECT round(2.5);", 3.0d)]
     [TestCase("SELECT round(-2.5);", -3.0d)]

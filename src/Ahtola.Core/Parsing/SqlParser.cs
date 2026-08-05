@@ -119,24 +119,22 @@ internal sealed class SqlParser
             else if (ConsumeKeyword("EXCLUSIVE"))
                 mode = TransactionMode.Exclusive;
 
-            ConsumeKeyword("TRANSACTION");
-            return new BeginStatement(mode);
+            return new BeginStatement(mode, ParseOptionalTransactionName());
         }
         if (ConsumeKeyword("COMMIT") || ConsumeKeyword("END"))
         {
-            ConsumeKeyword("TRANSACTION");
-            return new CommitStatement();
+            return new CommitStatement(ParseOptionalTransactionName());
         }
         if (ConsumeKeyword("ROLLBACK"))
         {
-            ConsumeKeyword("TRANSACTION");
+            var transactionName = ParseOptionalTransactionName();
             if (ConsumeKeyword("TO"))
             {
                 ConsumeKeyword("SAVEPOINT");
                 return new RollbackToSavepointStatement(ExpectIdentifier());
             }
 
-            return new RollbackStatement();
+            return new RollbackStatement(transactionName);
         }
         if (ConsumeKeyword("SAVEPOINT"))
             return new SavepointStatement(ExpectIdentifier());
@@ -916,6 +914,8 @@ internal sealed class SqlParser
         string Sql,
         InsertConflictAlgorithm? ConflictAlgorithm) : TableConstraint;
 
+    private sealed record TrailingNamedTableConstraint : TableConstraint;
+
     private TableConstraint ParseTableConstraint()
     {
         string? constraintName = null;
@@ -950,6 +950,13 @@ internal sealed class SqlParser
             return new CheckTableConstraint(constraintName, expression, sql, ParseConflictClause());
         }
 
+        if (constraintName is not null
+            && _lexer.Current.Kind is TokenKind.Comma or TokenKind.RightParen or TokenKind.Semicolon or TokenKind.End)
+        {
+            // SQLite accepts a trailing `CONSTRAINT name` as a no-op.
+            return new TrailingNamedTableConstraint();
+        }
+
         throw Error("Expected PRIMARY KEY, UNIQUE, CHECK, or FOREIGN KEY after table constraint name.");
     }
 
@@ -968,6 +975,14 @@ internal sealed class SqlParser
             var descending = false;
             if (!ConsumeKeyword("ASC") && ConsumeKeyword("DESC"))
                 descending = true;
+
+            if (ConsumeKeyword("NULLS"))
+            {
+                if (!ConsumeKeyword("FIRST") && !ConsumeKeyword("LAST"))
+                    throw Error("Expected FIRST or LAST after NULLS.");
+
+                throw Error("NULLS FIRST/LAST is not supported in table constraints.");
+            }
 
             var autoIncrement = allowAutoIncrement && ConsumeKeyword("AUTOINCREMENT");
             var column = new TablePrimaryKeyColumn(columnName, descending, collation, autoIncrement);
@@ -1163,6 +1178,14 @@ internal sealed class SqlParser
         var descending = false;
         if (!ConsumeKeyword("ASC") && ConsumeKeyword("DESC"))
             descending = true;
+
+        if (ConsumeKeyword("NULLS"))
+        {
+            if (!ConsumeKeyword("FIRST") && !ConsumeKeyword("LAST"))
+                throw Error("Expected FIRST or LAST after NULLS.");
+
+            throw Error("NULLS FIRST/LAST is not supported in index expressions.");
+        }
 
         if (_lexer.Current.Kind is not TokenKind.Comma and not TokenKind.RightParen)
             throw Error("Unexpected token in index expression.");
@@ -2742,32 +2765,14 @@ internal sealed class SqlParser
             var negated = ConsumeKeyword("NOT");
             if (ConsumeKeyword("BETWEEN"))
             {
-                var lower = ParseRelational();
+                var lower = ParseBetweenOperand();
                 ExpectKeyword("AND");
-                expression = new BetweenExpression(expression, lower, ParseRelational(), negated);
+                expression = new BetweenExpression(expression, lower, ParseBetweenOperand(), negated);
                 continue;
             }
             if (ConsumeKeyword("IN"))
             {
-                Expect(TokenKind.LeftParen);
-                if (IsQueryStart())
-                {
-                    var query = ParseQuery();
-                    Expect(TokenKind.RightParen);
-                    expression = new InSubqueryExpression(expression, query, negated);
-                    continue;
-                }
-
-                var values = new List<Expression>();
-                if (!Consume(TokenKind.RightParen))
-                {
-                    values.Add(ParseExpression());
-                    while (Consume(TokenKind.Comma))
-                        values.Add(ParseExpression());
-                    Expect(TokenKind.RightParen);
-                }
-
-                expression = new InExpression(expression, values, negated);
+                expression = ParseInExpression(expression, negated);
                 continue;
             }
             if (ConsumeKeyword("LIKE"))
@@ -2814,6 +2819,41 @@ internal sealed class SqlParser
 
             expression = new BinaryExpression(expression, operation, ParseRelational());
         }
+    }
+
+    private Expression ParseBetweenOperand()
+    {
+        var expression = ParseRelational();
+        var negated = ConsumeKeyword("NOT");
+        if (ConsumeKeyword("IN"))
+            return ParseInExpression(expression, negated);
+
+        if (negated)
+            throw Error("Expected IN after NOT in BETWEEN operand.");
+
+        return expression;
+    }
+
+    private Expression ParseInExpression(Expression expression, bool negated)
+    {
+        Expect(TokenKind.LeftParen);
+        if (IsQueryStart())
+        {
+            var query = ParseQuery();
+            Expect(TokenKind.RightParen);
+            return new InSubqueryExpression(expression, query, negated);
+        }
+
+        var values = new List<Expression>();
+        if (!Consume(TokenKind.RightParen))
+        {
+            values.Add(ParseExpression());
+            while (Consume(TokenKind.Comma))
+                values.Add(ParseExpression());
+            Expect(TokenKind.RightParen);
+        }
+
+        return new InExpression(expression, values, negated);
     }
 
     private Expression ParseRelational()
@@ -3010,15 +3050,32 @@ internal sealed class SqlParser
                 }
                 if (Consume(TokenKind.Dot))
                 {
-                    var columnToken = ExpectIdentifierToken();
+                    var qualifierToken = ExpectIdentifierToken();
+                    if (Consume(TokenKind.Dot))
+                    {
+                        var columnToken = ExpectIdentifierToken();
+                        var doublyQualified = new ColumnExpression(
+                            Name: qualifierToken.Text + "." + columnToken.Text,
+                            Qualifier: qualifierToken.Text,
+                            UnqualifiedName: columnToken.Text,
+                            Schema: token.Text);
+                        if (_spans is not null)
+                        {
+                            _spans.RecordQualifier(doublyQualified, qualifierToken);
+                            _spans.RecordName(doublyQualified, columnToken);
+                        }
+
+                        return doublyQualified;
+                    }
+
                     var qualified = new ColumnExpression(
-                        token.Text + "." + columnToken.Text,
-                        token.Text,
-                        columnToken.Text);
+                        Name: token.Text + "." + qualifierToken.Text,
+                        Qualifier: token.Text,
+                        UnqualifiedName: qualifierToken.Text);
                     if (_spans is not null)
                     {
                         _spans.RecordQualifier(qualified, token);
-                        _spans.RecordName(qualified, columnToken);
+                        _spans.RecordName(qualified, qualifierToken);
                     }
 
                     return qualified;
@@ -3377,11 +3434,24 @@ internal sealed class SqlParser
             if (ConsumeKeyword("DEFAULT"))
             {
                 var startOffset = _lexer.Current.Offset;
-                var expression = _lexer.Current.Kind == TokenKind.LeftParen
+                var parenthesized = _lexer.Current.Kind == TokenKind.LeftParen;
+                var expression = parenthesized
                     ? ParseExpression()
                     : ParseSignedPrimary();
                 var endOffset = _lexer.Current.Offset;
                 defaultSql = _sql[startOffset..endOffset].Trim();
+                // SQLite treats an unparenthesized identifier in a DEFAULT clause as a
+                // string literal. Parenthesized and qualified identifiers remain expressions.
+                if (!parenthesized
+                    && expression is ColumnExpression
+                    {
+                        Qualifier: null,
+                        Schema: null,
+                        BooleanKeyword: null,
+                    } defaultIdentifier)
+                {
+                    expression = new LiteralExpression(SqlValue.Text(defaultIdentifier.Name));
+                }
                 if (TryGetLiteralDefault(expression, out var literalValue))
                     defaultValue = literalValue;
                 else
@@ -3429,8 +3499,8 @@ internal sealed class SqlParser
             throw Error($"Unsupported column constraint '{_lexer.Current.Text}'.");
         }
 
-        if (pendingConstraintName is not null)
-            throw Error($"Expected a constraint after CONSTRAINT {pendingConstraintName}.");
+        // SQLite accepts a trailing `CONSTRAINT name` at the end of a column
+        // definition as a no-op. The name names no real constraint.
 
         var column = new EmbeddedColumn(
             name,
@@ -3730,6 +3800,21 @@ internal sealed class SqlParser
         var value = _lexer.Current.Text;
         _lexer.Next();
         return value;
+    }
+
+    private string? ParseOptionalTransactionName()
+    {
+        if (!ConsumeKeyword("TRANSACTION"))
+            return null;
+
+        // ROLLBACK TRANSACTION TO [SAVEPOINT] name omits the transaction name.
+        if (_lexer.Current.Kind == TokenKind.Identifier
+            && _lexer.Current.Text.Equals("TO", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        return _lexer.Current.Kind is TokenKind.Identifier or TokenKind.String
+            ? ExpectIdentifierOrString()
+            : null;
     }
 
     private bool Consume(TokenKind kind)

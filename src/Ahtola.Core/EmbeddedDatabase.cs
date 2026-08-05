@@ -25368,7 +25368,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     private static bool IsGlobMatch(string text, string pattern)
     {
-        return GlobMatch(ToCodePoints(pattern), 0, ToCodePoints(text), 0);
+        return GlobMatch(ToCodePoints(SqliteTextPrefix(pattern)), 0, ToCodePoints(SqliteTextPrefix(text)), 0);
+    }
+
+    // Mirrors Turso's sqlite_text_prefix (turso-src/core/vdbe/value.rs): SQLite
+    // treats text as NUL-terminated C strings, so GLOB/LIKE matching must stop at
+    // the first embedded NUL in both the pattern and the matched text. Without
+    // this, '?' would match a NUL character that SQLite would never see.
+    private static string SqliteTextPrefix(string text)
+    {
+        var nul = text.IndexOf('\0');
+        return nul < 0 ? text : text.Substring(0, nul);
     }
 
     private static bool GlobMatch(int[] pattern, int patternIndex, int[] text, int textIndex)
@@ -25870,6 +25880,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     private static bool IsLikeMatch(string value, string pattern, char? escape)
     {
+        value = SqliteTextPrefix(value);
+        pattern = SqliteTextPrefix(pattern);
         var valueIndex = 0;
         var patternIndex = 0;
         var wildcardIndex = -1;
@@ -28052,6 +28064,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             "JULIANDAY" => SqliteDateTime.Execute(arguments, SqliteDateTime.Func.JulianDay),
             "LAST_INSERT_ROWID" => EvaluateLastInsertRowId(arguments, context),
             "LENGTH" => EvaluateLength(arguments),
+            "OCTET_LENGTH" => EvaluateOctetLength(arguments),
             "LIKE" => EvaluateLikeFunction(arguments),
             "LOWER" => EvaluateCase(arguments, ToSqliteLower),
             "MIN" => EvaluateScalarMinMax(function, arguments, context, maximum: false),
@@ -29533,6 +29546,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
             SqlValueKind.Blob => SqlValue.Integer(value.AsBlob().Length),
             _ => SqlValue.Integer(ToSqlText(value).Length),
         };
+    }
+
+    private static SqlValue EvaluateOctetLength(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("octet_length", arguments, 1);
+        var value = arguments[0];
+        if (value.Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+        if (value.Kind == SqlValueKind.Blob)
+            return SqlValue.Integer(value.AsBlob().Length);
+
+        return SqlValue.Integer(Encoding.UTF8.GetByteCount(ToSqlText(value)));
     }
 
     private static SqlValue EvaluateLikeFunction(IReadOnlyList<SqlValue> arguments)
@@ -34048,7 +34073,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             string functionName)
         {
             if ((args.Count & 1) == 0)
-                throw new EmbeddedSqlException($"wrong number of arguments to function {functionName}()");
+                throw new EmbeddedSqlException($"{functionName}() needs an odd number of arguments");
             if (args[0].Kind == SqlValueKind.Null)
                 return SqlValue.Null;
 
@@ -41998,11 +42023,22 @@ internal sealed record SourceRow(
         if (TryGetValue(column, out var value))
             return value;
 
-        throw new EmbeddedSqlException($"no such column: {column.Name}");
+        var name = column.Schema is { } schema ? schema + "." + column.Name : column.Name;
+        throw new EmbeddedSqlException($"no such column: {name}");
     }
 
     public bool TryGetValue(ColumnExpression column, out SqlValue value)
     {
+        // Attached-database execution is not available yet. Until a source row carries its
+        // database identity, only the schemas this row can represent may resolve here.
+        if (column.Schema is { } schema
+            && !schema.Equals("main", StringComparison.OrdinalIgnoreCase)
+            && !schema.Equals("temp", StringComparison.OrdinalIgnoreCase))
+        {
+            value = default;
+            return false;
+        }
+
         if (column.Qualifier is null)
             return TryGetValue(column.Name, allowQualifiedLookup: false, out value);
 

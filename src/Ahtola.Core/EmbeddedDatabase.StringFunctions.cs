@@ -44,7 +44,8 @@ public sealed partial class EmbeddedDatabase
             return SqlValue.Null;
 
         var isBlob = arguments[0].Kind == SqlValueKind.Blob;
-        var length = isBlob ? arguments[0].AsBlob().Length : ToSqlText(arguments[0]).Length;
+        var text = isBlob ? null : ToSqlText(arguments[0]);
+        var length = isBlob ? arguments[0].AsBlob().Length : text!.EnumerateRunes().LongCount();
         var start = ToSqliteInteger(arguments[1]);
         var hasExplicitLength = arguments.Count == 3;
         var requested = hasExplicitLength ? ToSqliteInteger(arguments[2]) : length;
@@ -83,7 +84,18 @@ public sealed partial class EmbeddedDatabase
         if (isBlob)
             return SqlValue.Blob(arguments[0].AsBlob().Span.Slice((int)beginIndex, (int)take).ToArray());
 
-        return SqlValue.Text(ToSqlText(arguments[0]).Substring((int)beginIndex, (int)take));
+        var builder = new StringBuilder((int)take);
+        var runeIndex = 0L;
+        foreach (var rune in text!.EnumerateRunes())
+        {
+            if (runeIndex >= endIndex)
+                break;
+            if (runeIndex >= beginIndex)
+                builder.Append(rune.ToString());
+            runeIndex++;
+        }
+
+        return SqlValue.Text(builder.ToString());
     }
 
     private static SqlValue EvaluateReplace(IReadOnlyList<SqlValue> arguments)
@@ -158,10 +170,20 @@ public sealed partial class EmbeddedDatabase
         var builder = new StringBuilder(arguments.Count);
         foreach (var argument in arguments)
         {
-            // SQLite reads every argument with sqlite3_value_int64, which yields 0 for NULL and
-            // for text that is not a number, so char(NULL) is a NUL character and not a skipped
-            // argument.
-            var codePoint = argument.Kind == SqlValueKind.Null ? 0 : ToSqliteInteger(argument);
+            // Turso only converts INTEGER arguments to code points. NULL remains a NUL character,
+            // while REAL, TEXT, and BLOB arguments do not contribute a character.
+            long codePoint;
+            switch (argument.Kind)
+            {
+                case SqlValueKind.Integer:
+                    codePoint = argument.AsInteger();
+                    break;
+                case SqlValueKind.Null:
+                    codePoint = 0;
+                    break;
+                default:
+                    continue;
+            }
 
             // SQLite substitutes U+FFFD for values outside the Unicode range and
             // for surrogate code points, which cannot stand alone.

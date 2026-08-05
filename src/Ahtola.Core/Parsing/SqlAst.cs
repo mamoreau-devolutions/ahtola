@@ -409,11 +409,13 @@ internal enum TransactionMode
     Exclusive,
 }
 
-internal sealed record BeginStatement(TransactionMode Mode = TransactionMode.Deferred) : ParsedStatement;
+internal sealed record BeginStatement(
+    TransactionMode Mode = TransactionMode.Deferred,
+    string? Name = null) : ParsedStatement;
 
-internal sealed record CommitStatement : ParsedStatement;
+internal sealed record CommitStatement(string? Name = null) : ParsedStatement;
 
-internal sealed record RollbackStatement : ParsedStatement;
+internal sealed record RollbackStatement(string? Name = null) : ParsedStatement;
 
 internal sealed record SavepointStatement(string Name) : ParsedStatement;
 
@@ -767,7 +769,8 @@ internal sealed record ColumnExpression(
     string Name,
     string? Qualifier = null,
     string? UnqualifiedName = null,
-    bool? BooleanKeyword = null) : Expression;
+    bool? BooleanKeyword = null,
+    string? Schema = null) : Expression;
 
 internal sealed record FunctionExpression(
     string Name,

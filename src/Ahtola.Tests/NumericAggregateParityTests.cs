@@ -74,12 +74,21 @@ public sealed class NumericAggregateParityTests
     // character in the output - rather than an argument that is skipped.
     [TestCase("SELECT hex(char(NULL))")]
     [TestCase("SELECT hex(char(65,NULL,66))")]
-    [TestCase("SELECT hex(char('x'))")]
     [TestCase("SELECT hex(char(NULL,65,NULL,NULL,66,NULL))")]
-    [TestCase("SELECT hex(char(2.7)), hex(char('65')), hex(char('abc'))")]
     [TestCase("SELECT length(char()), hex(char())")]
     [TestCase("SELECT hex(char(0)), hex(char(-1)), hex(char(1114112))")]
     public void CharTreatsEveryArgumentAsAnIntegerLikeSqlite(string sql) => AssertMatchesSqlite(sql);
+
+    // Turso's exec_char (turso-src/core/vdbe/value.rs:1344) only accepts Numeric::Integer and Null;
+    // REAL/TEXT/BLOB arguments are omitted via filter_map(_ => None), so char('x')/char(2.7) yield
+    // the empty string rather than coercing to 0/2 as stock SQLite does. The conformance corpus
+    // (char.sqltest::char-non-integer) expects this Turso behavior.
+    [TestCase("SELECT hex(char('x'))", "")]
+    [TestCase("SELECT hex(char(2.7)), hex(char('65')), hex(char('abc'))", "||")]
+    public void CharOmitsNonIntegerArgumentsMatchingTurso(string sql, string expected)
+    {
+        RunManaged(sql).Should().Be(expected, because: sql);
+    }
 
     // Documented divergence: SQLite emits a lone surrogate as the raw three-byte WTF-8 sequence,
     // which .NET's UTF-8 encoder cannot produce, so the managed engine substitutes U+FFFD.

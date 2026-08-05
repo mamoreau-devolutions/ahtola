@@ -182,7 +182,7 @@ internal static class IndexExpressionSemantics
                         $"Index '{index.Name}' has inconsistent expression metadata.");
                 }
 
-                ValidateExpression(table, term.Expression!, "index expressions");
+                ValidateExpression(tableName, table, term.Expression!, "index expressions");
             }
             else
             {
@@ -210,7 +210,7 @@ internal static class IndexExpressionSemantics
                 $"Partial index '{index.Name}' has unreconstructable predicate metadata.");
         }
         if (index.Where is not null)
-            ValidateExpression(table, index.Where, "partial index WHERE clauses");
+            ValidateExpression(tableName, table, index.Where, "partial index WHERE clauses");
     }
 
     public static bool Qualifies(
@@ -440,6 +440,7 @@ internal static class IndexExpressionSemantics
     }
 
     private static void ValidateExpression(
+        string tableName,
         EmbeddedTable table,
         Expression expression,
         string context)
@@ -451,7 +452,7 @@ internal static class IndexExpressionSemantics
             case CurrentTimeExpression:
                 throw new EmbeddedSqlException($"non-deterministic functions are prohibited in {context}");
             case ColumnExpression column:
-                if (column.Qualifier is not null)
+                if (!IsIndexTableColumn(tableName, column))
                     throw new EmbeddedSqlException($"the \".\" operator is prohibited in {context}");
                 var name = column.UnqualifiedName ?? column.Name;
                 var columnIndex = Array.FindIndex(
@@ -485,56 +486,70 @@ internal static class IndexExpressionSemantics
                         $"non-deterministic functions are prohibited in {context}");
                 }
                 foreach (var argument in function.Arguments)
-                    ValidateExpression(table, argument, context);
+                    ValidateExpression(tableName, table, argument, context);
                 return;
             case CollationExpression collation:
                 ValidateCollation("expression", collation.Name);
-                ValidateExpression(table, collation.Expression, context);
+                ValidateExpression(tableName, table, collation.Expression, context);
                 return;
             case CastExpression cast:
-                ValidateExpression(table, cast.Expression, context);
+                ValidateExpression(tableName, table, cast.Expression, context);
                 return;
             case CaseExpression @case:
                 if (@case.Operand is not null)
-                    ValidateExpression(table, @case.Operand, context);
+                    ValidateExpression(tableName, table, @case.Operand, context);
                 foreach (var clause in @case.Clauses)
                 {
-                    ValidateExpression(table, clause.When, context);
-                    ValidateExpression(table, clause.Then, context);
+                    ValidateExpression(tableName, table, clause.When, context);
+                    ValidateExpression(tableName, table, clause.Then, context);
                 }
                 if (@case.Else is not null)
-                    ValidateExpression(table, @case.Else, context);
+                    ValidateExpression(tableName, table, @case.Else, context);
                 return;
             case LikeExpression like:
-                ValidateExpression(table, like.Value, context);
-                ValidateExpression(table, like.Pattern, context);
+                ValidateExpression(tableName, table, like.Value, context);
+                ValidateExpression(tableName, table, like.Pattern, context);
                 if (like.Escape is not null)
-                    ValidateExpression(table, like.Escape, context);
+                    ValidateExpression(tableName, table, like.Escape, context);
                 return;
             case GlobExpression glob:
-                ValidateExpression(table, glob.Value, context);
-                ValidateExpression(table, glob.Pattern, context);
+                ValidateExpression(tableName, table, glob.Value, context);
+                ValidateExpression(tableName, table, glob.Pattern, context);
                 return;
             case InExpression @in:
-                ValidateExpression(table, @in.Value, context);
+                ValidateExpression(tableName, table, @in.Value, context);
                 foreach (var value in @in.Values)
-                    ValidateExpression(table, value, context);
+                    ValidateExpression(tableName, table, value, context);
                 return;
             case BetweenExpression between:
-                ValidateExpression(table, between.Value, context);
-                ValidateExpression(table, between.Lower, context);
-                ValidateExpression(table, between.Upper, context);
+                ValidateExpression(tableName, table, between.Value, context);
+                ValidateExpression(tableName, table, between.Lower, context);
+                ValidateExpression(tableName, table, between.Upper, context);
                 return;
             case UnaryExpression unary:
-                ValidateExpression(table, unary.Operand, context);
+                ValidateExpression(tableName, table, unary.Operand, context);
                 return;
             case BinaryExpression binary:
-                ValidateExpression(table, binary.Left, context);
-                ValidateExpression(table, binary.Right, context);
+                ValidateExpression(tableName, table, binary.Left, context);
+                ValidateExpression(tableName, table, binary.Right, context);
                 return;
             default:
                 throw new EmbeddedSqlException($"expression is prohibited in {context}");
         }
+    }
+
+    private static bool IsIndexTableColumn(string tableName, ColumnExpression column)
+    {
+        if (column.Qualifier is null)
+            return true;
+
+        var localTableName = ManagedSchemaName.TrySplit(tableName, out _, out var localName)
+            ? localName
+            : tableName;
+        return string.Equals(column.Qualifier, localTableName, StringComparison.OrdinalIgnoreCase)
+            && (column.Schema is null
+                || string.Equals(column.Schema, "main", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(column.Schema, "temp", StringComparison.OrdinalIgnoreCase));
     }
 
     // Mirrors Turso's registry-driven check (Func::resolve_function(name, argc)

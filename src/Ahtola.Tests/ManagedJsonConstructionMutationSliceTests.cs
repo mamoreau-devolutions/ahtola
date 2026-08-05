@@ -60,6 +60,10 @@ public class ManagedJsonConstructionMutationSliceTests
         Assert.Throws<EmbeddedSqlException>(() => Scalar("json_object('only-key')"));
         Assert.Throws<EmbeddedSqlException>(() => Scalar("json_array(x'00')"));
         Assert.Throws<EmbeddedSqlException>(() => Scalar("json_set('{}', '$.x[', 1)"));
+        Assert.Throws<EmbeddedSqlException>(() => Scalar("json_insert('{}', '$.value')"))
+            .Message.Should().Be("json_insert() needs an odd number of arguments");
+        Assert.Throws<EmbeddedSqlException>(() => Scalar("json_replace('{}', '$.value')"))
+            .Message.Should().Be("json_replace() needs an odd number of arguments");
         Assert.Throws<EmbeddedSqlException>(() => Scalar("json('{unquoted:1}')"));
         var unsupported = Assert.Throws<EmbeddedSqlException>(() => Scalar("jsonb_array(1)"));
         unsupported!.Message.Should().Be("no such function: JSONB_ARRAY");

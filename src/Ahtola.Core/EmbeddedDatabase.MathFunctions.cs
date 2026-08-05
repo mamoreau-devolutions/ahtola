@@ -109,10 +109,13 @@ public sealed partial class EmbeddedDatabase
         Func<double, double> operation)
     {
         RequireArgumentCount(functionName, arguments, 1);
-        if (!TryGetMathOperand(arguments[0], out var operand))
+        var numeric = ApplyComparisonNumericAffinity(arguments[0]);
+        if (numeric.Kind == SqlValueKind.Integer)
+            return numeric;
+        if (numeric.Kind != SqlValueKind.Real)
             return SqlValue.Null;
 
-        return FromMathResult(operation(operand));
+        return FromMathResult(operation(numeric.AsReal()));
     }
 
     private static SqlValue EvaluateLogarithm(IReadOnlyList<SqlValue> arguments)

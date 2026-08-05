@@ -102,7 +102,25 @@ public class ManagedSqltestConformanceTests
     private static string Summarize(string detail)
     {
         var firstLine = detail.ReplaceLineEndings("\n").Split('\n')[0].Replace('|', '/').Trim();
-        return firstLine.Length <= 200 ? firstLine : firstLine[..200];
+        var summary = firstLine.Length <= 200 ? firstLine : firstLine[..200];
+        var escaped = new StringBuilder(summary.Length);
+        foreach (var character in summary)
+        {
+            if (!char.IsControl(character))
+            {
+                escaped.Append(character);
+            }
+            else if (character == '\0')
+            {
+                escaped.Append("\\0");
+            }
+            else
+            {
+                escaped.Append($"\\u{(int)character:X4}");
+            }
+        }
+
+        return escaped.ToString();
     }
 
     [Test]
@@ -117,6 +135,16 @@ public class ManagedSqltestConformanceTests
             .Where(id => !runnable.Contains(id))
             .Should()
             .BeEmpty("stale expected-failure entries hide corpus coverage changes");
+    }
+
+    [Test]
+    public void ExpectedFailureBaselineContainsNoRawControlCharacters()
+    {
+        File.ReadLines(SqltestCorpus.ExpectedFailuresSourcePath)
+            .SelectMany(static line => line)
+            .Where(char.IsControl)
+            .Should()
+            .BeEmpty("control characters make the text baseline impossible to review reliably");
     }
 
     [Test]

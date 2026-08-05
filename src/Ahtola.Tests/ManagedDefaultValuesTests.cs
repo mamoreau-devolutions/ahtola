@@ -88,6 +88,37 @@ public sealed class ManagedDefaultValuesTests
                 SqlValue.Integer(8));
     }
 
+    [TestCase("bare_identifier", "bare_identifier")]
+    [TestCase("[bracketed identifier]", "bracketed identifier")]
+    [TestCase("\"quoted identifier\"", "quoted identifier")]
+    public void BareIdentifierDefaultsAreStoredAsText(string defaultExpression, string expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, $"CREATE TABLE defaults(value TEXT DEFAULT {defaultExpression});");
+        Execute(connection, "INSERT INTO defaults DEFAULT VALUES;");
+
+        ReadRows(connection, "SELECT value FROM defaults;")
+            .Should()
+            .ContainSingle()
+            .Which
+            .Should()
+            .Equal(SqlValue.Text(expected));
+    }
+
+    [Test]
+    public void ParenthesizedIdentifierDefaultsRemainNonConstantExpressions()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        Action create = () => Execute(connection, "CREATE TABLE defaults(value TEXT DEFAULT (identifier));");
+
+        create.Should()
+            .Throw<EmbeddedSqlException>()
+            .WithMessage("default value of column is not constant: identifier");
+    }
+
     private static void Execute(EmbeddedConnection connection, string sql)
     {
         using var statement = connection.Prepare(sql);
