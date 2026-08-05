@@ -46,8 +46,8 @@
         "S": 93
       },
       "by_status": {
-        "open": 138,
-        "closed": 66
+        "open": 137,
+        "closed": 67
       }
     },
     "schema": {
@@ -2290,17 +2290,12 @@
       "layer": "mvcc",
       "kind": "missing",
       "turso_ref": "turso-src/core/vdbe/execute.rs::TransactionMode::Concurrent, begin_mvcc_tx, line ~3819 'Concurrent transaction mode is only supported when MVCC is enabled'",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (no CONCURRENT keyword production)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs; src/Ahtola.Core/EmbeddedDatabase.cs::BeginTransaction",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [
-        "mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors",
-        "mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors",
-        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors",
-        "temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc"
-      ],
-      "notes": "Turso recognizes BEGIN CONCURRENT as a transaction-mode keyword and, even when MVCC is disabled, produces the specific error 'Concurrent transaction mode is only supported when MVCC is enabled' (execute.rs ~3819-3822) rather than a parse failure. Ahtola's parser has no CONCURRENT production at all, so the same SQL text fails earlier and differently ('Expected End. At SQL offset 6'), which is itself a conformance divergence independent of whether MVCC is ever implemented: four expected-failure lines exist purely because the error message/shape differs, not because of missing MVCC semantics. A cheap partial fix (M effort) is to at least parse BEGIN CONCURRENT and raise the same not-supported message Turso gives when MVCC is off, improving message-compatibility without implementing the feature.",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. Ahtola now parses BEGIN CONCURRENT and returns Turso's explicit MVCC-disabled diagnostic when no transaction is active. The three remaining nested-BEGIN corpus cases are owned by parser-begin-concurrent-mode: their first BEGIN CONCURRENT must succeed in a real MVCC journal mode, which Ahtola does not implement.",
+      "status": "closed"
     },
     {
       "id": "mvcc-clock-and-timestamp-ordering",
