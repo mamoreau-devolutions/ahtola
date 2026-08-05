@@ -30,7 +30,7 @@ public class ThreePartColumnReferenceTests
         var error = Assert.Throws<EmbeddedSqlException>(
             () => Execute(connection, "DELETE FROM test WHERE unknown.test.col = 1;"))!;
 
-        error.Message.Should().Be("no such column: test.col");
+        error.Message.Should().Be("no such database: unknown");
     }
 
     [Test]

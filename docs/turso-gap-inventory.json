@@ -10,18 +10,18 @@
       "submodule": "turso-src/ (read-only)"
     },
     "ahtola_ref": {
-      "branch": "copilot/vdbe-gap-analysis",
-      "commit_at_analysis": "c99157b"
+      "branch": "copilot/turso-gap-analysis",
+      "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 203,
-    "last_reconciled": "2026-08-04",
-    "entry_count": 192,
+    "current_conformance_expected_failures": 202,
+    "last_reconciled": "2026-08-07",
+    "entry_count": 194,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 53,
-        "parser": 25,
+        "compilation": 54,
+        "parser": 26,
         "functions": 26,
         "storage": 20,
         "mvcc": 14,
@@ -29,25 +29,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 56,
+        "divergent": 58,
         "partial": 27,
         "extension": 8,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 101,
+        "s2-capability": 103,
         "s4-intentional": 33,
         "s1-correctness": 24
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 82
+        "S": 84
       },
       "by_status": {
         "open": 141,
-        "closed": 51
+        "closed": 53
       }
     },
     "schema": {
@@ -2849,6 +2849,32 @@
         "cte.sqltest::cte-unreferenced-qualified-column-orderby-exists"
       ],
       "notes": "Closed 2026-08-06 (Wave F2.10 Batch 4). Two coupled fixes that bring Ahtola's SELECT column-resolution error timing and star-ambiguity detection to Turso parity. (1) Prepare-time validation: Ahtola previously resolved columns lazily at STEP time, so a SELECT that referenced an unresolvable column (rowid over a view or a FROM-clause derived table that does not expose rowid, or a CTE column not in scope) prepared successfully and only failed — or silently succeeded — during stepping. A new ValidateQuerySchema pass now runs at prepare time (after ResolveSelectBindings, before execution) mirroring Turso's translate-time binding, erroring 'no such column: ...' for view-rowid-select / view-rowid-order-by-index / rowid-select-from-clause-subquery / cte-unreferenced-qualified-column-orderby-exists. The hook is guarded by !context.InsideTrigger (trigger bodies are validated at CREATE TRIGGER and NEW/OLD bind through context.TriggerRow). ValidateExpressionSchema's ColumnExpression case now uses TryGetValue and treats an unresolvable name whose BooleanKeyword is set as a legal TRUE/FALSE literal (SQLite keywords -> 1/0), matching EvaluateColumn's runtime fallback so bare TRUE/FALSE still pass validation. (2) Origin-aware star ambiguity: OutputColumn gained a trailing Origin token (the leaf source object, compared with ReferenceEqualityComparer so two self-joined value-equal source nodes stay distinct). ThrowIfAmbiguousStarExpansion now reports 'ambiguous column name: {qualifier}.{name}' only when a column name is contributed by two or more distinct leaf sources; duplicates inside a single source are legal, and USING/NATURAL-coalesced columns (which appear once in the flattened output) remain legal. This cleared the ambiguous-self-join key and the ambiguous-column-error-message-format wording key as a bonus. Oracle 256->250 across the batch (5 target keys + 1 bonus, 0 added); regressions surfaced during iteration (bare TRUE/FALSE validation, single-derived-table duplicate-column false positive) fixed before landing.",
+      "status": "closed"
+    },
+    {
+      "id": "parser-rename-column-qualified-trigger-error-message",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/plan/invariants.rs (RenameColumn rewrites dependent schema objects; unresolved schema-qualified column refs in trigger bodies raise no such column preserving the database qualifier) + turso-src/core/sql/ast.rs ColumnName schema field",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/RenameColumnRewriter.cs (ResolveColumnReference now formats the full schema-qualified name via FormatQualifiedName instead of column.Name, which drops the schema; column-list sites using bare oldName are unchanged)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message"
+      ],
+      "notes": "Closed 2026-08-07. ALTER TABLE ... RENAME COLUMN rewrites trigger bodies through RenameColumnRewriter.RewriteSchemaObject, whose ResolveColumnReference threw no such column: {column.Name} for an unresolved reference. ColumnExpression.Name excludes the schema (set to qualifier.column by the three-part parser), so main.t.b was reported as t.b, dropping the database qualifier the conformance pattern requires. Added FormatQualifiedName(column) (schema + . + name when Schema is set) and used it at both reject sites. Column-list validation sites (lines using bare oldName) were correct and left unchanged. Oracle 203->202.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-unknown-schema-column-reference-database-diagnostic",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/emitter/mod.rs:694-712 resolve_database_id (a column/table reference qualified by a database that is not main/temp and not attached raises no such database: {name}, not no such column)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (SourceRow.CreateUnresolvedColumnException distinguishes an unknown database qualifier -> no such database: {schema} from a missing column in a known schema -> no such column: {schema-qualified name}; used by SourceRow.GetValue and EvaluateColumn; ValidateExpressionSchema ColumnExpression case routes through probe.GetValue)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Closed 2026-08-07. A schema-qualified column reference whose database is neither main nor temp nor attached (e.g. unknown.test.col) previously fell through SourceRow.TryGetValue (which returns false for an unknown schema) to a generic no such column: {name} that dropped the schema. Turso resolves the database first and emits no such database: {name} for an unknown database, a distinct error. Added SourceRow.CreateUnresolvedColumnException and routed the two EvaluateColumn reject sites and SourceRow.GetValue through it; known-schema missing columns still report the schema-qualified no such column (preserving the rename-column closure). Backed by ThreePartColumnReferenceTests.UnknownSchemaColumnReferenceDoesNotResolveAgainstMain (updated to assert the Turso diagnostic). No conformance key closed; the only conformance no such database case is vacuum_into (skipped, VACUUM not yet supported).",
       "status": "closed"
     }
   ]

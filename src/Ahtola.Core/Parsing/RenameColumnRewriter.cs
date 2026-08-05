@@ -724,7 +724,7 @@ internal static class RenameColumnRewriter
                     {
                         var span = spans.GetName(column);
                         if (span is null)
-                            throw Reject($"no such column: {column.Name}");
+                            throw Reject($"no such column: {FormatQualifiedName(column)}");
 
                         _edits.Add(span.Value);
                         return;
@@ -732,9 +732,18 @@ internal static class RenameColumnRewriter
                 case Resolution.Other:
                     return;
                 default:
-                    throw Reject($"no such column: {column.Name}");
+                    throw Reject($"no such column: {FormatQualifiedName(column)}");
             }
         }
+
+        /// <summary>
+        /// Formats a column reference for a "no such column" diagnostic, preserving a
+        /// schema qualifier (<c>main.t.b</c>) the way SQLite does. <see cref="ColumnExpression.Name"/>
+        /// already carries the table qualifier for one- or two-part references, so the schema
+        /// is prepended only when present.
+        /// </summary>
+        private static string FormatQualifiedName(ColumnExpression column)
+            => column.Schema is { } schema ? schema + "." + column.Name : column.Name;
 
         private Resolution Resolve(string? qualifier, string name, Scope? scope)
         {

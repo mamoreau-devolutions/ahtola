@@ -24387,7 +24387,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             if (row?.TryGetQualifiedValue(column, out var scopedValue) == true)
                 return scopedValue;
             return context.TriggerRow?.GetValue(column)
-                ?? throw new EmbeddedSqlException($"no such column: {column.Name}");
+                ?? throw SourceRow.CreateUnresolvedColumnException(column);
         }
 
         if (row is not null && row.TryGetValue(column, out var value))
@@ -24398,7 +24398,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (column.BooleanKeyword is { } boolean)
             return SqlValue.Integer(boolean ? 1 : 0);
 
-        throw new EmbeddedSqlException($"no such column: {column.Name}");
+        throw SourceRow.CreateUnresolvedColumnException(column);
     }
 
     /// <summary>
@@ -42026,9 +42026,36 @@ internal sealed record SourceRow(
         if (TryGetValue(column, out var value))
             return value;
 
-        var name = column.Schema is { } schema ? schema + "." + column.Name : column.Name;
-        throw new EmbeddedSqlException($"no such column: {name}");
+        throw CreateUnresolvedColumnException(column);
     }
+
+    /// <summary>
+    /// Builds the diagnostic SQLite/Turso emits when a column reference cannot be
+    /// resolved. A reference qualified by an unknown database (<c>unknown.t.c</c>)
+    /// reports <c>no such database: unknown</c>; a missing column in a known schema
+    /// (<c>main.t.nope</c>) reports <c>no such column: main.t.nope</c>, preserving
+    /// the schema qualifier the way SQLite does.
+    /// </summary>
+    internal static Exception CreateUnresolvedColumnException(ColumnExpression column)
+    {
+        if (column.Schema is { } schema
+            && !schema.Equals("main", StringComparison.OrdinalIgnoreCase)
+            && !schema.Equals("temp", StringComparison.OrdinalIgnoreCase))
+        {
+            return new EmbeddedSqlException($"no such database: {schema}");
+        }
+
+        return new EmbeddedSqlException($"no such column: {FormatColumnReference(column)}");
+    }
+
+    /// <summary>
+    /// Formats a column reference for a "no such column" diagnostic, preserving
+    /// a schema qualifier (<c>main.t.b</c>) the same way SQLite does. <see cref="ColumnExpression.Name"/>
+    /// already carries the table qualifier for one- or two-part references, so the
+    /// schema is only prepended when present.
+    /// </summary>
+    internal static string FormatColumnReference(ColumnExpression column)
+        => column.Schema is { } schema ? schema + "." + column.Name : column.Name;
 
     public bool TryGetValue(ColumnExpression column, out SqlValue value)
     {
