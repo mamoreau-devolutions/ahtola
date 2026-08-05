@@ -112,6 +112,113 @@ public sealed partial class EmbeddedDatabase
         return SqlValue.Text(source.Replace(pattern, ToSqlText(arguments[2]), StringComparison.Ordinal));
     }
 
+    private static SqlValue EvaluateRepeat(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("repeat", arguments, 2);
+        if (HasNullArgument(arguments))
+            return SqlValue.Null;
+        if (!TryGetTursoStringFunctionLength(arguments[1], out var count))
+            return SqlValue.Null;
+        if (count <= 0)
+            return SqlValue.Text(string.Empty);
+
+        var source = ToSqlText(arguments[0]);
+        if (source.Length == 0)
+            return SqlValue.Text(string.Empty);
+        if (count > int.MaxValue / source.Length)
+            throw new EmbeddedSqlException("string or blob too big");
+
+        var builder = new StringBuilder((int)(source.Length * count));
+        for (var index = 0L; index < count; index++)
+            builder.Append(source);
+
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static SqlValue EvaluatePad(
+        IReadOnlyList<SqlValue> arguments,
+        string functionName,
+        bool padLeft)
+    {
+        RequireArgumentCount(functionName, arguments, 2, 3);
+        if (HasNullArgument(arguments))
+            return SqlValue.Null;
+        if (!TryGetTursoStringFunctionLength(arguments[1], out var requestedLength))
+            return SqlValue.Null;
+        if (requestedLength <= 0)
+            return SqlValue.Text(string.Empty);
+        if (requestedLength > int.MaxValue)
+            throw new EmbeddedSqlException("string or blob too big");
+
+        var targetLength = (int)requestedLength;
+        var source = ToSqlText(arguments[0]);
+        var sourceRunes = source.EnumerateRunes().ToArray();
+        if (sourceRunes.Length >= targetLength)
+            return SqlValue.Text(string.Concat(sourceRunes.Take(targetLength)));
+
+        var fill = arguments.Count == 3 ? ToSqlText(arguments[2]) : " ";
+        var fillRunes = fill.EnumerateRunes().ToArray();
+        if (fillRunes.Length == 0)
+            return SqlValue.Text(source);
+
+        var paddingLength = targetLength - sourceRunes.Length;
+        var builder = new StringBuilder(GetPaddedTextCapacity(source, fillRunes, paddingLength));
+        if (padLeft)
+            AppendCyclicRunes(builder, fillRunes, paddingLength);
+        builder.Append(source);
+        if (!padLeft)
+            AppendCyclicRunes(builder, fillRunes, paddingLength);
+
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static bool TryGetTursoStringFunctionLength(SqlValue value, out long length)
+    {
+        switch (value.Kind)
+        {
+            case SqlValueKind.Integer:
+                length = value.AsInteger();
+                return true;
+            case SqlValueKind.Real:
+                length = ClampRealToInteger(value.AsReal());
+                return true;
+            case SqlValueKind.Text:
+                if (long.TryParse(
+                    value.AsText(),
+                    NumberStyles.AllowLeadingSign,
+                    CultureInfo.InvariantCulture,
+                    out length))
+                {
+                    return true;
+                }
+
+                length = 0;
+                return true;
+            default:
+                length = 0;
+                return false;
+        }
+    }
+
+    private static int GetPaddedTextCapacity(string source, IReadOnlyList<Rune> fill, int paddingLength)
+    {
+        var completeCycles = paddingLength / fill.Count;
+        var remainder = paddingLength % fill.Count;
+        var fillCodeUnits = fill.Sum(rune => rune.Utf16SequenceLength);
+        var remainderCodeUnits = fill.Take(remainder).Sum(rune => rune.Utf16SequenceLength);
+        var available = int.MaxValue - source.Length - remainderCodeUnits;
+        if (available < 0 || completeCycles > available / fillCodeUnits)
+            throw new EmbeddedSqlException("string or blob too big");
+
+        return source.Length + (completeCycles * fillCodeUnits) + remainderCodeUnits;
+    }
+
+    private static void AppendCyclicRunes(StringBuilder builder, IReadOnlyList<Rune> runes, int count)
+    {
+        for (var index = 0; index < count; index++)
+            builder.Append(runes[index % runes.Count].ToString());
+    }
+
     private static SqlValue EvaluateTrim(IReadOnlyList<SqlValue> arguments, string functionName, bool trimStart, bool trimEnd)
     {
         RequireArgumentCount(functionName, arguments, 1, 2);

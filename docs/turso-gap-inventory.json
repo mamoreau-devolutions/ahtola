@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 129,
-        "closed": 77
+        "open": 128,
+        "closed": 78
       }
     },
     "schema": {
@@ -1833,13 +1833,13 @@
       "id": "func-repeat-lpad-rpad-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Repeat (\"repeat\"), Lpad (\"lpad\"), Rpad (\"rpad\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::{Repeat,Lpad,Rpad}; turso-src/core/functions/string.rs::{exec_repeat,exec_lpad,exec_rpad,pad}",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::{EvaluateRepeat,EvaluatePad,TryGetTursoStringFunctionLength}; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "repeat()/lpad()/rpad() string-padding helpers are absent from SqliteBuiltinFunctions.Names and EmbeddedDatabase.StringFunctions.cs. Not part of stock SQLite but present in Turso's registry (and common in other SQL dialects); no corpus coverage found in the vendored sqltest suite, so this is a pure registry gap rather than a conformance failure today.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. Ported Turso's character-counting repeat()/lpad()/rpad() semantics: NULL propagation, negative/zero lengths, integer/real/text/blob length coercion, default and cycling fill, right-side truncation, and Unicode scalar handling. Added the functions to the persisted-schema builtin registry and covered their return values, coercion, NULL behavior, and arity errors in TursoStringFunctionParityTests. No vendored sqltest corpus case exists, so the expected-failure baseline is unchanged.",
+      "status": "closed"
     },
     {
       "id": "func-string-reverse-missing",

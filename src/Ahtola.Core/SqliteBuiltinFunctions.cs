@@ -24,7 +24,7 @@ internal static class SqliteBuiltinFunctions
         "EXP", "SQRT", "POW", "POWER", "MOD", "SIGN", "PI", "DEGREES", "RADIANS",
         "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "ATAN2", "SINH", "COSH", "TANH",
         "ASINH", "ACOSH", "ATANH",
-        "SUBSTR", "SUBSTRING", "REPLACE", "TRIM", "BTRIM", "LTRIM", "RTRIM", "QUOTE",
+        "SUBSTR", "SUBSTRING", "REPLACE", "REPEAT", "LPAD", "RPAD", "TRIM", "BTRIM", "LTRIM", "RTRIM", "QUOTE",
         "CHAR", "UNICODE", "UNHEX", "ZEROBLOB", "RANDOMBLOB", "RANDOM", "CONCAT", "CONCAT_WS",
         "IIF", "LIKELY", "UNLIKELY", "LIKELIHOOD",
         "SQLITE_VERSION", "SQLITE_SOURCE_ID", "CHANGES", "TOTAL_CHANGES", "TIMEDIFF",
