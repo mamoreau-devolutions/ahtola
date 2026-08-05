@@ -211,6 +211,21 @@ public sealed class ManagedTriggerRowSemanticsTests
     }
 
     [Test]
+    public void UncorrelatedUpdateAssignmentSubqueryUsesThePreTriggerStatementSnapshot()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE data(id INTEGER PRIMARY KEY, value INTEGER)",
+                "CREATE TABLE trace(value TEXT)",
+                "CREATE TRIGGER data_before BEFORE UPDATE ON data "
+                    + "BEGIN INSERT INTO trace VALUES ('before'); END",
+                "INSERT INTO data VALUES (1, 100), (2, 200), (3, 300)",
+                "UPDATE data SET value = (SELECT sum(value) FROM data) WHERE id <= 2",
+            ],
+            "SELECT id, value FROM data ORDER BY id");
+    }
+
+    [Test]
     public void ReplaceDeleteTriggersAndOuterConflictOverrideMatchSqlite()
     {
         AssertMatchesSqlite(

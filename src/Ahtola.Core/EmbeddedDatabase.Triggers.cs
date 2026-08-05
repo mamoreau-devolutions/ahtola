@@ -695,7 +695,7 @@ public sealed partial class EmbeddedDatabase
                 original,
                 oldRowId,
                 parameters,
-                context,
+                context with { PreserveSubqueryMemoSnapshot = true },
                 validateCheckConstraints: false,
                 enforceGeneratedNotNull: false,
                 evaluationRow: evaluationRow);

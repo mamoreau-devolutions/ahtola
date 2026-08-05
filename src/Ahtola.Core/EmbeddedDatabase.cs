@@ -538,7 +538,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         ManagedStatementHooks? Hooks = null,
         OuterAggregateScope? OuterAggregateScope = null,
         bool IgnoreCheckConstraints = false,
-        Func<string?, string?, ExecutionResult>? ExecuteTableList = null)
+        Func<string?, string?, ExecutionResult>? ExecuteTableList = null,
+        bool PreserveSubqueryMemoSnapshot = false)
     {
         /// <summary>
         /// Row-loop checkpoint. It honors cooperative cancellation exactly as before and
@@ -25422,7 +25423,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         if (state.MemoizedSubqueries.TryGetValue(query, out var entry))
         {
-            if (entry.RevisionFingerprint == ComputeSubqueryRevisionFingerprint(context))
+            if (context.PreserveSubqueryMemoSnapshot
+                || entry.RevisionFingerprint == ComputeSubqueryRevisionFingerprint(context))
                 return entry.Result;
 
             // Data changed since the memo was taken; the subquery is still uncorrelated, so
