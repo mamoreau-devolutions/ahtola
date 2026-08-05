@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 121,
-        "closed": 85
+        "open": 120,
+        "closed": 86
       }
     },
     "schema": {
@@ -1508,12 +1508,12 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser (parenthesized subquery as JOIN operand, joins between subqueries)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing (Expected RightParen at JOIN of subqueries)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::{ParseTableSource,ParseSimpleTableSource}; src/Ahtola.Core/Parsing/SqlAst.cs::{DerivedTableSource,JoinTableSource}",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Parser rejects JOIN operands that are parenthesized subqueries/unions (Expected RightParen). Blocks the 11-case subquery/expressions file. (Previously linked keys cleared by earlier wave work: subquery-join-two-subqueries, subquery-left-join-two-subqueries, subquery-cross-join-subqueries, subquery-natural-join-subqueries, subquery-from-union, subquery-from-union-all.)",
-      "status": "open"
+      "notes": "Closed 2026-08-08. ParseSimpleTableSource now represents parenthesized query operands as DerivedTableSource and recursively parses parenthesized join clauses before the outer JOIN condition is consumed. This supports joins between subqueries, LEFT/CROSS/NATURAL forms, and UNION/UNION ALL derived sources. The linked subquery/expressions.sqltest corpus file passes as a focused managed conformance run; its previously linked cases are no longer active expected failures.",
+      "status": "closed"
     },
     {
       "id": "parser-error-message-parity",
