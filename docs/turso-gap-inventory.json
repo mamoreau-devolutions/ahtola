@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 125,
+    "current_conformance_expected_failures": 123,
     "last_reconciled": "2026-08-08",
     "entry_count": 208,
     "counts": {
@@ -149,14 +149,12 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
-        "foreign_keys.sqltest::fk-self-ipk-text-child-coerces-rowid-ok",
-        "foreign_keys.sqltest::fk-deferred-update-self-ref-rowid-affinity-one-stmt",
         "foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates",
         "foreign_keys.sqltest::fk-alter-table-add-column-enforced",
         "gencol.sqltest::fk-gencol-unique-idx-update-cascade",
         "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
       ],
-      "notes": "FK enforcement exists but lives in the write-target delegates, not opcodes. defer_foreign_keys and immediate checking work for common shapes; the divergence is structural. Edge coverage (FK actions through compiled DML, cross-database checks) tracked in compilation entries. Note: fk-column-constraint-multi-parent was detached from this entry 2026-08-07 — it is a parse-time column-level FK arity check, not runtime FK enforcement; see parser-fk-column-level-multi-parent-rejection (closed).",
+      "notes": "FK enforcement exists but lives in the write-target delegates, not opcodes. defer_foreign_keys and immediate checking work for common shapes; the divergence is structural. Closed 2026-08-08: self-referential parent matching now applies the parent key affinity before comparing, so TEXT child values correctly match INTEGER PRIMARY KEY rowids during immediate inserts and deferred in-place updates. Edge coverage (FK actions through compiled DML, cross-database checks) tracked in compilation entries. Note: fk-column-constraint-multi-parent was detached from this entry 2026-08-07 — it is a parse-time column-level FK arity check, not runtime FK enforcement; see parser-fk-column-level-multi-parent-rejection (closed).",
       "status": "open"
     },
     {

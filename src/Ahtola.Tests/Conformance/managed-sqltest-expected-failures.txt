@@ -26,8 +26,6 @@ delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows | expected 3 row
 detach/transaction.sqltest::detach-fails-with-active-read-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
 detach/transaction.sqltest::detach-fails-with-active-write-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
 detach/transaction.sqltest::detach-succeeds-after-commit | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-foreign_keys.sqltest::fk-self-ipk-text-child-coerces-rowid-ok | expected success but got error: FOREIGN KEY constraint failed
-foreign_keys.sqltest::fk-deferred-update-self-ref-rowid-affinity-one-stmt | expected success but got error: FOREIGN KEY constraint failed
 foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates | expected success but got error: EXPLAIN is only supported for statements lowered to the bytecode compiler.
 foreign_keys.sqltest::fk-alter-table-add-column-enforced | expected success but got error: ALTER TABLE ADD COLUMN with REFERENCES is not supported.
 gencol.sqltest::gencol_alter_add_stored_rejected | expected an error but the statement succeeded

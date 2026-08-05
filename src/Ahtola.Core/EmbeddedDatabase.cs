@@ -11145,9 +11145,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[]? childRow = null,
         bool selfReferential = false)
     {
-        // Self-referential FKs need the per-row identity skip (a row can't be its own
-        // parent mid-insert) and parentRows may be the post-mutation child rows rather
-        // than a RowStore, so fall back to the linear scan for that shape.
+        // Self-referential FKs may validate against post-mutation child rows rather than a
+        // RowStore, so fall back to the linear scan for that shape.
         if (selfReferential || parentRows is not RowStore parentRowStore)
             return ParentContainsLinear(parent, parentRows, childValues, childRow, selfReferential);
 
@@ -11185,7 +11184,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var parentValues = GetForeignKeyValues(parentRow, parent.ColumnIndices);
             if (selfReferential && ReferenceEquals(parentRow, childRow))
             {
-                if (parentValues.SequenceEqual(childValues))
+                // Turso's same-row fast path follows the physical parent lookup: rowid
+                // aliases normalize the child to an integer, while unique-index parents
+                // compare the stored key values without affinity or collation coercion.
+                if (ParentUsesRowidAlias(parent)
+                    ? ValuesMatchParent(parent, parentValues, childValues)
+                    : parentValues.SequenceEqual(childValues))
                     return true;
                 continue;
             }
@@ -11194,6 +11198,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
         return false;
     }
+
+    private static bool ParentUsesRowidAlias(ForeignKeyParent parent)
+        => parent.Table.HasRowidAlias
+            && parent.ColumnIndices.Count == 1
+            && parent.ColumnIndices[0] == parent.Table.RowidAliasColumnIndex;
 
     private bool TryGetForeignKeyParentProbe(
         ForeignKeyParent parent,
