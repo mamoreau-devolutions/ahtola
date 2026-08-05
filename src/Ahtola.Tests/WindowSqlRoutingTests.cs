@@ -106,6 +106,30 @@ public class WindowSqlRoutingTests
     }
 
     [Test]
+    public void DistinctWindowSpecsRetainInnerOrderWithinOuterPeers()
+    {
+        string[] setup =
+        [
+            "CREATE TABLE nc (x TEXT COLLATE NOCASE, y INTEGER);",
+            "INSERT INTO nc VALUES ('a', 1), ('A', 2), ('b', 3);",
+        ];
+        const string query =
+            "SELECT y, dense_rank() OVER (ORDER BY x), " +
+            "dense_rank() OVER (ORDER BY x COLLATE BINARY) FROM nc;";
+
+        using var connection = new EmbeddedDatabase().Connect();
+        foreach (var statement in setup)
+            Execute(connection, statement);
+
+        var rows = ReadRows(connection, query);
+        rows.Select(row => (row[0], row[1], row[2])).Should().Equal(
+            (SqlValue.Integer(2), SqlValue.Integer(1), SqlValue.Integer(1)),
+            (SqlValue.Integer(1), SqlValue.Integer(1), SqlValue.Integer(2)),
+            (SqlValue.Integer(3), SqlValue.Integer(2), SqlValue.Integer(3)));
+        AssertMatchesSqlite(rows, setup, query);
+    }
+
+    [Test]
     public void NullaryCountStarRunsAsRowNumberAndRoutes()
     {
         using var connection = new EmbeddedDatabase().Connect();

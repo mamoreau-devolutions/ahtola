@@ -17164,7 +17164,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         var emissionOrder = resolvedOrderBy.Count > 0
             ? resolvedOrderBy
-            : FirstWindowEmissionOrder(windowFunctions);
+            : WindowEmissionOrder(windowFunctions);
 
         VdbeRowComparer? orderComparer = null;
         if (emissionOrder is { Count: > 0 })
@@ -17265,33 +17265,33 @@ public sealed partial class EmbeddedDatabase : IDisposable
     // compare with the term's direction, NULL placement, and collation — so a routed sort is the
     // evaluator's sort. The sorter is stable, matching the evaluator's StableSortIndices tie-break on
     // scan position.
-    // SQLite emits the rows of a windowed SELECT in the sort order of the first window
-    // function (in declaration order) that carries a sort key, unless the statement itself
-    // supplies an ORDER BY that overrides it. A window's sort key is its PARTITION BY
-    // expressions (ascending) followed by its ORDER BY terms verbatim; a bare OVER() window
-    // has no sort key and is skipped. When no window carries a sort key the output stays in
-    // scan order. Returns null when no window carries a sort key.
-    private static IReadOnlyList<OrderByTerm>? FirstWindowEmissionOrder(
+    // Turso's plan_windows nests unique window specifications in declaration order: the first
+    // specification is the outermost layer and each outer sort stably preserves the inner layer's
+    // ties. Concatenating the sort keys in that order reproduces the final nested sequence. A
+    // window's sort key is its PARTITION BY expressions (ascending) followed by its ORDER BY
+    // terms verbatim; a bare OVER() window has no sort key and is skipped.
+    private static IReadOnlyList<OrderByTerm>? WindowEmissionOrder(
         IReadOnlyList<FunctionExpression> windowFunctions)
     {
+        var seenSpecifications = new List<WindowSpecification>();
+        var emission = new List<OrderByTerm>();
         foreach (var function in windowFunctions)
         {
             if (function.Window is not { } window)
                 continue;
+            if (seenSpecifications.Any(candidate => WindowSpecsEqual(candidate, window)))
+                continue;
+
+            seenSpecifications.Add(window);
             if (window.PartitionBy.Count == 0 && window.OrderBy.Count == 0)
                 continue;
 
-            if (window.PartitionBy.Count == 0)
-                return window.OrderBy;
-
-            var emission = new List<OrderByTerm>(window.PartitionBy.Count + window.OrderBy.Count);
             foreach (var partitionExpression in window.PartitionBy)
                 emission.Add(new OrderByTerm(partitionExpression, Descending: false));
             emission.AddRange(window.OrderBy);
-            return emission;
         }
 
-        return null;
+        return emission.Count == 0 ? null : emission;
     }
 
     private VdbeRowComparer BuildWindowOrderComparer(
@@ -32089,10 +32089,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
             indices = StableSortIndices(indices, (left, right) =>
                 CompareOrderKeys(orderKeys[left], orderKeys[right], orderBy, orderCollations));
         }
-        else if (FirstWindowEmissionOrder(windowFunctions) is { } windowOrder)
+        else if (WindowEmissionOrder(windowFunctions) is { } windowOrder)
         {
-            // Without a statement ORDER BY, SQLite emits window rows in the ORDER BY
-            // order of the first window function that declares one (ties stable).
+            // Without a statement ORDER BY, emit the declaration-ordered composition of
+            // the nested window layers (ties stable).
             var orderCollations = windowOrder
                 .Select(term => GetEffectiveCollation(term.Expression, context))
                 .ToArray();
@@ -32179,7 +32179,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var orderBy = ResolveOrderBy(statement.OrderBy, statement.Projections);
         IReadOnlyList<OrderByTerm>? emissionOrder = orderBy.Count > 0
             ? orderBy
-            : FirstWindowEmissionOrder(windowFunctions);
+            : WindowEmissionOrder(windowFunctions);
         if (emissionOrder is { Count: > 0 }
             && emissionOrder.Any(term =>
                 ContainsWindowFunction(term.Expression)
@@ -32233,7 +32233,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             (index, expression) => Evaluate(expression, parameters, rows[index], context),
             parameters,
             context,
-            FirstWindowEmissionOrder(windowFunctions),
+            WindowEmissionOrder(windowFunctions),
             evaluationSourceIndexes);
     }
 
@@ -32512,10 +32512,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
             }
             else if (spec.PartitionBy.Count == 0 && emissionOrder is { Count: > 0 })
             {
-                // A bare OVER() window has no ordering of its own, so SQLite numbers its rows in the
-                // statement's window emission order (the first window that carries a sort key) rather
-                // than in scan order. Reorder the entries that way so row_number/rank/ntile follow the
-                // order the rows are actually emitted in.
+                // A bare OVER() window has no ordering of its own, so it numbers its rows in the
+                // statement's nested-window emission order rather than scan order. Reorder the entries
+                // so row_number/rank/ntile follow the rows actually emitted.
                 var emissionCollations = emissionOrder
                     .Select(term => GetEffectiveCollation(term.Expression, context))
                     .ToArray();

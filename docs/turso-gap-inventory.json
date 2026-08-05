@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 126,
+    "current_conformance_expected_failures": 125,
     "last_reconciled": "2026-08-08",
     "entry_count": 208,
     "counts": {
@@ -745,9 +745,10 @@
         "window/dense_rank.sqltest::dense-rank-float-precision-not-peers",
         "window/dense_rank.sqltest::dense-rank-infinities",
         "window/dense_rank.sqltest::dense-rank-storage-class-ordering",
+        "window/dense_rank.sqltest::dense-rank-column-declared-collation",
         "nulls-first-last.sqltest::window-two-different-nulls-orderings"
       ],
-      "notes": "Closed 2026-08-03 via three coordinated window emission/comparison fixes in EmbeddedDatabase.cs. (1) Window emission order: a windowed SELECT without a top-level ORDER BY now emits in the first window's sort-key order (PARTITION BY all ASC ++ ORDER BY verbatim) instead of scan order, matching SQLite's first-window emission rule; partition-only windows emit in partition order through a sorter (BufferedWindowProgramBuilder OpenSorter) rather than scan order. (2) Collation-aware peer comparison: BuildWindowOrderComparer/CompareWindowOrderKeys now apply each ORDER BY term's effective declared collation via GetEffectiveCollation, so peer-group (tie) detection matches SQLite's collation semantics for NOCASE, cross-type numeric, float-precision, and storage-class cases. (3) Empty-OVER() numbering: bare OVER() window functions are numbered in the window emission order (the first sort-key-carrying window), not scan order, even when a statement ORDER BY re-sorts the output (values ride with rows). Cleared 30 conformance keys (dense_rank, first_last_value, memory-collate, ntile, lag/lead, rank, multi-window-ordering empty-over). Full lane 3765/3765 green; WindowSqlRoutingTests updated to partition-order emission per sqlite3 ground truth. dense-rank-column-declared-collation remains expected-failing (also maps to func-agg-arg-collation-typeof-spotcheck).",
+      "notes": "Closed 2026-08-03 via three coordinated window emission/comparison fixes in EmbeddedDatabase.cs. (1) Window emission order: a windowed SELECT without a top-level ORDER BY composes every distinct window specification's sort key in declaration order (PARTITION BY all ASC ++ ORDER BY verbatim), matching Turso's nested window-subquery planning. Outer layers define the primary order while inner layers resolve their ties; partition-only windows emit in partition order through a sorter (BufferedWindowProgramBuilder OpenSorter) rather than scan order. (2) Collation-aware peer comparison: BuildWindowOrderComparer/CompareWindowOrderKeys now apply each ORDER BY term's effective declared collation via GetEffectiveCollation, so peer-group (tie) detection matches SQLite's collation semantics for NOCASE, cross-type numeric, float-precision, and storage-class cases. (3) Empty-OVER() numbering: bare OVER() window functions are numbered in the statement's composed window emission order rather than scan order, even when a statement ORDER BY re-sorts the output (values ride with rows). Cleared 31 conformance keys (dense_rank, first_last_value, memory-collate, ntile, lag/lead, rank, multi-window-ordering empty-over). WindowSqlRoutingTests covers the multiple-window declared-collation ordering shape against sqlite3 ground truth.",
       "status": "closed"
     },
     {
