@@ -28679,6 +28679,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             "REPLACE" => EvaluateReplace(arguments),
             "STRING_REVERSE" or "REVERSE" => EvaluateStringReverse(arguments),
             "SOUNDEX" => EvaluateSoundex(arguments),
+            "UNISTR" => EvaluateUnistr(arguments),
+            "UNISTR_QUOTE" => EvaluateUnistrQuote(arguments),
             "REPEAT" => EvaluateRepeat(arguments),
             "LPAD" => EvaluatePad(arguments, "lpad", padLeft: true),
             "RPAD" => EvaluatePad(arguments, "rpad", padLeft: false),

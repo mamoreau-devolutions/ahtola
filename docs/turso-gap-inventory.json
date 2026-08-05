@@ -46,8 +46,8 @@
         "S": 94
       },
       "by_status": {
-        "open": 123,
-        "closed": 83
+        "open": 122,
+        "closed": 84
       }
     },
     "schema": {
@@ -1797,13 +1797,13 @@
       "id": "func-unistr-family-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Unistr (\"unistr\"), ScalarFunc::UnistrQuote (\"unistr_quote\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::{ScalarFunc::Unistr,ScalarFunc::UnistrQuote}; turso-src/core/vdbe/value.rs::{Value::exec_unistr,Value::exec_unistr_quote}",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::{EvaluateUnistr,EvaluateUnistrQuote}; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "unistr()/unistr_quote() (Postgres-style Unicode escape decoding/encoding) are absent from SqliteBuiltinFunctions.Names and EmbeddedDatabase.StringFunctions.cs; the only 'unistr' hit in EmbeddedDatabase.cs is an unrelated string literal used when quoting schema text for round-tripping, not an implementation. All corpus tests for these are tagged '@skip-if sqlite ...' (real SQLite doesn't ship them either) so they run only against the managed engine; ~20 unistr* tests + unistr-quote* tests are candidates. Not present in the current expected-failures file, meaning either these tests are excluded from the managed corpus run or silently failing outside the tracked gap list -- verify wiring when addressing.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. unistr() implements Turso's four escape forms (bare hexadecimal, \\u, \\+, and \\U), literal backslash escaping, and UTF-8-safe rejection of surrogate/out-of-range code points. unistr_quote() emits Turso's executable unistr('...') literal for control-containing text, preserves ordinary quote() output otherwise, and truncates at embedded NUL. Both are registered for persisted-schema recovery. TursoUnistrParityTests covers valid escapes, invalid diagnostics, quoting, NUL behavior, and reopening a view. The 33 related scalar-functions.sqltest cases remain unavailable because that mixed-configuration file is explicitly unsupported by the one-database-per-file managed harness.",
+      "status": "closed"
     },
     {
       "id": "func-soundex-missing",

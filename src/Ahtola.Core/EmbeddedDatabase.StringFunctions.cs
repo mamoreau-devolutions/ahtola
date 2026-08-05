@@ -183,6 +183,136 @@ public sealed partial class EmbeddedDatabase
             _ => null,
         };
 
+    private static SqlValue EvaluateUnistr(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("unistr", arguments, 1);
+        if (arguments[0].Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+
+        var source = ToSqlText(arguments[0]);
+        var builder = new StringBuilder(source.Length);
+        for (var index = 0; index < source.Length;)
+        {
+            if (source[index] != '\\')
+            {
+                builder.Append(source[index++]);
+                continue;
+            }
+
+            if (index + 1 >= source.Length)
+                throw new EmbeddedSqlException("invalid Unicode escape");
+
+            var escape = source[index + 1];
+            if (escape == '\\')
+            {
+                builder.Append('\\');
+                index += 2;
+                continue;
+            }
+
+            var digits = escape switch
+            {
+                '+' => 6,
+                'u' => 4,
+                'U' => 8,
+                _ when IsAsciiHexDigit(escape) => 4,
+                _ => 0,
+            };
+            if (digits == 0
+                || !TryParseUnicodeEscape(
+                    source.AsSpan(index + (escape is '+' or 'u' or 'U' ? 2 : 1)),
+                    digits,
+                    out var codePoint)
+                || !Rune.TryCreate(codePoint, out var rune))
+            {
+                throw new EmbeddedSqlException("invalid Unicode escape");
+            }
+
+            builder.Append(rune.ToString());
+            index += 1 + (escape is '+' or 'u' or 'U' ? 1 : 0) + digits;
+        }
+
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static SqlValue EvaluateUnistrQuote(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("unistr_quote", arguments, 1);
+        if (arguments[0].Kind != SqlValueKind.Text)
+            return EvaluateQuote(arguments);
+
+        var source = arguments[0].AsText();
+        var terminator = source.IndexOf('\0');
+        var prefix = terminator >= 0 ? source[..terminator] : source;
+        if (!prefix.Any(character => character is >= '\x01' and <= '\x1F'))
+            return EvaluateQuote([SqlValue.Text(prefix)]);
+
+        var builder = new StringBuilder(prefix.Length + "unistr('')".Length);
+        builder.Append("unistr('");
+        foreach (var character in prefix)
+        {
+            switch (character)
+            {
+                case >= '\x01' and <= '\x1F':
+                    builder.Append("\\u00");
+                    builder.Append(((int)character).ToString("x2", CultureInfo.InvariantCulture));
+                    break;
+                case '\\':
+                    builder.Append("\\\\");
+                    break;
+                case '\'':
+                    builder.Append("''");
+                    break;
+                default:
+                    builder.Append(character);
+                    break;
+            }
+        }
+
+        builder.Append("')");
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static bool TryParseUnicodeEscape(ReadOnlySpan<char> source, int length, out int codePoint)
+    {
+        if (source.Length < length)
+        {
+            codePoint = 0;
+            return false;
+        }
+
+        uint result = 0;
+        for (var index = 0; index < length; index++)
+        {
+            var digit = source[index] switch
+            {
+                >= '0' and <= '9' => source[index] - '0',
+                >= 'a' and <= 'f' => source[index] - 'a' + 10,
+                >= 'A' and <= 'F' => source[index] - 'A' + 10,
+                _ => -1,
+            };
+            if (digit < 0)
+            {
+                codePoint = 0;
+                return false;
+            }
+
+            result = (result << 4) | (uint)digit;
+        }
+
+        if (result > 0x10FFFF)
+        {
+            codePoint = 0;
+            return false;
+        }
+
+        codePoint = (int)result;
+        return true;
+    }
+
+    private static bool IsAsciiHexDigit(char character)
+        => character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
+
     private static SqlValue EvaluateRepeat(IReadOnlyList<SqlValue> arguments)
     {
         RequireArgumentCount("repeat", arguments, 2);
