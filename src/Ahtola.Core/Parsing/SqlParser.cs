@@ -3484,7 +3484,13 @@ internal sealed class SqlParser
             }
             if (ConsumeKeyword("REFERENCES"))
             {
-                foreignKeys.Add(ParseForeignKeyReference([name], pendingConstraintName));
+                var columnForeignKey = ParseForeignKeyReference([name], pendingConstraintName);
+                if (columnForeignKey.ParentColumns.Count > 1)
+                {
+                    throw Error(
+                        $"foreign key on {name} should reference only one column of table {columnForeignKey.ParentTable}");
+                }
+                foreignKeys.Add(columnForeignKey);
                 pendingConstraintName = null;
                 continue;
             }

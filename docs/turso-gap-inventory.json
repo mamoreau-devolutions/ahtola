@@ -14,14 +14,14 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 201,
+    "current_conformance_expected_failures": 200,
     "last_reconciled": "2026-08-07",
-    "entry_count": 194,
+    "entry_count": 195,
     "counts": {
       "by_layer": {
         "vdbe": 36,
         "compilation": 54,
-        "parser": 26,
+        "parser": 27,
         "functions": 26,
         "storage": 20,
         "mvcc": 14,
@@ -43,11 +43,11 @@
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 84
+        "S": 85
       },
       "by_status": {
         "open": 141,
-        "closed": 53
+        "closed": 54
       }
     },
     "schema": {
@@ -149,7 +149,6 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
-        "foreign_keys.sqltest::fk-column-constraint-multi-parent",
         "foreign_keys.sqltest::fk-self-ipk-text-child-coerces-rowid-ok",
         "foreign_keys.sqltest::fk-deferred-update-self-ref-rowid-affinity-one-stmt",
         "foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates",
@@ -157,7 +156,7 @@
         "gencol.sqltest::fk-gencol-unique-idx-update-cascade",
         "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
       ],
-      "notes": "FK enforcement exists but lives in the write-target delegates, not opcodes. defer_foreign_keys and immediate checking work for common shapes; the divergence is structural. Edge coverage (FK actions through compiled DML, cross-database checks) tracked in compilation entries.",
+      "notes": "FK enforcement exists but lives in the write-target delegates, not opcodes. defer_foreign_keys and immediate checking work for common shapes; the divergence is structural. Edge coverage (FK actions through compiled DML, cross-database checks) tracked in compilation entries. Note: fk-column-constraint-multi-parent was detached from this entry 2026-08-07 — it is a parse-time column-level FK arity check, not runtime FK enforcement; see parser-fk-column-level-multi-parent-rejection (closed).",
       "status": "open"
     },
     {
@@ -2876,6 +2875,20 @@
       "effort": "S",
       "conformance_links": [],
       "notes": "Closed 2026-08-07. A schema-qualified column reference whose database is neither main nor temp nor attached (e.g. unknown.test.col) previously fell through SourceRow.TryGetValue (which returns false for an unknown schema) to a generic no such column: {name} that dropped the schema. Turso resolves the database first and emits no such database: {name} for an unknown database, a distinct error. Added SourceRow.CreateUnresolvedColumnException and routed the two EvaluateColumn reject sites and SourceRow.GetValue through it; known-schema missing columns still report the schema-qualified no such column (preserving the rename-column closure). Backed by ThreePartColumnReferenceTests.UnknownSchemaColumnReferenceDoesNotResolveAgainstMain (updated to assert the Turso diagnostic). No conformance key closed; the only conformance no such database case is vacuum_into (skipped, VACUUM not yet supported).",
+      "status": "closed"
+    },
+    {
+      "id": "parser-fk-column-level-multi-parent-rejection",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/schema.rs:4650-4656 (column-level ForeignKey constraint: if clause.columns.len() > 1, bail 'foreign key on {name} should reference only one column of table {tbl}')",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (ParseColumnDefinition REFERENCES branch: ParseForeignKeyReference then check ParentColumns.Count > 1)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "foreign_keys.sqltest::fk-column-constraint-multi-parent"
+      ],
+      "notes": "Closed 2026-08-07. A column-level REFERENCES clause (e.g. CREATE TABLE s(a REFERENCES t(a, c))) silently accepted multiple parent columns; only the table-level FOREIGN KEY form enforced parent/child arity. SQLite/Turso reject a column-level FK naming more than one parent column. ParseColumnDefinition now throws 'foreign key on {child} should reference only one column of table {parent}' when the parsed column-level FK references more than one parent column, matching Turso. Backed by ManagedDdlBoundaryTests.ManagedEngineRejectsColumnLevelForeignKeyWithMultipleParentColumns. The link was previously misattached to vdbe-fk-enforcement-opcodes (a runtime FK enforcement gap); detached because this is a parse-time arity check, not runtime enforcement. Conformance baseline 201 -> 200; full suite 3798/0/50.",
       "status": "closed"
     }
   ]

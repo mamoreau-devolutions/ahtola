@@ -49,6 +49,21 @@ public sealed class ManagedDdlBoundaryTests
         error.Message.Should().Contain("more than one primary key");
     }
 
+    // A column-level REFERENCES clause may name at most one parent column, matching
+    // SQLite/Turso (turso-src/core/schema.rs: column-level FK columns.len() > 1 bail).
+    [Test]
+    public void ManagedEngineRejectsColumnLevelForeignKeyWithMultipleParentColumns()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        Execute(connection, "CREATE TABLE t(a, c);");
+
+        var error = Assert.Throws<EmbeddedSqlException>(() =>
+            Execute(connection, "CREATE TABLE s(a REFERENCES t(a, c));"))!;
+        error.Message.Should().Contain("should reference only one column");
+    }
+
     private static void Execute(EmbeddedConnection connection, string sql)
     {
         using var statement = connection.Prepare(sql);
