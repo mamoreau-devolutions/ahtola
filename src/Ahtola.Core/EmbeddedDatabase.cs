@@ -9031,6 +9031,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         context = EnterCollationSource(
             context,
             new NamedTableSource(statement.TableName, statement.Alias));
+        ValidateStandaloneUpdateAssignmentColumns(statement, context);
         if (CanRouteUpdateThroughCompiler(statement, context)
             && TryCompileUpdate(statement, parameters, context, out var compiled, out var columns, out var hasReturning))
             return RunCompiledDml(compiled, columns, hasReturning, parameters);
@@ -9515,6 +9516,37 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ColumnAssignments = columnAssignments,
             RowidAssignment = rowidAssignment,
         };
+    }
+
+    // Binding happens before row scanning, so an unknown RHS identifier must fail even when
+    // no target rows match. UPDATE ... FROM and trigger rows have additional scopes and retain
+    // their existing per-row binding path.
+    private void ValidateStandaloneUpdateAssignmentColumns(
+        UpdateStatement statement,
+        QueryContext context)
+    {
+        if (statement.From is not null
+            || context.TriggerRow is not null
+            || !context.Tables.TryGetValue(statement.TableName, out var table))
+        {
+            return;
+        }
+
+        var probe = CreateDmlTargetRow(
+            table,
+            statement.TargetQualifier,
+            new SqlValue[table.Columns.Length],
+            rowid: 0);
+        foreach (var assignment in statement.Assignments)
+        {
+            RewriteColumnReferences(assignment.Value, column =>
+            {
+                if (TryResolveColumnLocally(probe, column) || column.BooleanKeyword is not null)
+                    return null;
+
+                throw SourceRow.CreateUnresolvedColumnException(column);
+            });
+        }
     }
 
     private static void ValidateAssignmentArity(ColumnAssignment assignment, QueryContext context)
