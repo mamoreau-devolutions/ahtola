@@ -78,6 +78,17 @@ public class CompoundSelectSqlRoutingTests
     }
 
     [Test]
+    public void UnionDistinctUsesTheFinalTermRepresentativeForCollatedDuplicates()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE words(value TEXT COLLATE NOCASE);");
+        Execute(connection, "INSERT INTO words VALUES ('first');");
+
+        Column0(ReadRows(connection, "SELECT value FROM words UNION SELECT 'FIRST' COLLATE BINARY;"))
+            .Should().Equal(SqlValue.Text("FIRST"));
+    }
+
+    [Test]
     public void ChainedUnionAllFlattensEveryTermInOrder()
     {
         using var connection = new EmbeddedDatabase().Connect();

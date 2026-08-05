@@ -1521,14 +1521,15 @@ public sealed record DistinctGateInstruction(
 /// <summary>
 /// Records the tuple held in the register block <paramref name="Values"/> into row set
 /// <paramref name="RowSetIndex"/> for later membership tests, without ever producing a result row.
-/// The set holds one representative per distinct tuple: an equal tuple already recorded through
-/// <paramref name="Equality"/> is not stored again. It is the compound set-operation primitive that
-/// materializes a non-primary term (the right-hand operand of <c>INTERSECT</c>/<c>EXCEPT</c>) into a
-/// probe set that a following <see cref="CompoundResultRowInstruction"/> tests the primary term's rows
-/// against. It reuses the same row-set resource pool as <see cref="DistinctResultRowInstruction"/>
-/// (<see cref="VdbeProgram.DistinctSetCount"/>), so <c>Reset</c>/<c>Dispose</c> clear it identically.
-/// The compiler supplies the equality delegate so membership matches the evaluator's row-equality
-/// contract (NULL==NULL together with affinity- and collation-aware comparison) exactly.
+/// The set holds one representative per distinct tuple, replacing an equal tuple through
+/// <paramref name="Equality"/> with the later row, matching a SQLite/Turso temporary B-tree insert.
+/// It is the compound set-operation primitive that materializes a non-primary term (the right-hand
+/// operand of <c>INTERSECT</c>/<c>EXCEPT</c>) into a probe set that a following
+/// <see cref="CompoundResultRowInstruction"/> tests the primary term's rows against. It reuses the same
+/// row-set resource pool as <see cref="DistinctResultRowInstruction"/> (<see cref="VdbeProgram.DistinctSetCount"/>),
+/// so <c>Reset</c>/<c>Dispose</c> clear it identically. The compiler supplies the equality delegate so
+/// membership matches the evaluator's row-equality contract (NULL==NULL together with affinity- and
+/// collation-aware comparison) exactly.
 /// </summary>
 public sealed record RowSetInsertInstruction(
     RegisterRange Values,

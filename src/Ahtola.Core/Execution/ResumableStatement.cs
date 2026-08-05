@@ -825,22 +825,24 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case RowSetInsertInstruction rowSetInsert:
                     {
-                        // Record the candidate into its probe set for later membership tests, keeping one
-                        // representative per distinct tuple. Never produces a row: control just advances.
+                        // A temporary B-tree overwrites an equal key with the later record, so retain the
+                        // latest representative while preserving one row per distinct tuple.
                         var candidate = ReadRegisters(rowSetInsert.Values);
                         var set = _distinctSets[rowSetInsert.RowSetIndex] ??= [];
-                        var present = false;
-                        foreach (var stored in set)
+                        var existingIndex = -1;
+                        for (var index = 0; index < set.Count; index++)
                         {
-                            if (rowSetInsert.Equality(stored, candidate))
+                            if (rowSetInsert.Equality(set[index], candidate))
                             {
-                                present = true;
+                                existingIndex = index;
                                 break;
                             }
                         }
 
-                        if (!present)
+                        if (existingIndex < 0)
                             set.Add(candidate);
+                        else
+                            set[existingIndex] = candidate;
 
                         AdvanceInstructionPointer();
                         break;

@@ -14,13 +14,13 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 131,
+    "current_conformance_expected_failures": 126,
     "last_reconciled": "2026-08-08",
-    "entry_count": 207,
+    "entry_count": 208,
     "counts": {
       "by_layer": {
         "vdbe": 37,
-        "compilation": 63,
+        "compilation": 64,
         "parser": 29,
         "functions": 26,
         "storage": 20,
@@ -32,22 +32,22 @@
         "divergent": 69,
         "partial": 27,
         "extension": 8,
-        "parity": 8
+        "parity": 9
       },
       "by_severity": {
         "s3-perf": 34,
         "s2-capability": 104,
         "s4-intentional": 33,
-        "s1-correctness": 36
+        "s1-correctness": 37
       },
       "by_effort": {
         "M": 75,
         "L": 37,
-        "S": 95
+        "S": 96
       },
       "by_status": {
         "open": 112,
-        "closed": 95
+        "closed": 96
       }
     },
     "schema": {
@@ -1016,6 +1016,24 @@
         "subquery/memory.sqltest::subquery-correlated-outer-ref-in-nested-group-by-subquery"
       ],
       "notes": "Closed 2026-08-08. GROUP BY schema validation now bounds a group expression's correlation chain at the grouped SELECT source while preserving local references from nested scalar subqueries. This rejects a direct outer reference and a reference that skips an intervening query block, including function-wrapped and rowid-alias forms, with the SQLite/Turso no-such-column diagnostic.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-compound-set-representative-value",
+      "layer": "compilation",
+      "kind": "parity",
+      "turso_ref": "turso-src/core/translate/compound_select.rs::emit_compound_select (UNION arms insert into one ephemeral B-tree in source order)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ApplyUnion/AddDistinctRows and src/Ahtola.Core/Execution/ResumableStatement.cs::StepResumable(RowSetInsertInstruction)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "select/memory.sqltest::collate-compound-1",
+        "select/memory.sqltest::collate-compound-5",
+        "select/memory.sqltest::collate-compound-7",
+        "select/memory.sqltest::collate-compound-13",
+        "select/memory.sqltest::collate-compound-14"
+      ],
+      "notes": "Closed 2026-08-08. Ahtola now replaces a prior representative when a later UNION arm inserts a value equal under the compound collation, mirroring Turso's shared temporary B-tree. The same replacement rule applies to VDBE row-set captures, so compiled and evaluator set operations retain the later arm's observable text value.",
       "status": "closed"
     },
     {

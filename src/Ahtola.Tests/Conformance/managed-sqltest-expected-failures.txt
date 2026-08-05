@@ -73,11 +73,6 @@ rollback.sqltest::schema-change-rollback-2-2 | expected 2 row(s), got 2 row(s); 
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery | expected success but got error: managed execution exceeded 30 seconds
-select/memory.sqltest::collate-compound-1 | expected 1 row(s), got 1 row(s); row 0 expected 'ABC' but was 'abc'
-select/memory.sqltest::collate-compound-5 | expected 1 row(s), got 1 row(s); row 0 expected 'ABC' but was 'abc'
-select/memory.sqltest::collate-compound-7 | expected 2 row(s), got 2 row(s); row 0 expected 'A' but was 'a'
-select/memory.sqltest::collate-compound-13 | expected 1 row(s), got 1 row(s); row 0 expected 'TEST' but was 'Test'
-select/memory.sqltest::collate-compound-14 | expected 2 row(s), got 2 row(s); row 0 expected 'ABC' but was 'abc'
 snapshot_tests/analyze/stat1_rows.sqltest::analyze-indexed-table-does-not-insert-null-stat1-row | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 temp_tables.sqltest::temp-table-join-can-distinguish-main-and-temp | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 temp_tables_mvcc.sqltest::pragma-temp-journal-mode-mvcc-is-ignored | expected 2 row(s), got 2 row(s); row 0 expected 'wal' but was 'memory'

@@ -22112,8 +22112,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         foreach (var row in source)
         {
-            if (!destination.Any(candidate => RowsEqual(candidate, row, collations)))
+            var existingIndex = destination.FindIndex(candidate => RowsEqual(candidate, row, collations));
+            if (existingIndex < 0)
                 destination.Add(row.ToArray());
+            else
+                destination[existingIndex] = row.ToArray();
         }
     }
 
