@@ -6325,7 +6325,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         void InsertValues(IReadOnlyList<SqlValue> values)
         {
             if (values.Count != targetIndices.Length)
-                throw new EmbeddedSqlException("table has a different number of columns");
+                throw new EmbeddedSqlException(
+                    $"table {statement.TableName} has {targetIndices.Length} columns but {values.Count} values were supplied");
 
             var row = Enumerable.Repeat(SqlValue.Null, columns.Length).ToArray();
             for (var index = 0; index < values.Count; index++)
@@ -8406,7 +8407,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         bool deferRowidTracking = false)
     {
         if (values.Count != plan.TargetIndices.Length)
-            throw new EmbeddedSqlException("table has a different number of columns");
+            throw new EmbeddedSqlException(
+                $"table {table.Name} has {plan.TargetIndices.Length} columns but {values.Count} values were supplied");
 
         var assignedTargetIndices = new HashSet<int>();
         foreach (var targetIndex in plan.TargetIndices)

@@ -1720,7 +1720,8 @@ public sealed partial class EmbeddedDatabase
         foreach (var input in inputs)
         {
             if (input.Count != targetIndices.Length)
-                throw new EmbeddedSqlException("table has a different number of columns");
+                throw new EmbeddedSqlException(
+                    $"table {statement.TableName} has {targetIndices.Length} columns but {input.Count} values were supplied");
             var values = Enumerable.Repeat(SqlValue.Null, columns.Length).ToArray();
             var assignedColumns = new HashSet<int>();
             for (var index = 0; index < input.Count; index++)

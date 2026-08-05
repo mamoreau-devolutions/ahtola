@@ -14,13 +14,13 @@
       "commit_at_analysis": "c99157b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 216,
+    "current_conformance_expected_failures": 210,
     "last_reconciled": "2026-08-04",
-    "entry_count": 189,
+    "entry_count": 190,
     "counts": {
       "by_layer": {
         "vdbe": 36,
-        "compilation": 51,
+        "compilation": 52,
         "parser": 24,
         "functions": 26,
         "storage": 20,
@@ -29,25 +29,25 @@
       },
       "by_kind": {
         "missing": 99,
-        "divergent": 53,
+        "divergent": 54,
         "partial": 27,
         "extension": 8,
         "parity": 2
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 98,
+        "s2-capability": 99,
         "s4-intentional": 33,
         "s1-correctness": 24
       },
       "by_effort": {
         "M": 73,
         "L": 37,
-        "S": 79
+        "S": 80
       },
       "by_status": {
         "open": 141,
-        "closed": 48
+        "closed": 49
       }
     },
     "schema": {
@@ -1504,7 +1504,7 @@
         "trigger.sqltest::trigger-raise-shorthand",
         "default_value.sqltest::default-value-column-name"
       ],
-      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint. Cleared 2026-08-06 by Wave F2.10 Batch 4 / compile-select-prepare-time-column-resolution: ambiguous-self-join and ambiguous-column-error-message-format. Cleared 2026-08-07 by Wave F2.10 Batch 5 / compile-view-create-validation-deferred-to-query-time: view-mutual-circle-detection; view-rejects-aggregate-order-by reclassified to compile-ordered-aggregates-intentional-extension.)",
+      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint. Cleared 2026-08-06 by Wave F2.10 Batch 4 / compile-select-prepare-time-column-resolution: ambiguous-self-join and ambiguous-column-error-message-format. Cleared 2026-08-07 by Wave F2.10 Batch 5 / compile-view-create-validation-deferred-to-query-time: view-mutual-circle-detection; view-rejects-aggregate-order-by reclassified to compile-ordered-aggregates-intentional-extension. Cleared 2026-08-04: NATURAL-join wording aligned to SQLite/Turso 'a NATURAL join may not have an ON or USING clause' in SqlParser.cs, removing join-3-1 and join-3-2. Remaining open links: trigger-raise-shorthand, default-value-column-name.)",
       "status": "open"
     },
     {
@@ -1721,6 +1721,23 @@
         "window/filter-over.sqltest::filter-over-scalar-function-rejected"
       ],
       "notes": "Turso rejects a scalar function used with an OVER clause with the diagnostic \"<name> may not be used as a window function\" (planner.rs:335/387). Ahtola's ValidateWindowFunction emitted \"<name> is not a supported window function\", which did not match the conformance corpus pattern. Fixed 2026-08-04: aligned the error message with Turso's wording so the filter-over-scalar-function-rejected case matches. The tracked case removed from the expected-failure baseline.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-insert-column-count-diagnostic",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/insert.rs + SQLite expr.c \"table %s has %d columns but %d values were supplied\"",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::InsertValues, BuildInsertRow; src/Ahtola.Core/EmbeddedDatabase.Triggers.cs::ExecuteInsertStatement (trigger row insertion)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "insert.sqltest::insert-1-3",
+        "insert.sqltest::insert-1-3b",
+        "insert.sqltest::insert-column-count-mismatch-values",
+        "insert.sqltest::insert-column-count-mismatch-select"
+      ],
+      "notes": "Ahtola emitted a generic \"table has a different number of columns\" for INSERT VALUES/SELECT and trigger-row insertion when the supplied value count did not match the target column count, which did not match the SQLite/Turso pattern \"table {name} has {N} columns but {M} values were supplied\". The conformance runner regex-matches error messages (unanchored, case-insensitive), so only the wording was wrong. Fixed 2026-08-04: all three insertion sites (InsertValues, BuildInsertRow for INSERT...SELECT, and the trigger-row insertion loop in EmbeddedDatabase.Triggers.cs) now emit the SQLite-compatible column-count message with the table name, target column count, and supplied value count. The four tracked insert cases removed from the expected-failure baseline.",
       "status": "closed"
     },
     {

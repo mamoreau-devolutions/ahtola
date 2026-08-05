@@ -2558,7 +2558,7 @@ internal sealed class SqlParser
             }
 
             if (natural && (condition is not null || usingColumns is not null))
-                throw Error("NATURAL joins may not have an ON or USING clause.");
+                throw Error("a NATURAL join may not have an ON or USING clause");
 
             source = new JoinTableSource(source, right, condition, kind, usingColumns, natural);
         }

@@ -2244,7 +2244,7 @@ public class EmbeddedEngineTests
 
         Assert.Throws<EmbeddedSqlException>(
             () => connection.Prepare("SELECT * FROM t1 NATURAL JOIN t2 ON t1.a = t2.a;"))!
-            .Message.Should().StartWith("NATURAL joins may not have an ON or USING clause.");
+            .Message.Should().StartWith("a NATURAL join may not have an ON or USING clause");
     }
 
     [Test]
