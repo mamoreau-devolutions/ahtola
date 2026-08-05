@@ -81,8 +81,6 @@ partial_idx.sqltest::plan-partial-index-range-predicate | expected 1 row(s), got
 partial_idx.sqltest::plan-partial-index-range-not-implied | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SCAN products' but was '0/0/0/MANAGED EVALUATOR FALLBACK'
 pragma/foreign_key_list.sqltest::pragma-foreign-key-list-attached-database | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 pragma/index_list.sqltest::pragma-index-list-attached-database | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-pragma/table_list.sqltest::pragma-table-list-includes-temp-schema | expected 1 row(s), got 0 row(s)
-pragma/table_list.sqltest::pragma-table-list-unqualified-includes-main-and-temp-matches | expected 2 row(s), got 1 row(s)
 pragma/table_list.sqltest::pragma-table-list-attached-database | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 reindex.sqltest::reindex-attached-qualified-targets | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 returning.sqltest::update-returning-target-selfread-reruns-per-row | expected 2 row(s), got 2 row(s); row 1 expected '2/2' but was '2/1'

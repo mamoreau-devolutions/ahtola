@@ -301,6 +301,25 @@ public class TableValuedFunctionTests
             .Should().Equal(["main|child|table|2|0|0"]);
     }
 
+    [Test]
+    public void PragmaTableListUsesTheConnectionSchemaSet()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(value INTEGER);");
+        Execute(connection, "CREATE TEMP TABLE t(value TEXT);");
+
+        Rows(
+                connection,
+                "SELECT schema, name, type, ncol, wr, strict FROM pragma_table_list "
+                + "WHERE schema = 'temp';")
+            .Should().Equal(["temp|sqlite_temp_schema|table|5|0|0", "temp|t|table|1|0|0"]);
+        Rows(
+                connection,
+                "SELECT schema, name, type, ncol, wr, strict FROM pragma_table_list('t') ORDER BY schema;")
+            .Should().Equal(["main|t|table|1|0|0", "temp|t|table|1|0|0"]);
+    }
+
     /// <summary>
     /// A real table always wins over a module registration, so registering a module can
     /// never shadow user data.

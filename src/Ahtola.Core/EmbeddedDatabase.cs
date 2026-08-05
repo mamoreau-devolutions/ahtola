@@ -537,7 +537,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         TempTriggerBridge? TempTriggers = null,
         ManagedStatementHooks? Hooks = null,
         OuterAggregateScope? OuterAggregateScope = null,
-        bool IgnoreCheckConstraints = false)
+        bool IgnoreCheckConstraints = false,
+        Func<string?, string?, ExecutionResult>? ExecuteTableList = null)
     {
         /// <summary>
         /// Row-loop checkpoint. It honors cooperative cancellation exactly as before and
@@ -1004,7 +1005,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         bool compilationEnabled = true,
         TempTriggerBridge? tempTriggers = null,
         ManagedStatementHooks? hooks = null,
-        bool ignoreCheckConstraints = false)
+        bool ignoreCheckConstraints = false,
+        Func<string?, string?, ExecutionResult>? executeTableList = null)
     {
         var result = ExecuteCore(
             statement,
@@ -1018,7 +1020,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             compilationEnabled,
             tempTriggers,
             hooks,
-            ignoreCheckConstraints);
+            ignoreCheckConstraints,
+            executeTableList);
 
         RecordChangeCounters(statement, result);
         return result;
@@ -1049,7 +1052,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         bool compilationEnabled = true,
         TempTriggerBridge? tempTriggers = null,
         ManagedStatementHooks? hooks = null,
-        bool ignoreCheckConstraints = false)
+        bool ignoreCheckConstraints = false,
+        Func<string?, string?, ExecutionResult>? executeTableList = null)
     {
         ThrowIfRecursiveTriggerCallbackReentry();
         if (RequiresRecursiveTriggerStack(
@@ -1069,7 +1073,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 compilationEnabled,
                 tempTriggers,
                 hooks,
-                ignoreCheckConstraints));
+                ignoreCheckConstraints,
+                executeTableList));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -1113,7 +1118,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                                 compilationEnabled,
                                 tempTriggers,
                                 hooks,
-                                ignoreCheckConstraints);
+                                ignoreCheckConstraints,
+                                executeTableList);
                         }
                         catch (EmbeddedConflictFailException)
                         {
@@ -1179,7 +1185,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                                 compilationEnabled,
                                 tempTriggers,
                                 hooks,
-                                ignoreCheckConstraints);
+                                ignoreCheckConstraints,
+                                executeTableList);
                         }
                         catch (EmbeddedConflictFailException)
                         {
@@ -1217,7 +1224,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                             compilationEnabled,
                             tempTriggers,
                             hooks,
-                            ignoreCheckConstraints);
+                            ignoreCheckConstraints,
+                            executeTableList);
 
                     var working = new SchemaCatalog(_tables, _views, _triggers).Clone();
                     ExecutionResult result;
@@ -1236,7 +1244,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                             compilationEnabled,
                             tempTriggers,
                             hooks,
-                            ignoreCheckConstraints);
+                            ignoreCheckConstraints,
+                            executeTableList);
                     }
                     catch (EmbeddedConflictFailException)
                     {
@@ -2672,7 +2681,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         bool compilationEnabled = true,
         TempTriggerBridge? tempTriggers = null,
         ManagedStatementHooks? hooks = null,
-        bool ignoreCheckConstraints = false)
+        bool ignoreCheckConstraints = false,
+        Func<string?, string?, ExecutionResult>? executeTableList = null)
     {
         ThrowIfRecursiveTriggerCallbackReentry();
         if (RequiresRecursiveTriggerStack(
@@ -2693,7 +2703,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 compilationEnabled,
                 tempTriggers,
                 hooks,
-                ignoreCheckConstraints));
+                ignoreCheckConstraints,
+                executeTableList));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -2717,7 +2728,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             CompilationEnabled: compilationEnabled,
             TempTriggers: tempTriggers,
             Hooks: hooks,
-            IgnoreCheckConstraints: ignoreCheckConstraints);
+            IgnoreCheckConstraints: ignoreCheckConstraints,
+            ExecuteTableList: executeTableList);
         return statement switch
         {
             CreateTableStatement create => ExecuteCreateTable(create, catalog, cancellationToken),
@@ -36472,7 +36484,7 @@ public sealed class EmbeddedConnection : IDisposable
                 ValidatePragmaSchema(databaseList.Schema);
                 return ExecutePragmaDatabaseList();
             case PragmaTableListStatement { Schema: null } tableList:
-                return ExecutePragmaTableList(tableList.Filter);
+                return ExecutePragmaTableList(schema: null, tableList.Filter);
             case PragmaEncodingStatement encoding:
                 return ExecutePragmaEncoding(encoding);
             case PragmaPageCountStatement pageCount:
@@ -36566,7 +36578,8 @@ public sealed class EmbeddedConnection : IDisposable
                                         && !ReferenceEquals(routed.Database, _tempDatabase),
                                     tempTriggers,
                                     CreateStatementHooks(routed.Database, includeCommitGate: true),
-                                    ignoreCheckConstraints: _ignoreCheckConstraints);
+                                    ignoreCheckConstraints: _ignoreCheckConstraints,
+                                    executeTableList: ExecutePragmaTableList);
                             }
                             catch (Exception failure)
                                 when (failure is not EmbeddedConflictFailException
@@ -36599,7 +36612,8 @@ public sealed class EmbeddedConnection : IDisposable
                                     && !ReferenceEquals(routed.Database, _tempDatabase),
                                 tempTriggers,
                                 CreateStatementHooks(routed.Database, includeCommitGate: false),
-                                ignoreCheckConstraints: _ignoreCheckConstraints);
+                                ignoreCheckConstraints: _ignoreCheckConstraints,
+                                executeTableList: ExecutePragmaTableList);
                             if (EmbeddedDatabase.MayMutate(routed.Statement))
                                 cancellationToken.ThrowIfCancellationRequested();
                             // The catalog overload used for transactional statements does not
@@ -36981,9 +36995,18 @@ public sealed class EmbeddedConnection : IDisposable
         return new ExecutionResult(["freelist_count"], [[SqlValue.Integer(database.GetFreelistCount())]], 0);
     }
 
-    private ExecutionResult ExecutePragmaTableList(string? filter)
+    private ExecutionResult ExecutePragmaTableList(string? schema, string? filter)
     {
         var rows = new List<SqlValue[]>();
+        if (schema is not null)
+        {
+            AddPragmaTableListRows(rows, ResolveSchemaDatabase(schema), schema, filter);
+            return new ExecutionResult(
+                ["schema", "name", "type", "ncol", "wr", "strict"],
+                rows,
+                0);
+        }
+
         AddPragmaTableListRows(rows, _database, "main", filter);
         AddPragmaTableListRows(rows, _tempDatabase, "temp", filter);
         foreach (var pair in _attachedDatabases.OrderBy(pair => pair.Value.Sequence))
