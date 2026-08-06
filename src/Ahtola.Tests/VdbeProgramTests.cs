@@ -18,6 +18,9 @@ public class VdbeProgramTests
         ((int)VdbeOpcode.Cast).Should().Be(68);
         ((int)VdbeOpcode.RowSetTest).Should().Be(74);
         ((int)VdbeOpcode.Program).Should().Be(75);
+        ((int)VdbeOpcode.NotExists).Should().Be(76);
+        ((int)VdbeOpcode.Found).Should().Be(77);
+        ((int)VdbeOpcode.HaltIfNull).Should().Be(78);
 
         typeof(VdbeProgram).GetConstructor(
             [

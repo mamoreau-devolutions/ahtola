@@ -455,5 +455,13 @@ public sealed class ManagedIncrementalPagerTests
             _pages.Add(new byte[PageSize]);
             return (uint)_pages.Count;
         }
+
+        public void FreePage(uint pageNumber)
+        {
+            // Counting fixture only exercises growth; free leaves a zeroed hole.
+            if (pageNumber < 2 || pageNumber > PageCount)
+                throw new ArgumentOutOfRangeException(nameof(pageNumber));
+            _pages[checked((int)pageNumber) - 1] = new byte[PageSize];
+        }
     }
 }

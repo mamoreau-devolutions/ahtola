@@ -241,6 +241,8 @@ public sealed class AhtolaBatch : DbBatch
                 throw new InvalidOperationException("Batch command text must be set before executing a batch.");
             if (command.CommandType != CommandType.Text)
                 throw new NotSupportedException("AhtolaBatchCommand only supports CommandType.Text.");
+            if (command.RemoteCondition is not null && !connection.IsRemote)
+                throw new NotSupportedException("RemoteCondition requires a remote Ahtola connection.");
             connection.ValidateCommandCapabilities(command.CommandText);
         }
 

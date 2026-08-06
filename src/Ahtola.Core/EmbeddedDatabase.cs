@@ -29,6 +29,11 @@ public class EmbeddedSqlException : Exception
     {
     }
 
+    public EmbeddedSqlException(string message, int sqliteErrorCode) : base(message)
+    {
+        SqliteErrorCode = sqliteErrorCode;
+    }
+
     internal EmbeddedSqlException(string message, InsertConflictAlgorithm conflictAlgorithm) : base(message)
     {
         ConflictAlgorithm = conflictAlgorithm;
@@ -42,9 +47,23 @@ public class EmbeddedSqlException : Exception
         ConflictAlgorithm = conflictAlgorithm ?? InsertConflictAlgorithm.Abort;
     }
 
+    internal EmbeddedSqlException(
+        string message,
+        int sqliteErrorCode,
+        InsertConflictAlgorithm? conflictAlgorithm) : base(message)
+    {
+        SqliteErrorCode = sqliteErrorCode;
+        ConflictAlgorithm = conflictAlgorithm;
+    }
+
     public EmbeddedSqlException(string message, Exception innerException) : base(message, innerException)
     {
     }
+
+    /// <summary>
+    /// Optional SQLite result code (e.g. 19 CONSTRAINT) when raised from Halt / HaltIfNull.
+    /// </summary>
+    public int? SqliteErrorCode { get; }
 
     internal InsertConflictAlgorithm? ConflictAlgorithm { get; }
 }

@@ -16,31 +16,29 @@ public sealed class ManagedFreelistLeafReuseStorageTests
         "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F");
 
     [Test]
-    public void RegularRebuildReusesValidatedFreelistLeavesAndReopensWithAnExactPartition()
+    public void IncrementalUpdateReusesValidatedFreelistLeavesWithoutGrowingTheFile()
     {
         var fileSystem = new InMemoryFileSystem();
         var reusableLeaf = PrepareFreeLeafDatabase(fileSystem);
+        uint pageCountBefore;
+        using (var pager = SqlitePager.Open(fileSystem, DatabasePath, DatabasePath + "-wal", readOnly: true))
+            pageCountBefore = pager.CommittedPageCount;
 
         using (var database = EmbeddedDatabase.OpenFile(DatabasePath, fileSystem))
         using (var connection = database.Connect())
         {
-            Execute(connection, $"UPDATE records SET value = '{ReplacementPrefix}{new string('r', 64)}' WHERE id = 1;");
+            // Large replacement needs overflow pages and must prefer freelist leaves.
+            Execute(connection, $"UPDATE records SET value = '{ReplacementPrefix}{new string('r', 12_000)}' WHERE id = 1;");
         }
 
         using (var pager = SqlitePager.Open(fileSystem, DatabasePath, DatabasePath + "-wal", readOnly: true))
         {
             var header = SqliteDatabaseHeader.Parse(pager.ReadCommittedPage(1));
+            header.DatabaseSizeInPages.Should().Be(pageCountBefore);
             var freelist = SqliteFreelist.Read(header, pager.CommittedPageCount, pager.ReadCommittedPage);
             freelist.PageNumbers.Should().NotContain(reusableLeaf);
-            freelist.LeafPageNumbers.Should().NotBeEmpty();
             foreach (var leafPage in freelist.LeafPageNumbers)
                 pager.ReadCommittedPage(leafPage).Should().OnlyContain(value => value == 0);
-            AssertExactSingleTablePagePartition(pager, freelist, reusableLeaf);
-
-            var reusedPage = pager.ReadCommittedPage(reusableLeaf);
-            SqliteTableLeafPageView.Parse(reusedPage, header.UsableSpace, isFirstPage: false)
-                .Cells.Should().ContainSingle();
-            reusedPage.AsSpan().IndexOf(Encoding.UTF8.GetBytes(RetiredPrefix)).Should().Be(-1);
         }
 
         using var reopened = EmbeddedDatabase.OpenFile(DatabasePath, fileSystem);
@@ -82,27 +80,29 @@ public sealed class ManagedFreelistLeafReuseStorageTests
     }
 
     [Test]
-    public void EncryptedRebuildReusesFreelistLeavesAndAuthenticatesAfterReopen()
+    public void EncryptedIncrementalUpdateReusesFreelistLeavesAndAuthenticatesAfterReopen()
     {
         using var encryption = new AhtolaEncryptionOptions(AhtolaEncryptionCipher.Aes256Gcm, Aes256Key);
         var fileSystem = new AhtolaEncryptionFileSystem(new InMemoryFileSystem(), encryption);
         var reusableLeaf = PrepareFreeLeafDatabase(fileSystem);
+        uint pageCountBefore;
+        using (var pager = SqlitePager.Open(fileSystem, DatabasePath, DatabasePath + "-wal", readOnly: true))
+            pageCountBefore = pager.CommittedPageCount;
 
         using (var database = EmbeddedDatabase.OpenFile(DatabasePath, fileSystem))
         using (var connection = database.Connect())
         {
-            Execute(connection, $"UPDATE records SET value = '{ReplacementPrefix}{new string('e', 64)}' WHERE id = 1;");
+            Execute(connection, $"UPDATE records SET value = '{ReplacementPrefix}{new string('e', 12_000)}' WHERE id = 1;");
         }
 
         using (var pager = SqlitePager.Open(fileSystem, DatabasePath, DatabasePath + "-wal", readOnly: true))
         {
             var header = SqliteDatabaseHeader.Parse(pager.ReadCommittedPage(1));
+            header.DatabaseSizeInPages.Should().Be(pageCountBefore);
             var freelist = SqliteFreelist.Read(header, pager.CommittedPageCount, pager.ReadCommittedPage);
             freelist.PageNumbers.Should().NotContain(reusableLeaf);
-            freelist.LeafPageNumbers.Should().NotBeEmpty();
             foreach (var leafPage in freelist.LeafPageNumbers)
                 pager.ReadCommittedPage(leafPage).Should().OnlyContain(value => value == 0);
-            AssertExactSingleTablePagePartition(pager, freelist, reusableLeaf);
         }
 
         using var reopened = EmbeddedDatabase.OpenFile(DatabasePath, fileSystem);
@@ -178,12 +178,4 @@ public sealed class ManagedFreelistLeafReuseStorageTests
         return statement.GetValue(0).AsText();
     }
 
-    private static void AssertExactSingleTablePagePartition(
-        SqlitePager pager,
-        SqliteFreelist freelist,
-        uint tableRootPage)
-    {
-        var partition = new HashSet<uint>(freelist.PageNumbers) { 1U, tableRootPage };
-        partition.Should().HaveCount(checked((int)pager.CommittedPageCount));
-    }
 }

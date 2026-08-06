@@ -169,6 +169,18 @@ public static class VdbeExplain
                 seekRowid.RowIdRegister.Index,
                 null,
                 seekRowid.Description),
+            NotExistsInstruction notExists => (
+                notExists.Cursor.Index,
+                notExists.JumpTarget.Offset,
+                notExists.RowIdRegister.Index,
+                null,
+                notExists.Description),
+            FoundInstruction found => (
+                found.Cursor.Index,
+                found.FoundTarget.Offset,
+                found.RowIdRegister.Index,
+                null,
+                found.Description),
             SeekRowidRangeInstruction seekRowidRange => (
                 seekRowidRange.Cursor.Index,
                 seekRowidRange.NotFoundTarget.Offset,
@@ -294,16 +306,20 @@ public static class VdbeExplain
                 $"delete current row of cursor {delete.Cursor.Index}"),
             InsertInstruction insert => (
                 insert.Cursor.Index,
+                (long)insert.Flags,
                 0,
-                0,
-                null,
-                $"insert row into cursor {insert.Cursor.Index}"),
+                insert.Flags == VdbeInsertFlags.None ? null : insert.Flags.ToString(),
+                insert.Flags == VdbeInsertFlags.None
+                    ? $"insert row into cursor {insert.Cursor.Index}"
+                    : $"insert row into cursor {insert.Cursor.Index} flags={insert.Flags}"),
             UpdateInstruction update => (
                 update.Cursor.Index,
+                (long)update.Flags,
                 0,
-                0,
-                null,
-                $"update current row of cursor {update.Cursor.Index}"),
+                update.Flags == VdbeInsertFlags.None ? null : update.Flags.ToString(),
+                update.Flags == VdbeInsertFlags.None
+                    ? $"update current row of cursor {update.Cursor.Index}"
+                    : $"update current row of cursor {update.Cursor.Index} flags={update.Flags}"),
             ProgramInstruction program => (
                 program.ParameterRegisters.Count,
                 0,
@@ -461,7 +477,20 @@ public static class VdbeExplain
                 null,
                 $"close window buffer {closeWindowBuffer.Buffer.Index}"),
             YieldInstruction => (0, 0, 0, null, "yield"),
-            HaltInstruction => (0, 0, 0, null, "halt"),
+            HaltInstruction halt => (
+                halt.ErrorCode,
+                0,
+                halt.DescriptionRegister?.Index ?? 0,
+                halt.OnError?.ToString() ?? halt.Description,
+                halt.ErrorCode == 0
+                    ? "halt"
+                    : $"halt error {halt.ErrorCode}" + (halt.Description is null ? string.Empty : $": {halt.Description}")),
+            HaltIfNullInstruction haltIfNull => (
+                haltIfNull.ErrorCode,
+                0,
+                haltIfNull.Target.Index,
+                haltIfNull.Description,
+                $"halt if r[{haltIfNull.Target.Index}] is null"),
             _ => throw new VdbeProgramValidationException(
                 $"Cannot describe unsupported opcode {instruction.Opcode}."),
         };

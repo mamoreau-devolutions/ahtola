@@ -8,6 +8,8 @@ namespace Ahtola;
 
 internal sealed class AhtolaRemoteClient : IDisposable
 {
+    private const string EncryptionKeyHeaderName = "x-turso-encryption-key";
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -15,16 +17,26 @@ internal sealed class AhtolaRemoteClient : IDisposable
 
     private readonly HttpClient _httpClient;
     private readonly string? _authToken;
+    private readonly string? _remoteEncryptionKey;
     private readonly bool _disposeHttpClient;
     private Uri _pipelineUri;
     private string? _baton;
+    private ulong? _replicationIndex;
 
-    public AhtolaRemoteClient(Uri endpoint, string? authToken)
-        : this(new HttpClient(), endpoint, authToken, disposeHttpClient: true)
+    public AhtolaRemoteClient(
+        Uri endpoint,
+        string? authToken,
+        AhtolaRemoteEncryptionOptions? remoteEncryption = null)
+        : this(new HttpClient(), endpoint, authToken, remoteEncryption, disposeHttpClient: true)
     {
     }
 
-    internal AhtolaRemoteClient(HttpClient httpClient, Uri endpoint, string? authToken, bool disposeHttpClient = false)
+    internal AhtolaRemoteClient(
+        HttpClient httpClient,
+        Uri endpoint,
+        string? authToken,
+        AhtolaRemoteEncryptionOptions? remoteEncryption = null,
+        bool disposeHttpClient = false)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentNullException.ThrowIfNull(endpoint);
@@ -32,6 +44,7 @@ internal sealed class AhtolaRemoteClient : IDisposable
         _httpClient = httpClient;
         _pipelineUri = CreatePipelineUri(endpoint);
         _authToken = string.IsNullOrWhiteSpace(authToken) ? null : authToken;
+        _remoteEncryptionKey = remoteEncryption?.Base64Key;
         ValidateAuthTokenTransport(_pipelineUri, _authToken);
         _disposeHttpClient = disposeHttpClient;
     }
@@ -80,14 +93,24 @@ internal sealed class AhtolaRemoteClient : IDisposable
 
         var steps = new List<RemoteBatchStep>(commands.Count);
         foreach (var command in commands)
-            steps.Add(new RemoteBatchStep { Statement = BuildStatement(command.CommandText, command.Parameters, wantRows) });
+        {
+            steps.Add(new RemoteBatchStep
+            {
+                Condition = command.RemoteCondition is null ? null : BuildCondition(command.RemoteCondition),
+                Statement = BuildStatement(command.CommandText, command.Parameters, wantRows),
+            });
+        }
 
         var request = new RemotePipelineRequest
         {
             Baton = _baton,
             Requests =
             [
-                RemoteStreamRequest.Batch(new RemoteBatch { Steps = steps }),
+                RemoteStreamRequest.Batch(new RemoteBatch
+                {
+                    Steps = steps,
+                    ReplicationIndex = _replicationIndex?.ToString(CultureInfo.InvariantCulture),
+                }),
             ],
         };
 
@@ -139,6 +162,8 @@ internal sealed class AhtolaRemoteClient : IDisposable
 
         if (_authToken is not null)
             httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _authToken);
+        if (_remoteEncryptionKey is not null)
+            httpRequest.Headers.TryAddWithoutValidation(EncryptionKeyHeaderName, _remoteEncryptionKey);
 
         using var response = await _httpClient
             .SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, effectiveCancellationToken)
@@ -212,6 +237,24 @@ internal sealed class AhtolaRemoteClient : IDisposable
         return statement;
     }
 
+    private static RemoteBatchCondition BuildCondition(AhtolaRemoteBatchCondition condition)
+    {
+        var remote = new RemoteBatchCondition
+        {
+            Type = condition.Type,
+            Step = condition.Step,
+            Condition = condition.Operand is null ? null : BuildCondition(condition.Operand),
+        };
+        if (condition.Operands is not null)
+        {
+            remote.Conditions = new List<RemoteBatchCondition>(condition.Operands.Count);
+            foreach (var operand in condition.Operands)
+                remote.Conditions.Add(BuildCondition(operand));
+        }
+
+        return remote;
+    }
+
     private static RemoteStatementResult ExtractExecuteResult(RemotePipelineResponse response)
     {
         if (response.Results.Count == 0)
@@ -240,7 +283,7 @@ internal sealed class AhtolaRemoteClient : IDisposable
         return statementResult;
     }
 
-    private static IReadOnlyList<RemoteStatementResult> ExtractBatchResults(
+    private IReadOnlyList<RemoteStatementResult> ExtractBatchResults(
         RemotePipelineResponse response,
         int expectedCount,
         Action<int>? stepSucceeded)
@@ -259,6 +302,13 @@ internal sealed class AhtolaRemoteClient : IDisposable
                     throw new AhtolaException($"Remote batch returned unexpected response type: {result.Response.Type}");
 
                 var batch = result.Response.DeserializeResult<RemoteBatchResult>();
+                UpdateReplicationIndex(batch.ReplicationIndex);
+                foreach (var statementResult in batch.StepResults)
+                {
+                    if (statementResult is not null)
+                        UpdateReplicationIndex(statementResult.ReplicationIndex);
+                }
+
                 statementResults = ExtractBatchStepResults(batch, expectedCount, stepSucceeded);
                 break;
 
@@ -271,6 +321,25 @@ internal sealed class AhtolaRemoteClient : IDisposable
 
         ValidateOptionalTrailingClose(response, "Remote batch");
         return statementResults;
+    }
+
+    private void UpdateReplicationIndex(JsonElement encodedIndex)
+    {
+        if (encodedIndex.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+            return;
+
+        if (encodedIndex.ValueKind is not JsonValueKind.String
+            || !ulong.TryParse(
+                encodedIndex.GetString(),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var index))
+        {
+            throw new AhtolaException("Remote response returned an invalid replication_index.");
+        }
+
+        if (_replicationIndex is null || index > _replicationIndex.Value)
+            _replicationIndex = index;
     }
 
     private static void ValidateOptionalTrailingClose(RemotePipelineResponse response, string operation)
@@ -322,9 +391,9 @@ internal sealed class AhtolaRemoteClient : IDisposable
         var statementResults = new List<RemoteStatementResult>(expectedCount);
         for (var i = 0; i < batch.StepResults.Count; i++)
         {
-            var stepResult = batch.StepResults[i]
-                             ?? throw new AhtolaException($"Remote batch did not return a result for step {i}.");
-            statementResults.Add(stepResult);
+            // BatchCond-skipped steps return null in both step arrays. Keep a zero-row placeholder
+            // so results remain aligned with the caller's command indexes.
+            statementResults.Add(batch.StepResults[i] ?? RemoteStatementResult.Skipped());
         }
 
         return statementResults;
@@ -456,12 +525,33 @@ internal sealed class AhtolaRemoteClient : IDisposable
     {
         [JsonPropertyName("steps")]
         public List<RemoteBatchStep> Steps { get; init; } = [];
+
+        [JsonPropertyName("replication_index")]
+        public string? ReplicationIndex { get; init; }
     }
 
     private sealed class RemoteBatchStep
     {
+        [JsonPropertyName("condition")]
+        public RemoteBatchCondition? Condition { get; init; }
+
         [JsonPropertyName("stmt")]
         public RemoteStatement Statement { get; init; } = new();
+    }
+
+    private sealed class RemoteBatchCondition
+    {
+        [JsonPropertyName("type")]
+        public string Type { get; init; } = "";
+
+        [JsonPropertyName("step")]
+        public int? Step { get; init; }
+
+        [JsonPropertyName("cond")]
+        public RemoteBatchCondition? Condition { get; init; }
+
+        [JsonPropertyName("conds")]
+        public List<RemoteBatchCondition>? Conditions { get; set; }
     }
 
     private sealed class RemoteNamedArg
@@ -590,10 +680,15 @@ internal sealed class RemoteBatchResult
 
     [JsonPropertyName("step_errors")]
     public List<RemoteError?> StepErrors { get; init; } = [];
+
+    [JsonPropertyName("replication_index")]
+    public JsonElement ReplicationIndex { get; init; }
 }
 
 internal sealed class RemoteStatementResult
 {
+    public static RemoteStatementResult Skipped() => new();
+
     [JsonPropertyName("cols")]
     public List<RemoteColumn> Columns { get; init; } = [];
 
@@ -605,6 +700,9 @@ internal sealed class RemoteStatementResult
 
     [JsonPropertyName("last_insert_rowid")]
     public JsonElement LastInsertRowId { get; init; }
+
+    [JsonPropertyName("replication_index")]
+    public JsonElement ReplicationIndex { get; init; }
 }
 
 internal sealed class RemoteColumn

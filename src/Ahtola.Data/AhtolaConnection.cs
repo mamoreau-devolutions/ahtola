@@ -696,10 +696,10 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
             return;
         }
 
-        if (_connectionOptions.GetEncryptionCipher().HasValue || !string.IsNullOrWhiteSpace(_connectionOptions["Encryption Key"]))
-            throw new InvalidOperationException("Encryption Cipher and Encryption Key are local database options and cannot be used with remote Ahtola URLs.");
-
-        _remoteClient = new AhtolaRemoteClient(_connectionOptions.GetRemoteUri(), _connectionOptions.AuthToken);
+        _remoteClient = new AhtolaRemoteClient(
+            _connectionOptions.GetRemoteUri(),
+            _connectionOptions.AuthToken,
+            _connectionOptions.GetRemoteEncryptionOptions());
     }
 
     private async Task OpenRemoteReplicaAsync(

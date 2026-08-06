@@ -178,6 +178,25 @@ by one process, so every contending connection is in-process. It is also
 independent of `SqlitePagerLockManager`, whose writer lease is taken and released
 inside a single commit and therefore cannot be held across a SQL transaction.
 
+The resulting classic-model contract is:
+
+- One active writer per database identity. Explicit-transaction writers queue
+  FIFO so a contended reservation rotates across connections. Autocommit
+  statements barge instead: each statement is an implicit transaction, and
+  queueing them would recreate the EF migrations-lock convoy by handing the
+  reservation to a waiting loser before the current owner's next statement.
+- Reads are snapshot-isolated against that writer. A managed read transaction
+  pins its WAL frame/page snapshot and does not observe later commits until it
+  ends; autocommit statements may capture a newer snapshot at the next statement
+  boundary. There is no timestamp ordering, multi-writer conflict detection, or
+  Turso MVCC row-version lifecycle.
+- `VdbeTransactionContext` is not this transaction manager. It snapshots the
+  interpreter's scalar registers for VDBE BEGIN/SAVEPOINT/COMMIT/ROLLBACK
+  execution and never interacts with the pager, WAL, or durable store.
+- `SqlTransactionControl` is not the parser or transaction manager either. It
+  is a lexical scanner used by the ADO.NET layers to recognize COMMIT/END/
+  ROLLBACK boundaries in raw SQL for connection bookkeeping.
+
 Not covered: two connections that both have live snapshots still reject the
 loser's commit with the pre-existing catalog-version conflict rather than a lock
 error, because a managed connection's catalog snapshot is fixed for its lifetime

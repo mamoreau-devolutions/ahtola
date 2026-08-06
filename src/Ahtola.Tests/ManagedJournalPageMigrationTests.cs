@@ -190,6 +190,23 @@ public sealed class ManagedJournalPageMigrationTests
         ReadValue(connection, "PRAGMA journal_mode=unknown;").Should().Be(SqlValue.Text("delete"));
     }
 
+    [TestCase("TRUNCATE")]
+    [TestCase("PERSIST")]
+    [TestCase("MEMORY")]
+    [TestCase("OFF")]
+    [TestCase("MVCC")]
+    public void UnsupportedJournalModePreservesTheCurrentWalMode(string requestedMode)
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using var database = EmbeddedDatabase.OpenFile("unsupported-journal-mode.db", fileSystem);
+        using var connection = database.Connect();
+
+        ReadValue(connection, "PRAGMA journal_mode=WAL;").Should().Be(SqlValue.Text("wal"));
+
+        ReadValue(connection, $"PRAGMA journal_mode={requestedMode};").Should().Be(SqlValue.Text("wal"));
+        ReadValue(connection, "PRAGMA journal_mode;").Should().Be(SqlValue.Text("wal"));
+    }
+
     [Test]
     public void ReadOnlyPageSizeAssignmentIsANoOp()
     {
@@ -674,7 +691,7 @@ public sealed class ManagedJournalPageMigrationTests
         Assert.Throws<InvalidDataException>(() =>
         {
             using var ignored = EmbeddedDatabase.OpenFile(path, fileSystem);
-        })!.Message.Should().Contain("single-segment rollback journals");
+        })!.Message.Should().Contain("truncated before its declared page records");
         ReadAllBytes(fileSystem, path).Should().Equal(databaseBeforeRecovery);
         ReadAllBytes(fileSystem, path + "-journal").Should().Equal(journalBeforeRecovery);
     }

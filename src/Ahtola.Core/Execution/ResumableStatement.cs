@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.ExceptionServices;
 using System.Text;
+using Ahtola.Core.Parsing;
 
 namespace Ahtola.Core.Execution;
 
@@ -376,52 +377,30 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case SeekRowidInstruction seekRowid:
                     {
-                        // Position the cursor directly on the row whose rowid equals the value
-                        // held in RowIdRegister, jumping to NotFoundTarget when no such row
-                        // exists. The search is linear because the rowid sort invariant is not
-                        // maintained for explicit out-of-order rowid INSERTs (CommitInserts
-                        // appends in insert order, not rowid order); a BinarySearch over a sorted
-                        // projection is a later opt-in once the invariant is enforced on insert
-                        // or the cursor caches a sorted index per statement. Not yet emitted by
-                        // the compiler (Step 3); included now as additive, zero-regression-risk
-                        // scaffolding so EXPLAIN/Describe and the opcode enum are stable first.
-                        _materializedRows[seekRowid.Cursor.Index] = null;
-                        var source = RequireCursorSource(seekRowid.Cursor);
-                        var rowIds = source.RowIds;
-                        if (rowIds is null)
-                        {
-                            _instructionPointer = seekRowid.NotFoundTarget;
-                            break;
-                        }
-
-                        var sought = _registers[seekRowid.RowIdRegister.Index];
-                        if (sought.Kind != SqlValueKind.Integer)
-                        {
-                            _instructionPointer = seekRowid.NotFoundTarget;
-                            break;
-                        }
-
-                        var target = sought.AsInteger();
-                        var found = -1;
-                        for (var i = 0; i < rowIds.Count; i++)
-                        {
-                            if (rowIds[i] == target)
-                            {
-                                found = i;
-                                break;
-                            }
-                        }
-
-                        if (found >= 0)
-                        {
-                            _cursorPositions[seekRowid.Cursor.Index] = found;
+                        // Position the cursor on the rowid in RowIdRegister; jump if absent.
+                        // Linear search: CommitInserts keeps insert order, not rowid order.
+                        if (TryPositionCursorOnRowId(seekRowid.Cursor, seekRowid.RowIdRegister))
                             AdvanceInstructionPointer();
-                        }
                         else
-                        {
                             _instructionPointer = seekRowid.NotFoundTarget;
-                        }
-
+                        break;
+                    }
+                case NotExistsInstruction notExists:
+                    {
+                        // Jump when the rowid is absent; leave cursor positioned when present.
+                        if (TryPositionCursorOnRowId(notExists.Cursor, notExists.RowIdRegister))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = notExists.JumpTarget;
+                        break;
+                    }
+                case FoundInstruction found:
+                    {
+                        // Jump when the rowid is present; fall through when absent.
+                        if (TryPositionCursorOnRowId(found.Cursor, found.RowIdRegister))
+                            _instructionPointer = found.FoundTarget;
+                        else
+                            AdvanceInstructionPointer();
                         break;
                     }
                 case SeekRowidRangeInstruction seekRowidRange:
@@ -629,13 +608,13 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case InsertInstruction insert:
                     {
-                        MutateCursorRow(insert.Cursor);
+                        MutateCursorRow(insert.Cursor, insert.Flags);
                         AdvanceInstructionPointer();
                         break;
                     }
                 case UpdateInstruction update:
                     {
-                        MutateCursorRow(update.Cursor);
+                        MutateCursorRow(update.Cursor, update.Flags);
                         AdvanceInstructionPointer();
                         break;
                     }
@@ -1187,14 +1166,33 @@ public sealed class ResumableStatement : IDisposable
                     CloseWindowBuffer(closeWindowBuffer.Buffer);
                     AdvanceInstructionPointer();
                     break;
-                case HaltInstruction:
-                    Array.Clear(_openCursors);
-                    DisposeAllJoinCursors();
-                    DisposeAllSorters();
-                    Array.Clear(_windowBuffers);
-                    AdvanceInstructionPointer();
-                    State = ResumableStatementState.Done;
-                    return ResumableStatementStepResult.Done;
+                case HaltInstruction halt:
+                    {
+                        Array.Clear(_openCursors);
+                        DisposeAllJoinCursors();
+                        DisposeAllSorters();
+                        Array.Clear(_windowBuffers);
+                        if (halt.ErrorCode != 0)
+                            throw CreateHaltException(halt);
+
+                        AdvanceInstructionPointer();
+                        State = ResumableStatementState.Done;
+                        return ResumableStatementStepResult.Done;
+                    }
+                case HaltIfNullInstruction haltIfNull:
+                    {
+                        if (_registers[haltIfNull.Target.Index].Kind == SqlValueKind.Null)
+                        {
+                            Array.Clear(_openCursors);
+                            DisposeAllJoinCursors();
+                            DisposeAllSorters();
+                            Array.Clear(_windowBuffers);
+                            throw CreateHaltIfNullException(haltIfNull);
+                        }
+
+                        AdvanceInstructionPointer();
+                        break;
+                    }
                 default:
                     throw new InvalidOperationException(
                         $"Validated VDBE program contains unsupported opcode {instruction.Opcode}.");
@@ -1532,8 +1530,11 @@ public sealed class ResumableStatement : IDisposable
 
     // Runs a mutation delegate for the current position and materializes the written
     // (row, rowid) so a following Column/RowId observes the new values, not the source.
-    private void MutateCursorRow(Cursor cursor)
+    private void MutateCursorRow(Cursor cursor, VdbeInsertFlags flags = VdbeInsertFlags.None)
     {
+        if ((flags & VdbeInsertFlags.RequireSeek) != 0)
+            EnsureCursorPositioned(cursor);
+
         var target = RequireWriteTarget(cursor);
         var mutate = target.MutateRow
             ?? throw new InvalidOperationException(
@@ -1541,7 +1542,28 @@ public sealed class ResumableStatement : IDisposable
         var mutation = mutate(_cursorPositions[cursor.Index]);
         _materializedRows[cursor.Index] = mutation.Row;
         _materializedRowIds[cursor.Index] = mutation.RowId;
-        RowsAffected = checked(RowsAffected + 1);
+
+        // SkipLastRowid is honored at Commit time via the write-target contract; the
+        // mutation still records the rowid for in-program Column/RowId reads.
+        if ((flags & (VdbeInsertFlags.SkipStatementChangeCount | VdbeInsertFlags.SkipAllChangeCounts)) == 0)
+            RowsAffected = checked(RowsAffected + 1);
+    }
+
+    private void EnsureCursorPositioned(Cursor cursor)
+    {
+        if (_materializedRows[cursor.Index] is not null)
+            return;
+
+        if (_joinCursorStates[cursor.Index] is { CurrentRow: not null })
+            return;
+
+        var position = _cursorPositions[cursor.Index];
+        var count = CursorRowCount(cursor);
+        if (position < 0 || position >= count)
+        {
+            throw new InvalidOperationException(
+                $"Cursor {cursor.Index} requires a prior seek before this write (VdbeInsertFlags.RequireSeek).");
+        }
     }
 
     private SqlValue[] CurrentCursorRow(Cursor cursor)
@@ -1659,6 +1681,99 @@ public sealed class ResumableStatement : IDisposable
         }
 
         Array.Copy(row, 0, _registers, destination.Start.Index, row.Length);
+    }
+
+    /// <summary>
+    /// Positions <paramref name="cursor"/> on the integer rowid held in
+    /// <paramref name="rowIdRegister"/>. Returns false when the key is missing or
+    /// not an integer (caller jumps to the not-found target).
+    /// </summary>
+    private bool TryPositionCursorOnRowId(Cursor cursor, Register rowIdRegister)
+    {
+        _materializedRows[cursor.Index] = null;
+        var source = RequireCursorSource(cursor);
+        var rowIds = source.RowIds;
+        if (rowIds is null)
+            return false;
+
+        var sought = _registers[rowIdRegister.Index];
+        if (sought.Kind != SqlValueKind.Integer)
+            return false;
+
+        var target = sought.AsInteger();
+        for (var i = 0; i < rowIds.Count; i++)
+        {
+            if (rowIds[i] != target)
+                continue;
+
+            _cursorPositions[cursor.Index] = i;
+            return true;
+        }
+
+        return false;
+    }
+
+    private Exception CreateHaltException(HaltInstruction halt)
+    {
+        var message = halt.DescriptionRegister is { } descReg
+            ? FormatHaltMessage(_registers[descReg.Index])
+            : halt.Description ?? string.Empty;
+        message = FormatConstraintHaltMessage(halt.ErrorCode, message);
+
+        var algorithm = halt.OnError switch
+        {
+            VdbeHaltOnError.Rollback => InsertConflictAlgorithm.Rollback,
+            VdbeHaltOnError.Fail => InsertConflictAlgorithm.Fail,
+            VdbeHaltOnError.Ignore => InsertConflictAlgorithm.Ignore,
+            VdbeHaltOnError.Abort => InsertConflictAlgorithm.Abort,
+            null => InsertConflictAlgorithm.Abort,
+            _ => InsertConflictAlgorithm.Abort,
+        };
+
+        if (algorithm == InsertConflictAlgorithm.Ignore)
+            return new TriggerIgnoreException();
+
+        var error = new EmbeddedSqlException(message, halt.ErrorCode, algorithm);
+        return algorithm switch
+        {
+            InsertConflictAlgorithm.Rollback => new EmbeddedConflictRollbackException(error),
+            InsertConflictAlgorithm.Fail => new EmbeddedConflictFailException(error, lastInsertRowId: 0),
+            _ => error,
+        };
+    }
+
+    private static Exception CreateHaltIfNullException(HaltIfNullInstruction haltIfNull)
+    {
+        var message = FormatConstraintHaltMessage(haltIfNull.ErrorCode, haltIfNull.Description);
+        return new EmbeddedSqlException(message, haltIfNull.ErrorCode, InsertConflictAlgorithm.Abort);
+    }
+
+    private static string FormatHaltMessage(SqlValue value)
+        => value.Kind == SqlValueKind.Null ? string.Empty : value.AsText();
+
+    private static string FormatConstraintHaltMessage(int errorCode, string description)
+    {
+        if (string.IsNullOrEmpty(description))
+            description = "constraint failed";
+
+        return errorCode switch
+        {
+            SqliteResultCode.ConstraintPrimaryKey
+                => $"UNIQUE constraint failed: {description} ({errorCode})",
+            SqliteResultCode.ConstraintUnique
+                => $"UNIQUE constraint failed: {description} ({errorCode})",
+            SqliteResultCode.ConstraintCheck
+                => $"CHECK constraint failed: {description} ({errorCode})",
+            SqliteResultCode.ConstraintNotNull
+                => $"NOT NULL constraint failed: {description} ({errorCode})",
+            SqliteResultCode.ConstraintForeignKey
+                => description,
+            SqliteResultCode.Constraint or SqliteResultCode.ConstraintTrigger
+                => description.Contains("constraint", StringComparison.OrdinalIgnoreCase)
+                    ? description
+                    : $"constraint failed: {description}",
+            _ => description,
+        };
     }
 
     private void AdvanceInstructionPointer()

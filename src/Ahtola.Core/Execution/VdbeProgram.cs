@@ -233,6 +233,38 @@ public enum VdbeOpcode
     Prev = 73,
     RowSetTest = 74,
     Program = 75,
+    /// <summary>Jump if the integer key in P3 is absent from cursor P1 (Turso/SQLite <c>NotExists</c>).</summary>
+    NotExists = 76,
+    /// <summary>Jump if the integer key in P3 is present on cursor P1 (Turso/SQLite <c>Found</c>).</summary>
+    Found = 77,
+    /// <summary>Halt when register P3 is NULL (Turso/SQLite <c>HaltIfNull</c> / NOT NULL checks).</summary>
+    HaltIfNull = 78,
+}
+
+/// <summary>
+/// Disposition applied when a <see cref="HaltInstruction"/> carries a non-zero error code
+/// (Turso <c>ResolveType</c> / SQLite ON CONFLICT / RAISE action).
+/// </summary>
+public enum VdbeHaltOnError
+{
+    Abort = 0,
+    Fail = 1,
+    Ignore = 2,
+    Rollback = 3,
+}
+
+/// <summary>Well-known SQLite result codes used by Halt / HaltIfNull.</summary>
+public static class SqliteResultCode
+{
+    public const int Ok = 0;
+    public const int Error = 1;
+    public const int Constraint = 19;
+    public const int ConstraintCheck = 275;
+    public const int ConstraintNotNull = 1299;
+    public const int ConstraintPrimaryKey = 1555;
+    public const int ConstraintUnique = 2067;
+    public const int ConstraintTrigger = 1811;
+    public const int ConstraintForeignKey = 787;
 }
 
 /// <summary>
@@ -1463,12 +1495,33 @@ public sealed record DeleteInstruction(Cursor Cursor) : VdbeInstruction
     public override VdbeOpcode Opcode => VdbeOpcode.Delete;
 }
 
-public sealed record InsertInstruction(Cursor Cursor) : VdbeInstruction
+/// <summary>
+/// Turso/SQLite <c>InsertFlags</c> bitfield carried on Insert/Update opcodes.
+/// </summary>
+[Flags]
+public enum VdbeInsertFlags : byte
+{
+    None = 0,
+    /// <summary>This mutation is part of an UPDATE that changes the row's rowid.</summary>
+    UpdateRowidChange = 0x01,
+    /// <summary>Cursor must already be positioned on the target row before the write.</summary>
+    RequireSeek = 0x02,
+    /// <summary>Insert targets an ephemeral table (not the durable catalog).</summary>
+    EphemeralTableInsert = 0x04,
+    /// <summary>Do not update last_insert_rowid() from this write.</summary>
+    SkipLastRowid = 0x08,
+    /// <summary>Do not increment the statement-level changes() counter.</summary>
+    SkipStatementChangeCount = 0x10,
+    /// <summary>Do not increment changes() or total_changes().</summary>
+    SkipAllChangeCounts = 0x20,
+}
+
+public sealed record InsertInstruction(Cursor Cursor, VdbeInsertFlags Flags = VdbeInsertFlags.None) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.Insert;
 }
 
-public sealed record UpdateInstruction(Cursor Cursor) : VdbeInstruction
+public sealed record UpdateInstruction(Cursor Cursor, VdbeInsertFlags Flags = VdbeInsertFlags.None) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.Update;
 }
@@ -1848,9 +1901,60 @@ public sealed record LimitGateInstruction(Register Counter, ProgramCounter DoneT
     public override VdbeOpcode Opcode => VdbeOpcode.LimitGate;
 }
 
-public sealed record HaltInstruction : VdbeInstruction
+/// <summary>
+/// Stops the program. With <see cref="ErrorCode"/> 0 this is a clean halt (normal end).
+/// A non-zero code raises <see cref="Ahtola.Core.EmbeddedSqlException"/> carrying the SQLite
+/// result code, optional message, and <see cref="OnError"/> disposition (Turso
+/// <c>op_halt</c> / RAISE / constraint Halt).
+/// </summary>
+public sealed record HaltInstruction(
+    int ErrorCode = 0,
+    string? Description = null,
+    Register? DescriptionRegister = null,
+    VdbeHaltOnError? OnError = null) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.Halt;
+}
+
+/// <summary>
+/// Halts with <see cref="ErrorCode"/> when <see cref="Target"/> holds NULL; otherwise falls
+/// through. Used for NOT NULL enforcement (Turso <c>op_halt_if_null</c>).
+/// </summary>
+public sealed record HaltIfNullInstruction(
+    Register Target,
+    int ErrorCode,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.HaltIfNull;
+}
+
+/// <summary>
+/// Positions <paramref name="Cursor"/> on the rowid held in <paramref name="RowIdRegister"/>
+/// when present and falls through; jumps to <paramref name="JumpTarget"/> when absent
+/// (Turso/SQLite <c>NotExists</c>). Same probe as <see cref="SeekRowidInstruction"/> with
+/// inverted naming for compiler/EXPLAIN parity on uniqueness probes.
+/// </summary>
+public sealed record NotExistsInstruction(
+    Cursor Cursor,
+    Register RowIdRegister,
+    ProgramCounter JumpTarget,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.NotExists;
+}
+
+/// <summary>
+/// Positions <paramref name="Cursor"/> on the rowid held in <paramref name="RowIdRegister"/>
+/// and jumps to <paramref name="FoundTarget"/> when present; falls through when absent
+/// (Turso/SQLite <c>Found</c>).
+/// </summary>
+public sealed record FoundInstruction(
+    Cursor Cursor,
+    Register RowIdRegister,
+    ProgramCounter FoundTarget,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.Found;
 }
 
 /// <summary>
@@ -2471,6 +2575,16 @@ public sealed class VdbeProgram
                     ValidateRegister(seekRowid.RowIdRegister, instructionIndex);
                     ValidateJumpTarget(seekRowid.NotFoundTarget, instructionIndex);
                     break;
+                case NotExistsInstruction notExists:
+                    ValidateOpenCursor(notExists.Cursor, openCursors, instructionIndex);
+                    ValidateRegister(notExists.RowIdRegister, instructionIndex);
+                    ValidateJumpTarget(notExists.JumpTarget, instructionIndex);
+                    break;
+                case FoundInstruction found:
+                    ValidateOpenCursor(found.Cursor, openCursors, instructionIndex);
+                    ValidateRegister(found.RowIdRegister, instructionIndex);
+                    ValidateJumpTarget(found.FoundTarget, instructionIndex);
+                    break;
                 case SeekRowidRangeInstruction seekRowidRange:
                     ValidateOpenCursor(seekRowidRange.Cursor, openCursors, instructionIndex);
                     ValidateRegister(seekRowidRange.StartRowIdRegister, instructionIndex);
@@ -2994,11 +3108,33 @@ public sealed class VdbeProgram
                     ValidateOpenWindowBuffer(closeWindowBuffer.Buffer, openWindowBuffers, instructionIndex);
                     openWindowBuffers[closeWindowBuffer.Buffer.Index] = false;
                     break;
-                case HaltInstruction when instructionIndex == _instructions.Count - 1:
+                case HaltInstruction halt:
+                    // Clean halt (error code 0) is only legal as the terminal instruction.
+                    // Error Halt (constraint / RAISE) may appear mid-program, matching Turso.
+                    if (halt.ErrorCode == 0 && instructionIndex != _instructions.Count - 1)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} halts before the end of the program.");
+                    }
+
+                    if (halt.ErrorCode < 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has a negative Halt error code.");
+                    }
+
+                    if (halt.DescriptionRegister is { } descReg)
+                        ValidateRegister(descReg, instructionIndex);
                     break;
-                case HaltInstruction:
-                    throw new VdbeProgramValidationException(
-                        $"VDBE instruction {instructionIndex} halts before the end of the program.");
+                case HaltIfNullInstruction haltIfNull:
+                    ValidateRegister(haltIfNull.Target, instructionIndex);
+                    if (haltIfNull.ErrorCode <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} HaltIfNull requires a positive error code.");
+                    }
+
+                    break;
                 default:
                     throw new VdbeProgramValidationException(
                         $"VDBE instruction {instructionIndex} has unsupported opcode {instruction.Opcode}.");

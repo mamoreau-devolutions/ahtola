@@ -1736,13 +1736,9 @@ internal sealed class EmbeddedFileStore : IDisposable
             return false;
         }
 
-        // The incremental writer only appends pages, so running it while free
-        // pages exist would strand them forever. The complete rewrite reuses and
-        // compacts them, so defer to it until the freelist is empty. Reusing the
-        // freelist incrementally belongs to b-tree maintenance.
-        if (currentHeader.FirstFreelistTrunkPage != 0 || currentHeader.FreelistPageCount != 0)
-            return false;
-
+        // Incremental allocation prefers freelist leaves/trunks before appending.
+        // A non-empty freelist is therefore safe here and no longer forces a full
+        // rewrite solely to avoid stranding free pages.
         if (!TryCollectRowDeltas(tables, previousTables, out var deltas) || deltas.Count == 0)
             return false;
 
@@ -1758,7 +1754,9 @@ internal sealed class EmbeddedFileStore : IDisposable
             pageNumber => _pager.ReadCommittedPage(pageNumber),
             _pager.CommittedPageCount,
             _pageSize,
-            _usableSpace);
+            _usableSpace,
+            currentHeader.FirstFreelistTrunkPage,
+            currentHeader.FreelistPageCount);
         try
         {
             foreach (var delta in deltas)
@@ -1795,6 +1793,8 @@ internal sealed class EmbeddedFileStore : IDisposable
             ChangeCounter = newChangeCounter,
             VersionValidFor = newChangeCounter,
             DatabaseSizeInPages = target,
+            FirstFreelistTrunkPage = pageIo.FirstFreelistTrunkPage,
+            FreelistPageCount = pageIo.FreelistPageCount,
         };
         var pageOne = _pager.ReadCommittedPage(SchemaRootPage);
         newHeader.WriteTo(pageOne);

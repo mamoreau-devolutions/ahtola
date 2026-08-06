@@ -168,6 +168,33 @@ public class SqlitePagerLockingStorageTests
     }
 
     [Test]
+    [NonParallelizable]
+    public void PhysicalPagersForDistinctAttachedDatabasePathsUseIndependentWriterLocks()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+            Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
+
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            using var primary = CreatePhysicalPager(Path.Combine(workDirectory, "main.db"));
+            using var attached = CreatePhysicalPager(Path.Combine(workDirectory, "aux.db"));
+
+            primary.LockManager.Should().NotBeSameAs(attached.LockManager);
+
+            using var primaryWriter = primary.BeginTransaction(targetDatabaseSizeInPages: 1);
+            using var attachedWriter = attached.BeginTransaction(targetDatabaseSizeInPages: 1);
+
+            primary.LockManager.State.Should().Be(SqlitePagerLockState.Writer);
+            attached.LockManager.State.Should().Be(SqlitePagerLockState.Writer);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
     public void SharedPagersPreserveOldSnapshotsAndRefreshNewReadersAfterCommit()
     {
         var fileSystem = new InMemoryFileSystem();

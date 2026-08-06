@@ -1,16 +1,17 @@
+using System.Buffers.Binary;
+
 namespace Ahtola.Core.Storage;
 
 /// <summary>
 /// Raised when an incremental b-tree mutation would require page merging,
-/// rebalancing, defragmentation, or freelist reuse.
+/// rebalancing, or defragmentation beyond freelist allocate/free.
 /// </summary>
 /// <remarks>
-/// The incremental writer deliberately implements only the growth half of
-/// SQLite's balancing rules: it splits full pages and promotes separators, but
-/// it never merges under-full pages, never rewrites the freelist, and never
-/// removes a child pointer from a parent. Anything that needs those operations
-/// is reported here so the caller can fall back to the complete catalog
-/// rewrite, which is always able to represent the mutation.
+/// The incremental writer implements the growth half of SQLite's balancing
+/// rules plus freelist-backed page allocate/free and empty non-root leaf
+/// reclaim (unlink + free, with single-child interior collapse). Sibling
+/// redistribution for under-full non-empty pages is still out of scope;
+/// those cases raise this exception so the caller can fall back to a full rewrite.
 /// </remarks>
 public sealed class SqliteBtreeMaintenanceRequiredException : Exception
 {
@@ -49,8 +50,15 @@ public interface ISqliteBtreePageIo
     /// <summary>Replaces one page image.</summary>
     void WritePage(uint pageNumber, ReadOnlySpan<byte> image);
 
-    /// <summary>Reserves one new page beyond the current page count.</summary>
+    /// <summary>
+    /// Reserves one page, preferring the SQLite freelist before growing the file.
+    /// </summary>
     uint AllocatePage();
+
+    /// <summary>
+    /// Returns one page to the SQLite freelist (Turso <c>Pager::free_page</c>).
+    /// </summary>
+    void FreePage(uint pageNumber);
 }
 
 /// <summary>
@@ -62,30 +70,55 @@ public interface ISqliteBtreePageIo
 /// being published as one pager transaction whose final size is known before
 /// the first frame is written. Only the buffered pages are written, so the cost
 /// of a commit is proportional to the pages the mutation actually touched
-/// rather than to the size of the database.
+/// rather than to the size of the database. When constructed with freelist
+/// header state, <see cref="AllocatePage"/> mirrors Turso/SQLite
+/// <c>Pager::allocate_page</c> freelist reuse and <see cref="FreePage"/> mirrors
+/// <c>Pager::free_page</c>. Overflow chains released by incremental DELETE/UPDATE
+/// are returned through <see cref="SqliteOverflowChainWriter.Free"/>.
 /// </remarks>
 public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
 {
+    private const int TrunkHeaderLength = 2 * sizeof(uint);
+
     private readonly Func<uint, byte[]> _readCommittedPage;
     private readonly Dictionary<uint, byte[]> _staged = [];
     private readonly uint _committedPageCount;
     private uint _pageCount;
+    private uint _firstFreelistTrunkPage;
+    private uint _freelistPageCount;
 
     /// <summary>Creates a staging layer over a committed page source.</summary>
     public SqliteStagedBtreePageIo(
         Func<uint, byte[]> readCommittedPage,
         uint committedPageCount,
         int pageSize,
-        int usableSpace)
+        int usableSpace,
+        uint firstFreelistTrunkPage = 0,
+        uint freelistPageCount = 0)
     {
         ArgumentNullException.ThrowIfNull(readCommittedPage);
         ArgumentOutOfRangeException.ThrowIfZero(committedPageCount);
         if (usableSpace < SqliteDatabaseHeader.MinimumUsableSpace || usableSpace > pageSize)
             throw new ArgumentOutOfRangeException(nameof(usableSpace));
+        if ((freelistPageCount == 0) != (firstFreelistTrunkPage == 0))
+        {
+            throw new ArgumentException(
+                "SQLite freelist trunk page and freelist page count must both be zero or both non-zero.");
+        }
+
+        if (firstFreelistTrunkPage != 0
+            && (firstFreelistTrunkPage < 2 || firstFreelistTrunkPage > committedPageCount))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(firstFreelistTrunkPage),
+                "SQLite freelist trunk page is outside the committed page range.");
+        }
 
         _readCommittedPage = readCommittedPage;
         _committedPageCount = committedPageCount;
         _pageCount = committedPageCount;
+        _firstFreelistTrunkPage = firstFreelistTrunkPage;
+        _freelistPageCount = freelistPageCount;
         PageSize = pageSize;
         UsableSpace = usableSpace;
     }
@@ -101,6 +134,12 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
 
     /// <summary>The page count this staging layer started from.</summary>
     public uint CommittedPageCount => _committedPageCount;
+
+    /// <summary>Current first freelist trunk after staged allocate/free operations.</summary>
+    public uint FirstFreelistTrunkPage => _firstFreelistTrunkPage;
+
+    /// <summary>Current freelist page count after staged allocate/free operations.</summary>
+    public uint FreelistPageCount => _freelistPageCount;
 
     /// <summary>The dirtied and newly allocated page images, keyed by page number.</summary>
     public IReadOnlyDictionary<uint, byte[]> StagedPages => _staged;
@@ -139,10 +178,126 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
     /// <inheritdoc />
     public uint AllocatePage()
     {
+        if (_freelistPageCount > 0)
+            return AllocateFromFreelist();
+
         var pageNumber = checked(_pageCount + 1);
         _pageCount = pageNumber;
         _staged[pageNumber] = new byte[PageSize];
         return pageNumber;
+    }
+
+    /// <inheritdoc />
+    public void FreePage(uint pageNumber)
+    {
+        if (pageNumber < 2 || pageNumber > _pageCount)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(pageNumber),
+                pageNumber,
+                $"SQLite cannot free page {pageNumber} outside 2..{_pageCount}.");
+        }
+
+        // Ensure the freed page image is staged so callers publish a zeroed leaf
+        // or rewritten trunk as part of the same mutation.
+        _ = ReadPage(pageNumber);
+        _freelistPageCount = checked(_freelistPageCount + 1);
+
+        if (_firstFreelistTrunkPage != 0)
+        {
+            var trunk = GetMutablePage(_firstFreelistTrunkPage);
+            var leafCount = BinaryPrimitives.ReadUInt32BigEndian(trunk.AsSpan(sizeof(uint)));
+            var maxLeaves = (UsableSpace - TrunkHeaderLength) / sizeof(uint);
+            if (leafCount < maxLeaves)
+            {
+                BinaryPrimitives.WriteUInt32BigEndian(trunk.AsSpan(sizeof(uint)), leafCount + 1);
+                BinaryPrimitives.WriteUInt32BigEndian(
+                    trunk.AsSpan(TrunkHeaderLength + ((int)leafCount * sizeof(uint))),
+                    pageNumber);
+                ZeroPage(pageNumber);
+                return;
+            }
+        }
+
+        var newTrunk = GetMutablePage(pageNumber);
+        newTrunk.AsSpan().Clear();
+        BinaryPrimitives.WriteUInt32BigEndian(newTrunk, _firstFreelistTrunkPage);
+        BinaryPrimitives.WriteUInt32BigEndian(newTrunk.AsSpan(sizeof(uint)), 0);
+        _firstFreelistTrunkPage = pageNumber;
+    }
+
+    private uint AllocateFromFreelist()
+    {
+        if (_firstFreelistTrunkPage == 0 || _freelistPageCount == 0)
+            throw new InvalidOperationException("SQLite freelist allocation requires a non-empty freelist.");
+
+        var trunkPageNumber = _firstFreelistTrunkPage;
+        var trunk = GetMutablePage(trunkPageNumber);
+        var nextTrunk = BinaryPrimitives.ReadUInt32BigEndian(trunk);
+        var leafCount = BinaryPrimitives.ReadUInt32BigEndian(trunk.AsSpan(sizeof(uint)));
+        if (leafCount > 0)
+        {
+            var leafPageNumber = BinaryPrimitives.ReadUInt32BigEndian(trunk.AsSpan(TrunkHeaderLength));
+            if (leafPageNumber < 2 || leafPageNumber > _pageCount)
+            {
+                throw new InvalidDataException(
+                    $"SQLite freelist leaf page {leafPageNumber} is outside 2..{_pageCount}.");
+            }
+
+            var remaining = checked((int)(leafCount - 1));
+            if (remaining > 0)
+            {
+                Buffer.BlockCopy(
+                    trunk,
+                    TrunkHeaderLength + sizeof(uint),
+                    trunk,
+                    TrunkHeaderLength,
+                    remaining * sizeof(uint));
+            }
+
+            BinaryPrimitives.WriteUInt32BigEndian(trunk.AsSpan(sizeof(uint)), (uint)remaining);
+            // Clear the vacated trailing leaf slot so freelist pages stay tidy.
+            BinaryPrimitives.WriteUInt32BigEndian(
+                trunk.AsSpan(TrunkHeaderLength + (remaining * sizeof(uint))),
+                0);
+            _freelistPageCount--;
+            ZeroPage(leafPageNumber);
+            return leafPageNumber;
+        }
+
+        // Empty trunk: reuse the trunk page itself.
+        _firstFreelistTrunkPage = nextTrunk;
+        _freelistPageCount--;
+        if ((_freelistPageCount == 0) != (_firstFreelistTrunkPage == 0))
+        {
+            throw new InvalidDataException(
+                "SQLite freelist became inconsistent while reusing an empty trunk page.");
+        }
+
+        trunk.AsSpan().Clear();
+        return trunkPageNumber;
+    }
+
+    private byte[] GetMutablePage(uint pageNumber)
+    {
+        ValidatePageNumber(pageNumber);
+        if (_staged.TryGetValue(pageNumber, out var staged))
+            return staged;
+
+        var page = ReadPage(pageNumber);
+        _staged[pageNumber] = page;
+        return page;
+    }
+
+    private void ZeroPage(uint pageNumber)
+    {
+        if (_staged.TryGetValue(pageNumber, out var staged))
+        {
+            staged.AsSpan().Clear();
+            return;
+        }
+
+        _staged[pageNumber] = new byte[PageSize];
     }
 
     private void ValidatePageNumber(uint pageNumber)
@@ -194,5 +349,26 @@ public static class SqliteOverflowChainWriter
         }
 
         return pageNumbers[0];
+    }
+
+    /// <summary>
+    /// Returns every page of an overflow chain to the freelist, matching Turso
+    /// free-page handling when a cell with overflow is deleted or replaced.
+    /// </summary>
+    public static void Free(
+        ISqliteBtreePageIo pageIo,
+        uint firstOverflowPage,
+        ulong overflowPayloadLength)
+    {
+        ArgumentNullException.ThrowIfNull(pageIo);
+        if (firstOverflowPage == 0)
+            throw new ArgumentOutOfRangeException(nameof(firstOverflowPage));
+
+        var pages = new SqliteOverflowChainReader(pageIo)
+            .Traverse(firstOverflowPage, overflowPayloadLength);
+        // Free last-to-first so a crash mid-free leaves a still-valid shorter
+        // chain rather than an orphaned prefix pointing at recycled pages.
+        for (var index = pages.Count - 1; index >= 0; index--)
+            pageIo.FreePage(pages[index]);
     }
 }
