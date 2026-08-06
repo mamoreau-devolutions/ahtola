@@ -1048,7 +1048,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         TempTriggerBridge? tempTriggers = null,
         ManagedStatementHooks? hooks = null,
         bool ignoreCheckConstraints = false,
-        Func<string?, string?, ExecutionResult>? executeTableList = null)
+        Func<string?, string?, ExecutionResult>? executeTableList = null,
+        IReadOnlyDictionary<string, EmbeddedTable>? externalTables = null)
     {
         var result = ExecuteCore(
             statement,
@@ -1063,7 +1064,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             tempTriggers,
             hooks,
             ignoreCheckConstraints,
-            executeTableList);
+            executeTableList,
+            externalTables);
 
         RecordChangeCounters(statement, result);
         return result;
@@ -1095,7 +1097,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         TempTriggerBridge? tempTriggers = null,
         ManagedStatementHooks? hooks = null,
         bool ignoreCheckConstraints = false,
-        Func<string?, string?, ExecutionResult>? executeTableList = null)
+        Func<string?, string?, ExecutionResult>? executeTableList = null,
+        IReadOnlyDictionary<string, EmbeddedTable>? externalTables = null)
     {
         ThrowIfRecursiveTriggerCallbackReentry();
         if (RequiresRecursiveTriggerStack(
@@ -1116,7 +1119,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 tempTriggers,
                 hooks,
                 ignoreCheckConstraints,
-                executeTableList));
+                executeTableList,
+                externalTables));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -1161,7 +1165,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                                 tempTriggers,
                                 hooks,
                                 ignoreCheckConstraints,
-                                executeTableList);
+                                executeTableList,
+                                externalTables);
                         }
                         catch (EmbeddedConflictFailException)
                         {
@@ -1228,7 +1233,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                                 tempTriggers,
                                 hooks,
                                 ignoreCheckConstraints,
-                                executeTableList);
+                                executeTableList,
+                                externalTables);
                         }
                         catch (EmbeddedConflictFailException)
                         {
@@ -1267,7 +1273,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                             tempTriggers,
                             hooks,
                             ignoreCheckConstraints,
-                            executeTableList);
+                            executeTableList,
+                            externalTables);
 
                     var working = new SchemaCatalog(_tables, _views, _triggers).Clone();
                     ExecutionResult result;
@@ -1287,7 +1294,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                             tempTriggers,
                             hooks,
                             ignoreCheckConstraints,
-                            executeTableList);
+                            executeTableList,
+                            externalTables);
                     }
                     catch (EmbeddedConflictFailException)
                     {
@@ -2718,6 +2726,26 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
     }
 
+    private static Dictionary<string, EmbeddedTable> CreateExecutionTables(
+        Dictionary<string, EmbeddedTable> localTables,
+        IReadOnlyDictionary<string, EmbeddedTable>? externalTables)
+    {
+        if (externalTables is null || externalTables.Count == 0)
+            return localTables;
+
+        var tables = new Dictionary<string, EmbeddedTable>(localTables, StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in externalTables)
+        {
+            if (!tables.TryAdd(pair.Key, pair.Value))
+            {
+                throw new InvalidOperationException(
+                    $"The external read table '{pair.Key}' conflicts with the target database catalog.");
+            }
+        }
+
+        return tables;
+    }
+
     internal ExecutionResult Execute(
         ParsedStatement statement,
         SqlValue[] parameters,
@@ -2732,7 +2760,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         TempTriggerBridge? tempTriggers = null,
         ManagedStatementHooks? hooks = null,
         bool ignoreCheckConstraints = false,
-        Func<string?, string?, ExecutionResult>? executeTableList = null)
+        Func<string?, string?, ExecutionResult>? executeTableList = null,
+        IReadOnlyDictionary<string, EmbeddedTable>? externalTables = null)
     {
         ThrowIfRecursiveTriggerCallbackReentry();
         if (RequiresRecursiveTriggerStack(
@@ -2761,7 +2790,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (_readOnly && MayMutate(statement))
             throw new EmbeddedSqlException("attempt to write a readonly database");
 
-        var tables = catalog.Tables;
+        var tables = CreateExecutionTables(catalog.Tables, externalTables);
         var context = new QueryContext(
             tables,
             new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
@@ -38568,7 +38597,8 @@ public sealed class EmbeddedConnection : IDisposable
         EmbeddedDatabase Database,
         ParsedStatement Statement,
         bool IsAttached,
-        EmbeddedDatabase.SchemaCatalog? ReadCatalog = null);
+        EmbeddedDatabase.SchemaCatalog? ReadCatalog = null,
+        IReadOnlyDictionary<string, EmbeddedTable>? ExternalTables = null);
 
     internal EmbeddedConnection(EmbeddedDatabase database)
     {
@@ -39218,7 +39248,8 @@ public sealed class EmbeddedConnection : IDisposable
                                     tempTriggers,
                                     CreateStatementHooks(routed.Database, includeCommitGate: true),
                                     ignoreCheckConstraints: _ignoreCheckConstraints,
-                                    executeTableList: ExecutePragmaTableList);
+                                    executeTableList: ExecutePragmaTableList,
+                                    externalTables: routed.ExternalTables);
                             }
                             catch (Exception failure)
                                 when (failure is not EmbeddedConflictFailException
@@ -39252,7 +39283,8 @@ public sealed class EmbeddedConnection : IDisposable
                                 tempTriggers,
                                 CreateStatementHooks(routed.Database, includeCommitGate: false),
                                 ignoreCheckConstraints: _ignoreCheckConstraints,
-                                executeTableList: ExecutePragmaTableList);
+                                executeTableList: ExecutePragmaTableList,
+                                externalTables: routed.ExternalTables);
                             if (EmbeddedDatabase.MayMutate(routed.Statement))
                                 cancellationToken.ThrowIfCancellationRequested();
                             // The catalog overload used for transactional statements does not
@@ -40396,7 +40428,52 @@ public sealed class EmbeddedConnection : IDisposable
     {
         var schemas = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         CollectStatementSchemas(statement, schemas, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-        return RouteForSchemas(statement, schemas);
+        var resolvedSchemas = schemas
+            .Select(ResolveCollectedSchema)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return TryRouteAttachedUpdateReadingMain(statement, resolvedSchemas, out var routed)
+            ? routed
+            : RouteForSchemas(statement, schemas);
+    }
+
+    // Turso plans an UPDATE target and every table read with independent database IDs. Keep the
+    // first managed cross-database write equally narrow: one attached UPDATE may read main only
+    // through its predicate, while writes still target exactly one attached catalog.
+    private bool TryRouteAttachedUpdateReadingMain(
+        ParsedStatement statement,
+        IReadOnlySet<string> resolvedSchemas,
+        out RoutedStatement routed)
+    {
+        routed = default;
+        if (statement is not UpdateStatement update
+            || update.From is not null
+            || update.Returning is not null
+            || update.EffectiveOrderBy.Count != 0
+            || update.Limit is not null
+            || update.Offset is not null
+            || update.IndexDirective is not null
+            || resolvedSchemas.Count != 2
+            || !resolvedSchemas.Contains("main")
+            || !ManagedSchemaName.TrySplit(update.TableName, out var targetSchema, out var targetTableName)
+            || targetSchema.Equals("main", StringComparison.OrdinalIgnoreCase)
+            || targetSchema.Equals("temp", StringComparison.OrdinalIgnoreCase)
+            || !resolvedSchemas.Contains(targetSchema)
+            || !_attachedDatabases.TryGetValue(targetSchema, out var attachment))
+        {
+            return false;
+        }
+
+        var targetCatalog = GetTransactionState(attachment.Database)?.Catalog ?? attachment.Database.LiveCatalog;
+        var mainCatalog = GetTransactionState(_database)?.Catalog ?? _database.LiveCatalog;
+        if (targetCatalog.Tables.Keys.Any(mainCatalog.Tables.ContainsKey))
+            return false;
+
+        routed = new RoutedStatement(
+            attachment.Database,
+            update with { TableName = targetTableName },
+            IsAttached: true,
+            ExternalTables: mainCatalog.Clone().Tables);
+        return true;
     }
 
     private RoutedStatement RouteForSchemas(ParsedStatement statement, HashSet<string> schemas)

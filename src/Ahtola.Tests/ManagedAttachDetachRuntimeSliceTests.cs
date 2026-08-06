@@ -234,6 +234,32 @@ public sealed class ManagedAttachDetachRuntimeSliceTests
     }
 
     [Test]
+    public void AttachedUpdateMayReadMainFromItsWherePredicate()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using var main = EmbeddedDatabase.OpenFile("attach-cross-read-main.db", fileSystem);
+        using var connection = main.Connect();
+        Execute(connection, "ATTACH DATABASE 'attach-cross-read-aux.db' AS aux;");
+        Execute(connection, "CREATE TABLE main.selector(x INTEGER);");
+        Execute(connection, "INSERT INTO main.selector VALUES (1);");
+        Execute(connection, "CREATE TABLE aux.t1(id INTEGER PRIMARY KEY, val REAL UNIQUE, data INTEGER);");
+        Execute(connection, "INSERT INTO aux.t1 VALUES (1, 10.0, 100), (2, 20.0, 200), (3, 30.0, 300);");
+
+        Execute(connection, "BEGIN;");
+        Execute(
+            connection,
+            "UPDATE aux.t1 SET id = 20, data = 555 "
+                + "WHERE id = 3 AND NOT EXISTS (SELECT x FROM selector WHERE x > 10);");
+        Execute(connection, "COMMIT;");
+
+        AssertRows(
+            ReadRows(connection, "SELECT id, val, data FROM aux.t1 ORDER BY id;"),
+            [SqlValue.Integer(1), SqlValue.Real(10), SqlValue.Integer(100)],
+            [SqlValue.Integer(2), SqlValue.Real(20), SqlValue.Integer(200)],
+            [SqlValue.Integer(20), SqlValue.Real(30), SqlValue.Integer(555)]);
+    }
+
+    [Test]
     public void DirectManagedAttachRejectsUnsafeAliasesUnknownSchemasAndCrossDatabaseQueries()
     {
         var fileSystem = new InMemoryFileSystem();

@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 14,
+    "current_conformance_expected_failures": 13,
     "last_reconciled": "2026-08-08",
     "entry_count": 211,
     "counts": {
@@ -1136,7 +1136,7 @@
       "layer": "compilation",
       "kind": "partial",
       "turso_ref": "turso-src/core/translate/attach.rs + schema resolution (ATTACH/DETACH, cross-database object references, temp-vs-main resolution)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (Managed ATTACH: file-backed primary only; cross-database statements rejected)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (Managed ATTACH routing and attached-target UPDATE with a main-schema predicate read)",
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [
@@ -1150,7 +1150,7 @@
         "alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db",
         "reindex.sqltest::reindex-attached-qualified-targets"
       ],
-      "notes": "Managed ATTACH requires file-backed primary and forbids cross-database statements entirely; temp/main mixed statements are rejected as cross-database. Blocks the entire 41-case trigger_attach_regression file plus pragma attached-database cases.",
+      "notes": "Managed ATTACH requires a file-backed primary except for connection-owned :memory: attachments. Most cross-database statements remain rejected because their independent catalogs cannot be committed atomically. Closed 2026-08-08: an attached-table UPDATE with no FROM, RETURNING, ORDER BY, LIMIT, OFFSET, or index directive can read main-schema tables through its predicate while mutating only the attached catalog. This aligns the target/read database separation Turso uses for update_attached_db_index.sqltest::update-attached-db-rowid-with-where-subquery without widening multi-database writes. Temp/main mixed statements and broader attached reads remain separate work.",
       "status": "open"
     },
     {
