@@ -232,6 +232,7 @@ public enum VdbeOpcode
     Last = 72,
     Prev = 73,
     RowSetTest = 74,
+    Program = 75,
 }
 
 /// <summary>
@@ -997,6 +998,118 @@ public sealed class VdbeWriteTarget
     public required Func<long?> Commit { get; init; }
 }
 
+/// <summary>
+/// The compiled program and fixed runtime bindings invoked by a <see cref="ProgramInstruction"/>.
+/// Parameters are supplied by the caller instruction from its parent register file for each invocation.
+/// </summary>
+public sealed class VdbeSubprogram
+{
+    private readonly object _syncRoot = new();
+    private ReadOnlyCollection<VdbeCursorSource?>? _cursorSources;
+    private ReadOnlyCollection<VdbeWriteTarget?>? _writeTargets;
+    private VdbeProgram? _program;
+
+    public VdbeSubprogram(
+        VdbeProgram program,
+        IEnumerable<VdbeCursorSource?>? cursorSources = null,
+        IEnumerable<VdbeWriteTarget?>? writeTargets = null)
+    {
+        ArgumentNullException.ThrowIfNull(program);
+        ParameterSlotCount = program.ParameterSlotCount;
+        Resolve(program, cursorSources, writeTargets);
+    }
+
+    private VdbeSubprogram(int parameterSlotCount)
+    {
+        if (parameterSlotCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(parameterSlotCount));
+
+        ParameterSlotCount = parameterSlotCount;
+    }
+
+    /// <summary>
+    /// Creates a subprogram reference that can be resolved once after its body has been built. This is
+    /// required when a foreign-key action recursively invokes the subprogram currently being compiled.
+    /// </summary>
+    public static VdbeSubprogram CreateDeferred(int parameterSlotCount) => new(parameterSlotCount);
+
+    /// <summary>
+    /// Resolves a deferred subprogram exactly once. The program's parameter-slot count must match the
+    /// deferred reference's declared count so every <see cref="ProgramInstruction"/> remains valid before
+    /// the recursive body is available.
+    /// </summary>
+    public void Resolve(
+        VdbeProgram program,
+        IEnumerable<VdbeCursorSource?>? cursorSources = null,
+        IEnumerable<VdbeWriteTarget?>? writeTargets = null)
+    {
+        ArgumentNullException.ThrowIfNull(program);
+        if (program.ParameterSlotCount != ParameterSlotCount)
+        {
+            throw new ArgumentException(
+                $"Expected a subprogram with {ParameterSlotCount} parameter slot(s) but received {program.ParameterSlotCount}.",
+                nameof(program));
+        }
+
+        var sources = cursorSources is null ? null : Array.AsReadOnly(cursorSources.ToArray());
+        if (sources is not null && sources.Count != program.CursorCount)
+        {
+            throw new ArgumentException(
+                $"Expected {program.CursorCount} cursor sources but received {sources.Count}.",
+                nameof(cursorSources));
+        }
+
+        var targets = writeTargets is null ? null : Array.AsReadOnly(writeTargets.ToArray());
+        if (targets is not null && targets.Count != program.CursorCount)
+        {
+            throw new ArgumentException(
+                $"Expected {program.CursorCount} write targets but received {targets.Count}.",
+                nameof(writeTargets));
+        }
+
+        lock (_syncRoot)
+        {
+            if (_program is not null)
+            {
+                throw new InvalidOperationException(
+                    "A VDBE subprogram can only be resolved once.");
+            }
+
+            _cursorSources = sources;
+            _writeTargets = targets;
+            _program = program;
+        }
+    }
+
+    public int ParameterSlotCount { get; }
+
+    public VdbeProgram Program
+    {
+        get
+        {
+            lock (_syncRoot)
+            {
+                return _program ?? throw new InvalidOperationException(
+                    "The recursive VDBE subprogram was not resolved before execution.");
+            }
+        }
+    }
+
+    public IReadOnlyList<VdbeCursorSource?>? CursorSources => _cursorSources;
+
+    public IReadOnlyList<VdbeWriteTarget?>? WriteTargets => _writeTargets;
+
+    internal ResumableStatement CreateRuntime(VdbeParameterBinding? parameterBinding)
+    {
+        lock (_syncRoot)
+        {
+            var program = _program ?? throw new InvalidOperationException(
+                "The recursive VDBE subprogram was not resolved before execution.");
+            return new ResumableStatement(program, _cursorSources, _writeTargets, parameterBinding);
+        }
+    }
+}
+
 public abstract record VdbeInstruction
 {
     public abstract VdbeOpcode Opcode { get; }
@@ -1328,6 +1441,33 @@ public sealed record InsertInstruction(Cursor Cursor) : VdbeInstruction
 public sealed record UpdateInstruction(Cursor Cursor) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.Update;
+}
+
+/// <summary>
+/// Invokes a nested VDBE program. Each register in <see cref="ParameterRegisters"/> becomes the value
+/// of the equally positioned parameter slot in <see cref="Subprogram"/>; rows produced by the child are
+/// consumed internally, as required for trigger and foreign-key action programs.
+/// </summary>
+public sealed record ProgramInstruction : VdbeInstruction
+{
+    private readonly ReadOnlyCollection<Register> _parameterRegisters;
+
+    public ProgramInstruction(
+        IEnumerable<Register> parameterRegisters,
+        VdbeSubprogram subprogram)
+    {
+        ArgumentNullException.ThrowIfNull(parameterRegisters);
+        ArgumentNullException.ThrowIfNull(subprogram);
+
+        _parameterRegisters = Array.AsReadOnly(parameterRegisters.ToArray());
+        Subprogram = subprogram;
+    }
+
+    public IReadOnlyList<Register> ParameterRegisters => _parameterRegisters;
+
+    public VdbeSubprogram Subprogram { get; }
+
+    public override VdbeOpcode Opcode => VdbeOpcode.Program;
 }
 
 public sealed record CommitInstruction(Cursor Cursor) : VdbeInstruction
@@ -2262,6 +2402,16 @@ public sealed class VdbeProgram
                     break;
                 case UpdateInstruction update:
                     ValidateOpenCursor(update.Cursor, openCursors, instructionIndex);
+                    break;
+                case ProgramInstruction program:
+                    if (program.ParameterRegisters.Count != program.Subprogram.ParameterSlotCount)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} passes {program.ParameterRegisters.Count} parameter register(s) to a subprogram declaring {program.Subprogram.ParameterSlotCount} slot(s).");
+                    }
+
+                    foreach (var parameterRegister in program.ParameterRegisters)
+                        ValidateRegister(parameterRegister, instructionIndex);
                     break;
                 case CommitInstruction commit:
                     ValidateOpenCursor(commit.Cursor, openCursors, instructionIndex);

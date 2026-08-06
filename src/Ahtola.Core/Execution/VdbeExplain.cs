@@ -304,6 +304,12 @@ public static class VdbeExplain
                 0,
                 null,
                 $"update current row of cursor {update.Cursor.Index}"),
+            ProgramInstruction program => (
+                program.ParameterRegisters.Count,
+                0,
+                0,
+                "subprogram",
+                $"invoke subprogram with {FormatRegisters(program.ParameterRegisters)}"),
             CommitInstruction commit => (
                 commit.Cursor.Index,
                 0,
@@ -485,6 +491,14 @@ public static class VdbeExplain
             ? $"r[{start}]"
             : $"r[{start}..{start + range.Count - 1}]";
     }
+
+    private static string FormatRegisters(IReadOnlyList<Register> registers)
+        => registers.Count switch
+        {
+            0 => "r[]",
+            1 => $"r[{registers[0].Index}]",
+            _ => $"r[{string.Join(", ", registers.Select(register => register.Index))}]",
+        };
 
     private static string FormatArithmetic(ArithmeticInstruction arithmetic)
     {

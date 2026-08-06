@@ -47,6 +47,7 @@ public sealed class ResumableStatement : IDisposable
     private readonly Dictionary<SqlValue[], int>?[] _groupIndexes;
     private readonly int[] _rowSetPositions;
     private readonly Dictionary<int, IntegerRowSet> _integerRowSets = [];
+    private readonly Dictionary<int, ResumableStatement> _subprogramStatements = [];
     private readonly WorkTableRuntime?[] _workTables;
     private readonly WindowBufferRuntime?[] _windowBuffers;
     private readonly IReadOnlyList<VdbeCursorSource?>? _cursorSources;
@@ -629,6 +630,10 @@ public sealed class ResumableStatement : IDisposable
                         AdvanceInstructionPointer();
                         break;
                     }
+                case ProgramInstruction program:
+                    if (ExecuteSubprogram(program, cancellationToken))
+                        return ResumableStatementStepResult.Yielded;
+                    break;
                 case CommitInstruction commit:
                     {
                         try
@@ -1216,6 +1221,8 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_groupIndexes);
         Array.Clear(_rowSetPositions);
         _integerRowSets.Clear();
+        foreach (var subprogram in _subprogramStatements.Values)
+            subprogram.Reset();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
         _transaction.Reset();
@@ -1284,6 +1291,9 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_groupIndexes);
         Array.Clear(_rowSetPositions);
         _integerRowSets.Clear();
+        foreach (var subprogram in _subprogramStatements.Values)
+            subprogram.Dispose();
+        _subprogramStatements.Clear();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
         _transaction.Reset();
@@ -1307,6 +1317,54 @@ public sealed class ResumableStatement : IDisposable
             throw new InvalidOperationException($"Cursor {cursor.Index} is not open.");
 
         _openCursors[cursor.Index] = false;
+    }
+
+    private bool ExecuteSubprogram(ProgramInstruction instruction, CancellationToken cancellationToken)
+    {
+        var instructionOffset = _instructionPointer.Offset;
+        if (!_subprogramStatements.TryGetValue(instructionOffset, out var subprogram))
+        {
+            subprogram = instruction.Subprogram.CreateRuntime(CreateSubprogramBinding(instruction));
+            _subprogramStatements.Add(instructionOffset, subprogram);
+        }
+        else if (subprogram.State == ResumableStatementState.Yielded)
+        {
+            subprogram.Resume();
+        }
+        else
+        {
+            subprogram.Reset();
+            if (instruction.ParameterRegisters.Count != 0)
+                subprogram.Rebind(CreateSubprogramBinding(instruction)!);
+        }
+
+        while (true)
+        {
+            switch (subprogram.StepResumable(cancellationToken))
+            {
+                case ResumableStatementStepResult.Row:
+                    continue;
+                case ResumableStatementStepResult.Yielded:
+                    State = ResumableStatementState.Yielded;
+                    return true;
+                case ResumableStatementStepResult.Done:
+                    AdvanceInstructionPointer();
+                    return false;
+                default:
+                    throw new InvalidOperationException("Nested VDBE program returned an unknown step result.");
+            }
+        }
+    }
+
+    private VdbeParameterBinding? CreateSubprogramBinding(ProgramInstruction instruction)
+    {
+        if (instruction.ParameterRegisters.Count == 0)
+            return null;
+
+        var values = new SqlValue[instruction.ParameterRegisters.Count];
+        for (var index = 0; index < values.Length; index++)
+            values[index] = _registers[instruction.ParameterRegisters[index].Index];
+        return VdbeParameterBinding.FromValues(values);
     }
 
     private void OpenSorter(OpenSorterInstruction instruction)

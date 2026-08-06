@@ -17,6 +17,7 @@ public class VdbeProgramTests
         ((int)VdbeOpcode.JumpIfNotTrue).Should().Be(67);
         ((int)VdbeOpcode.Cast).Should().Be(68);
         ((int)VdbeOpcode.RowSetTest).Should().Be(74);
+        ((int)VdbeOpcode.Program).Should().Be(75);
 
         typeof(VdbeProgram).GetConstructor(
             [
@@ -170,6 +171,205 @@ public class VdbeProgramTests
 
         statement.Resume();
         statement.Step().Should().Be(StatementStepResult.Done);
+    }
+
+    [Test]
+    public void ProgramInstructionBindsParentRegistersAndSuppressesChildRows()
+    {
+        var childRegister = new Register(0);
+        var child = new VdbeSubprogram(new VdbeProgram(
+            registerCount: 1,
+            cursorCount: 0,
+            [
+                new LoadParameterInstruction(childRegister, new ParameterSlot(0)),
+                new ResultRowInstruction(new RegisterRange(childRegister, 1)),
+                new HaltInstruction(),
+            ],
+            parameterSlotCount: 1));
+        var parentRegister = new Register(0);
+        using var statement = new ResumableStatement(new VdbeProgram(
+            registerCount: 1,
+            cursorCount: 0,
+            [
+                new LoadConstantInstruction(parentRegister, SqlValue.Integer(7)),
+                new ProgramInstruction([parentRegister], child),
+                new LoadConstantInstruction(parentRegister, SqlValue.Integer(9)),
+                new ResultRowInstruction(new RegisterRange(parentRegister, 1)),
+                new HaltInstruction(),
+            ]));
+
+        statement.StepResumable().Should().Be(ResumableStatementStepResult.Row);
+        statement.CurrentRow.Should().Equal(SqlValue.Integer(9));
+        statement.StepResumable().Should().Be(ResumableStatementStepResult.Done);
+    }
+
+    [Test]
+    public void ProgramInstructionRendersItsRegisterBindingsForExplain()
+    {
+        var child = new VdbeSubprogram(new VdbeProgram(
+            registerCount: 0,
+            cursorCount: 0,
+            [new HaltInstruction()]));
+
+        var (p1, p2, p3, p4, comment) = VdbeExplain.Describe(
+            new ProgramInstruction([new Register(2), new Register(4)], child));
+
+        p1.Should().Be(2);
+        p2.Should().Be(0);
+        p3.Should().Be(0);
+        p4.Should().Be("subprogram");
+        comment.Should().Be("invoke subprogram with r[2, 4]");
+    }
+
+    [Test]
+    public void ProgramInstructionPropagatesChildYieldUntilResumed()
+    {
+        var child = new VdbeSubprogram(new VdbeProgram(
+            registerCount: 0,
+            cursorCount: 0,
+            [
+                new YieldInstruction(),
+                new HaltInstruction(),
+            ]));
+        using var statement = new ResumableStatement(new VdbeProgram(
+            registerCount: 0,
+            cursorCount: 0,
+            [
+                new ProgramInstruction([], child),
+                new HaltInstruction(),
+            ]));
+
+        statement.StepResumable().Should().Be(ResumableStatementStepResult.Yielded);
+        statement.State.Should().Be(ResumableStatementState.Yielded);
+
+        statement.Resume();
+        statement.StepResumable().Should().Be(ResumableStatementStepResult.Done);
+    }
+
+    [Test]
+    public void ProgramInstructionResetsItsCachedChildBeforeEachInvocation()
+    {
+        var deleted = new List<int>();
+        var commits = 0;
+        var writeTarget = new VdbeWriteTarget
+        {
+            TableName = "child",
+            RowCount = 1,
+            GetRow = _ => [SqlValue.Integer(1)],
+            GetRowId = _ => 1,
+            DeleteRow = deleted.Add,
+            Commit = () =>
+            {
+                commits++;
+                return null;
+            },
+        };
+        var child = new VdbeSubprogram(
+            new VdbeProgram(
+                registerCount: 0,
+                cursorCount: 1,
+                [
+                    new OpenWriteCursorInstruction(new Cursor(0), "child", 1),
+                    new RewindCursorInstruction(new Cursor(0), new ProgramCounter(4)),
+                    new DeleteInstruction(new Cursor(0)),
+                    new NextInstruction(new Cursor(0), new ProgramCounter(2)),
+                    new CommitInstruction(new Cursor(0)),
+                    new CloseCursorInstruction(new Cursor(0)),
+                    new HaltInstruction(),
+                ]),
+            writeTargets: [writeTarget]);
+        var program = new VdbeProgram(
+            registerCount: 0,
+            cursorCount: 1,
+            [
+                new OpenReadCursorInstruction(new Cursor(0), "parent", 1),
+                new RewindCursorInstruction(new Cursor(0), new ProgramCounter(4)),
+                new ProgramInstruction([], child),
+                new NextInstruction(new Cursor(0), new ProgramCounter(2)),
+                new CloseCursorInstruction(new Cursor(0)),
+                new HaltInstruction(),
+            ]);
+        using var statement = new ResumableStatement(
+            program,
+            [new VdbeCursorSource([[SqlValue.Integer(1)], [SqlValue.Integer(2)]])]);
+
+        statement.StepResumable().Should().Be(ResumableStatementStepResult.Done);
+
+        deleted.Should().Equal(0, 0);
+        commits.Should().Be(2);
+    }
+
+    [Test]
+    public void DeferredProgramInstructionResolvesARecursiveSubprogram()
+    {
+        var parameter = new Register(0);
+        var decrement = new Register(1);
+        var recursive = VdbeSubprogram.CreateDeferred(parameterSlotCount: 1);
+        var childProgram = new VdbeProgram(
+            registerCount: 2,
+            cursorCount: 0,
+            [
+                new LoadParameterInstruction(parameter, new ParameterSlot(0)),
+                new JumpIfInstruction(parameter, new ProgramCounter(3)),
+                new GotoInstruction(new ProgramCounter(6)),
+                new LoadConstantInstruction(decrement, SqlValue.Integer(1)),
+                new ArithmeticInstruction(
+                    parameter,
+                    ArithmeticOperator.Subtract,
+                    new RegisterRange(parameter, 2)),
+                new ProgramInstruction([parameter], recursive),
+                new HaltInstruction(),
+            ],
+            parameterSlotCount: 1);
+        recursive.Resolve(childProgram);
+        using var statement = new ResumableStatement(new VdbeProgram(
+            registerCount: 1,
+            cursorCount: 0,
+            [
+                new LoadConstantInstruction(parameter, SqlValue.Integer(4)),
+                new ProgramInstruction([parameter], recursive),
+                new HaltInstruction(),
+            ]));
+
+        statement.StepResumable().Should().Be(ResumableStatementStepResult.Done);
+    }
+
+    [Test]
+    public void DeferredProgramInstructionFailsClearlyBeforeResolution()
+    {
+        var recursive = VdbeSubprogram.CreateDeferred(parameterSlotCount: 0);
+        using var statement = new ResumableStatement(new VdbeProgram(
+            registerCount: 0,
+            cursorCount: 0,
+            [
+                new ProgramInstruction([], recursive),
+                new HaltInstruction(),
+            ]));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => statement.StepResumable());
+
+        exception!.Message.Should().Be("The recursive VDBE subprogram was not resolved before execution.");
+    }
+
+    [Test]
+    public void ProgramInstructionRejectsAnArgumentCountDifferentFromItsSubprogramSlots()
+    {
+        var child = new VdbeSubprogram(new VdbeProgram(
+            registerCount: 1,
+            cursorCount: 0,
+            [
+                new LoadParameterInstruction(new Register(0), new ParameterSlot(0)),
+                new HaltInstruction(),
+            ],
+            parameterSlotCount: 1));
+
+        Assert.Throws<VdbeProgramValidationException>(() => new VdbeProgram(
+            registerCount: 0,
+            cursorCount: 0,
+            [
+                new ProgramInstruction([], child),
+                new HaltInstruction(),
+            ]));
     }
 
     [Test]

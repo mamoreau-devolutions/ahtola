@@ -81,7 +81,7 @@
       "layer": "vdbe",
       "kind": "missing",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::HashBuild, HashDistinct, HashBuildFinalize, HashProbe, HashNext, HashClose, HashClear, HashMarkMatched, HashResetMatched, HashScanUnmatched, HashNextUnmatched, HashGraceInit, HashLoadPartition, HashNextProbe, HashAdvancePartition (16 opcodes; turso-src/core/vdbe/hash_table.rs)",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs (VdbeSubprogram, ProgramInstruction); src/Ahtola.Core/Execution/ResumableStatement.cs (nested runtime execution)",
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [],
@@ -175,7 +175,7 @@
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [],
-      "notes": "No subprogram or subroutine machinery: triggers cannot fire from compiled DML because there is no Program opcode to invoke a sub-program with its own register frame, and no Gosub/Return for shared code blocks. Ahtola programs are straight-line with explicit targets; subroutines are inlined at compile time. Prerequisite for any trigger support.",
+      "notes": "The Program primitive now invokes a child VDBE program with a separate register frame, fixed parent-register bindings, cached resumable child state, suppressed child rows, and a deferred form for recursive references. It is not yet wired into DML lowering, and Gosub/Return/BeginSubrtn are still absent; triggers and FK actions therefore continue to use the tree-walking implementation. Further work must preserve Turso's trigger/FK change-counter, error, and statement-rollback timing.",
       "status": "open"
     },
     {
