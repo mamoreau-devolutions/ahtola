@@ -51,6 +51,7 @@ public sealed class ResumableStatement : IDisposable
     private readonly Dictionary<int, ResumableStatement> _subprogramStatements = [];
     private readonly WorkTableRuntime?[] _workTables;
     private readonly WindowBufferRuntime?[] _windowBuffers;
+    private readonly EphemeralTableRuntime?[] _ephemeralTables;
     private readonly IReadOnlyList<VdbeCursorSource?>? _cursorSources;
     private readonly IReadOnlyList<VdbeWriteTarget?>? _writeTargets;
     private readonly VdbeTransactionContext _transaction = new();
@@ -99,6 +100,7 @@ public sealed class ResumableStatement : IDisposable
         _rowSetPositions = new int[program.DistinctSetCount];
         _workTables = new WorkTableRuntime?[program.WorkTableCount];
         _windowBuffers = new WindowBufferRuntime?[program.WindowBufferCount];
+        _ephemeralTables = new EphemeralTableRuntime?[program.CursorCount];
         _cursorSources = cursorSources;
         _writeTargets = writeTargets;
         _binding = parameterBinding;
@@ -267,10 +269,26 @@ public sealed class ResumableStatement : IDisposable
                     _materializedRows[openWrite.Cursor.Index] = null;
                     AdvanceInstructionPointer();
                     break;
+                case OpenEphemeralInstruction openEphemeral:
+                    OpenCursor(openEphemeral.Cursor);
+                    _ephemeralTables[openEphemeral.Cursor.Index] = new EphemeralTableRuntime(openEphemeral.ColumnCount);
+                    _cursorPositions[openEphemeral.Cursor.Index] = -1;
+                    _materializedRows[openEphemeral.Cursor.Index] = null;
+                    AdvanceInstructionPointer();
+                    break;
+                case EphemeralInsertInstruction ephemeralInsert:
+                    {
+                        var table = RequireEphemeralTable(ephemeralInsert.Cursor);
+                        var row = ReadRegisters(ephemeralInsert.Values);
+                        table.Insert(row);
+                        AdvanceInstructionPointer();
+                        break;
+                    }
                 case CloseCursorInstruction close:
                     CloseCursor(close.Cursor);
                     _joinCursorStates[close.Cursor.Index]?.Close();
                     _joinCursorStates[close.Cursor.Index] = null;
+                    _ephemeralTables[close.Cursor.Index] = null;
                     AdvanceInstructionPointer();
                     break;
                 case RewindCursorInstruction rewind:
@@ -1172,6 +1190,7 @@ public sealed class ResumableStatement : IDisposable
                         DisposeAllJoinCursors();
                         DisposeAllSorters();
                         Array.Clear(_windowBuffers);
+                        Array.Clear(_ephemeralTables);
                         if (halt.ErrorCode != 0)
                             throw CreateHaltException(halt);
 
@@ -1187,6 +1206,7 @@ public sealed class ResumableStatement : IDisposable
                             DisposeAllJoinCursors();
                             DisposeAllSorters();
                             Array.Clear(_windowBuffers);
+                            Array.Clear(_ephemeralTables);
                             throw CreateHaltIfNullException(haltIfNull);
                         }
 
@@ -1232,6 +1252,7 @@ public sealed class ResumableStatement : IDisposable
             subprogram.Reset();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
+        Array.Clear(_ephemeralTables);
         _transaction.Reset();
         _currentRow = null;
         _instructionPointer = default;
@@ -1491,6 +1512,9 @@ public sealed class ResumableStatement : IDisposable
 
     private VdbeCursorSource RequireCursorSource(Cursor cursor)
     {
+        if (_ephemeralTables[cursor.Index] is { } ephemeral)
+            return ephemeral.AsCursorSource();
+
         var source = _cursorSources is not null && cursor.Index < _cursorSources.Count
             ? _cursorSources[cursor.Index]
             : null;
@@ -1499,6 +1523,11 @@ public sealed class ResumableStatement : IDisposable
             ?? throw new InvalidOperationException(
                 $"Cursor {cursor.Index} has no bound row source.");
     }
+
+    private EphemeralTableRuntime RequireEphemeralTable(Cursor cursor)
+        => _ephemeralTables[cursor.Index]
+            ?? throw new InvalidOperationException(
+                $"Cursor {cursor.Index} is not an open ephemeral table.");
 
     private VdbeWriteTarget? WriteTargetOrNull(Cursor cursor)
         => _writeTargets is not null && cursor.Index < _writeTargets.Count
@@ -1796,6 +1825,47 @@ public sealed class ResumableStatement : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    /// <summary>
+    /// In-memory ephemeral table backing an <see cref="OpenEphemeralInstruction"/> cursor.
+    /// Rows are append-only with sequential 1-based rowids for SeekRowid/NotExists/Found.
+    /// </summary>
+    private sealed class EphemeralTableRuntime
+    {
+        private readonly int _columnCount;
+        private readonly List<SqlValue[]> _rows = [];
+        private readonly List<long> _rowIds = [];
+        private VdbeCursorSource? _sourceView;
+        private long _nextRowId = 1;
+
+        public EphemeralTableRuntime(int columnCount)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(columnCount);
+            _columnCount = columnCount;
+        }
+
+        public int ColumnCount => _columnCount;
+
+        public int RowCount => _rows.Count;
+
+        public void Insert(SqlValue[] row)
+        {
+            ArgumentNullException.ThrowIfNull(row);
+            if (row.Length != _columnCount)
+            {
+                throw new InvalidOperationException(
+                    $"Ephemeral insert has {row.Length} columns but the table has {_columnCount}.");
+            }
+
+            _rows.Add(row.ToArray());
+            _rowIds.Add(_nextRowId);
+            _nextRowId = checked(_nextRowId + 1);
+            _sourceView = null;
+        }
+
+        public VdbeCursorSource AsCursorSource()
+            => _sourceView ??= new VdbeCursorSource(_rows, _rowIds);
     }
 
     // Turso's RowSetTest keeps inserts from the current batch separate so a batch cannot match itself.

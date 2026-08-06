@@ -659,17 +659,22 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
-    public void OrderByRowidAscDoesNotEmitReverseScan()
+    public void OrderByRowidAscElidesSorterAndUsesForwardScan()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
         Execute(connection, "CREATE TABLE t(v TEXT);");
         Execute(connection, "INSERT INTO t VALUES ('a'),('b'),('c');");
 
-        // ASC is not the reverse-scan gate (Descending only); a bare `ORDER BY rowid` key
-        // also declines the sorter route, so this runs on the evaluator (EXPLAIN throws),
-        // and ascending order is still correct.
-        AssertExplainUsesEvaluator(connection, "SELECT v FROM t ORDER BY rowid ASC;");
+        // ASC rowid order matches the physical scan order, so the compiler elides
+        // the sorter and emits a plain Rewind/Next plan (no Sorter*, no Last/Prev).
+        RouteUsesSorter(connection, "SELECT v FROM t ORDER BY rowid ASC;").Should().BeFalse();
+        var opcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT v FROM t ORDER BY rowid ASC;"));
+        opcodes.Should().Contain("Rewind");
+        opcodes.Should().Contain("Next");
+        opcodes.Should().NotContain("Last");
+        opcodes.Should().NotContain("Prev");
+        opcodes.Should().NotContain(op => op.Contains("Sorter", StringComparison.Ordinal));
 
         ReadRows(connection, "SELECT v FROM t ORDER BY rowid ASC;")
             .Select(row => row[0])

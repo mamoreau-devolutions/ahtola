@@ -46,8 +46,8 @@
         "S": 99
       },
       "by_status": {
-        "open": 34,
-        "closed": 177
+        "open": 33,
+        "closed": 178
       }
     },
     "schema": {
@@ -210,8 +210,8 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "No general-purpose ephemeral btree opcode: Turso materializes IN (...) sets, DISTINCT intermediates, subquery results, and auto-indexes into ephemeral tables with full cursor semantics (seek/scan). Ahtola's only ephemeral store is the recursive-CTE work table; IN-list materialization and subquery materialization fall back to in-memory arrays/delegates, which caps planner options (no ephemeral index over a materialized subquery). OpenPseudo/OpenDup are minor conveniences Ahtola does not need structurally.",
-      "status": "open"
+      "notes": "Closed 2026-08-06. OpenEphemeralInstruction opens a general-purpose in-memory table on a cursor (Turso OpenEphemeral); EphemeralInsertInstruction appends register rows with sequential rowids. Scans use the existing Rewind/Next/Column/RowId path; SeekRowid/NotExists/Found work via the ephemeral source's rowid list. Distinct from OpenWorkTable (recursive-CTE FIFO). OpenPseudo/OpenDup remain unnecessary. Residual: compiler emission for IN-list/DISTINCT/subquery materialization (still uses arrays/delegates until planner adopts these opcodes). Evidence: VdbeEphemeralTableOpcodeTests.",
+      "status": "closed"
     },
     {
       "id": "vdbe-autoindex-for-joins",

@@ -21,6 +21,8 @@ public class VdbeProgramTests
         ((int)VdbeOpcode.NotExists).Should().Be(76);
         ((int)VdbeOpcode.Found).Should().Be(77);
         ((int)VdbeOpcode.HaltIfNull).Should().Be(78);
+        ((int)VdbeOpcode.OpenEphemeral).Should().Be(79);
+        ((int)VdbeOpcode.EphemeralInsert).Should().Be(80);
 
         typeof(VdbeProgram).GetConstructor(
             [

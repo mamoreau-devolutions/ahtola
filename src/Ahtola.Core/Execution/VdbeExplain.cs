@@ -181,6 +181,18 @@ public static class VdbeExplain
                 found.RowIdRegister.Index,
                 null,
                 found.Description),
+            OpenEphemeralInstruction openEphemeral => (
+                openEphemeral.Cursor.Index,
+                openEphemeral.ColumnCount,
+                0,
+                null,
+                $"open ephemeral cursor {openEphemeral.Cursor.Index} cols={openEphemeral.ColumnCount}"),
+            EphemeralInsertInstruction ephemeralInsert => (
+                ephemeralInsert.Cursor.Index,
+                ephemeralInsert.Values.Start.Index,
+                ephemeralInsert.Values.Count,
+                null,
+                $"insert into ephemeral cursor {ephemeralInsert.Cursor.Index} from {FormatRange(ephemeralInsert.Values)}"),
             SeekRowidRangeInstruction seekRowidRange => (
                 seekRowidRange.Cursor.Index,
                 seekRowidRange.NotFoundTarget.Offset,

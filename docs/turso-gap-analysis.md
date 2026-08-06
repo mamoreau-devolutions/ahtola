@@ -12,7 +12,7 @@ the machine-readable inventory, with stable IDs for status tracking
 time (171 entries)**; the JSON is the live tracking source of truth. Closure
 progress since analysis (waves F1–F2.18) is recorded in
 [section 11](#11-closure-progress-since-analysis), and current counts are:
-**211 entries, 177 closed**; expected-failures file down from **606 → 11**
+**211 entries, 178 closed**; expected-failures file down from **606 → 11**
 lines, all of which require Turso's unported MVCC engine.
 
 **Ground truth.** `src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt`
@@ -840,7 +840,7 @@ conformance cases → full managed lane (3755+ tests, green) → resolved keys
 removed from `managed-sqltest-expected-failures.txt` → inventory entry flipped
 `open → closed`.
 
-**Totals.** 175 entries closed since analysis (177 including the 2 `parity`
+**Totals.** 176 entries closed since analysis (178 including the 2 `parity`
 entries closed at analysis time); the inventory grew 171 → **211** entries as
 closure work surfaced adjacent gaps that were recorded rather than folded in;
 the expected-failures file dropped **606 → 11** lines (595 cleared; lines
@@ -871,6 +871,8 @@ aggregates because the EF Core provider depends on them).
 | **F2.20 — under-full leaf merge + vacuum scope** | 2026-08-06 | `storage-no-incremental-vacuum` (closed — Turso also rejects Incremental; freelist+merge is the managed reclaim path); `storage-no-btree-balancing` further partial — table under-full sibling merge when cells fit | 11 → 11 |
 | **F2.21 — Halt/HaltIfNull + rowid Found/NotExists** | 2026-08-06 | `vdbe-halt-error-model` (closed); `vdbe-seek-op-family-partial` partial — NotExists/Found rowid probes; record-key SeekGE family still open | 11 → 11 |
 | **F2.22 — Insert/Update flag semantics** | 2026-08-06 | `vdbe-insert-update-flag-semantics` (closed — VdbeInsertFlags + RequireSeek/change-count enforcement) | 11 → 11 |
+| **F2.23 — OpenEphemeral** | 2026-08-06 | `vdbe-open-ephemeral` (closed — OpenEphemeral + EphemeralInsert with Rewind/Seek/Found family) | 11 → 11 |
+| **F2.24 — rowid ORDER BY elision** | 2026-08-06 | `compile-no-order-by-elision-from-index` partial — bare rowid ASC/DESC elides sorter; secondary-index ORDER BY still open | 11 → 11 |
 
 Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
 redistributed onto a newly-unmasked blocker within the same commit group.

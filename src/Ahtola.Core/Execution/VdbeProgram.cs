@@ -239,6 +239,10 @@ public enum VdbeOpcode
     Found = 77,
     /// <summary>Halt when register P3 is NULL (Turso/SQLite <c>HaltIfNull</c> / NOT NULL checks).</summary>
     HaltIfNull = 78,
+    /// <summary>Open a general-purpose in-memory ephemeral table bound to a cursor (Turso <c>OpenEphemeral</c>).</summary>
+    OpenEphemeral = 79,
+    /// <summary>Append one row from registers into an ephemeral table cursor.</summary>
+    EphemeralInsert = 80,
 }
 
 /// <summary>
@@ -1958,6 +1962,28 @@ public sealed record FoundInstruction(
 }
 
 /// <summary>
+/// Opens a general-purpose in-memory ephemeral table on <paramref name="Cursor"/> with
+/// <paramref name="ColumnCount"/> columns (Turso/SQLite <c>OpenEphemeral</c>). Rows are
+/// appended with <see cref="EphemeralInsertInstruction"/> and scanned with the normal
+/// Rewind/Next/Column/SeekRowid/NotExists/Found family. Unlike
+/// <see cref="OpenWorkTableInstruction"/> this is not recursion-specific — it is the
+/// store used for IN-list materialization, DISTINCT intermediates, and subquery results.
+/// </summary>
+public sealed record OpenEphemeralInstruction(Cursor Cursor, int ColumnCount) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.OpenEphemeral;
+}
+
+/// <summary>
+/// Appends the values in <paramref name="Values"/> as one row of the ephemeral table
+/// opened on <paramref name="Cursor"/>, assigning the next sequential rowid.
+/// </summary>
+public sealed record EphemeralInsertInstruction(Cursor Cursor, RegisterRange Values) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.EphemeralInsert;
+}
+
+/// <summary>
 /// Opens the statement's outermost transaction over the interpreter's mutable register state,
 /// snapshotting the register file so a later <see cref="RollbackTransactionInstruction"/> can restore
 /// it. It fails at run time when a transaction is already open, mirroring SQLite's "cannot start a
@@ -2496,6 +2522,33 @@ public sealed class VdbeProgram
 
                     openCursors[openWrite.Cursor.Index] = true;
                     cursorColumnCounts[openWrite.Cursor.Index] = openWrite.ColumnCount;
+                    break;
+                case OpenEphemeralInstruction openEphemeral:
+                    ValidateCursor(openEphemeral.Cursor, instructionIndex);
+                    if (openCursors[openEphemeral.Cursor.Index])
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} opens cursor {openEphemeral.Cursor.Index} twice.");
+                    }
+
+                    if (openEphemeral.ColumnCount <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} opens ephemeral cursor {openEphemeral.Cursor.Index} with a non-positive column count.");
+                    }
+
+                    openCursors[openEphemeral.Cursor.Index] = true;
+                    cursorColumnCounts[openEphemeral.Cursor.Index] = openEphemeral.ColumnCount;
+                    break;
+                case EphemeralInsertInstruction ephemeralInsert:
+                    ValidateOpenCursor(ephemeralInsert.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(ephemeralInsert.Values, instructionIndex);
+                    if (ephemeralInsert.Values.Count != cursorColumnCounts[ephemeralInsert.Cursor.Index])
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} inserts {ephemeralInsert.Values.Count} columns into ephemeral cursor {ephemeralInsert.Cursor.Index}, which has {cursorColumnCounts[ephemeralInsert.Cursor.Index]} columns.");
+                    }
+
                     break;
                 case CloseCursorInstruction close:
                     ValidateCursor(close.Cursor, instructionIndex);

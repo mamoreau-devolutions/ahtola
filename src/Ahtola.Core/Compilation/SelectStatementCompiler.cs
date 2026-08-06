@@ -117,35 +117,33 @@ internal sealed class SelectStatementCompiler
     {
         compiled = null!;
 
-        // P1-21 reverse traversal: `ORDER BY rowid DESC` on a single table with no
-        // WHERE/GROUP BY/HAVING/LIMIT/OFFSET/DISTINCT lowers to a backward table scan
-        // (Last/Prev) instead of the sorter route, so rows are visited in descending
-        // rowid order without materializing a sorter. Only the bare rowid/_rowid_/oid
-        // reference is detected here; the INTEGER-PK-alias column name (e.g. `id`)
-        // resolves to a declared column (`IsTargetRowIdReference` returns false) and
-        // stays on the sorter path. Index-backed backward walks need the TableAccessPlan
-        // optimizer seam (absent) and are intentionally not handled. ScanTarget materializes
-        // table cursor sources in rowid order, so walking positions backward follows physical
-        // rowids in descending order.
-        if (statement.OrderBy.Count == 1
-            && statement.OrderBy[0].Descending
-            && statement.Where is null
-            && statement.GroupBy.Count == 0
-            && statement.Having is null
-            && statement.Limit is null
-            && statement.Offset is null
-            && !statement.Distinct
-            && _resolveScanTarget(statement.Source!) is { } descTarget
-            && descTarget.HasRowId
-            && statement.OrderBy[0].Expression is ColumnExpression descColumn
-            && IsTargetRowIdReference(descColumn, descTarget))
+        // Rowid ORDER BY elision (Turso order.rs eliminate_order_by subset):
+        // ScanTarget materializes rows in ascending rowid order, so
+        //   ORDER BY rowid ASC  → plain Rewind/Next scan (no sorter)
+        //   ORDER BY rowid DESC → Last/Prev reverse scan (no sorter)
+        // Only bare rowid/_rowid_/oid (IsTargetRowIdReference); INTEGER PK alias
+        // columns and secondary-index ORDER BY stay on the sorter path until the
+        // access-method planner lands. WHERE/GROUP BY/HAVING/LIMIT/OFFSET/DISTINCT
+        // still block elision (predicate + reverse path not combined yet).
+        if (TryGetBareRowidOrderBy(statement, out var rowidOrderTarget, out var rowidOrderDescending))
         {
-            return TryCompileReverseRowidScan(statement, descTarget, out compiled);
+            if (rowidOrderDescending)
+                return TryCompileReverseRowidScan(statement, rowidOrderTarget, out compiled);
+
+            // ASC: fall through into the forward-scan compiler with OrderBy treated
+            // as already satisfied (gate below uses elideOrderBy).
         }
+        else
+        {
+            rowidOrderTarget = null;
+            rowidOrderDescending = false;
+        }
+
+        var elideOrderBy = rowidOrderTarget is not null && !rowidOrderDescending;
 
         if (statement.Having is not null
             || statement.GroupBy.Count != 0
-            || statement.OrderBy.Count != 0
+            || (statement.OrderBy.Count != 0 && !elideOrderBy)
             || statement.Limit is not null
             || statement.Offset is not null
             || statement.Projections.Count == 0)
@@ -587,6 +585,37 @@ internal sealed class SelectStatementCompiler
                     column.Name[..separator],
                     target.Qualifier,
                     StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// True when the statement is a single-table scan whose only ordering key is
+    /// bare rowid (ASC or DESC) and no other clause blocks elision.
+    /// </summary>
+    private bool TryGetBareRowidOrderBy(
+        SelectStatement statement,
+        out ScanTarget target,
+        out bool descending)
+    {
+        target = null!;
+        descending = false;
+        if (statement.OrderBy.Count != 1
+            || statement.Where is not null
+            || statement.GroupBy.Count != 0
+            || statement.Having is not null
+            || statement.Limit is not null
+            || statement.Offset is not null
+            || statement.Distinct
+            || _resolveScanTarget(statement.Source!) is not { } resolved
+            || !resolved.HasRowId
+            || statement.OrderBy[0].Expression is not ColumnExpression column
+            || !IsTargetRowIdReference(column, resolved))
+        {
+            return false;
+        }
+
+        target = resolved;
+        descending = statement.OrderBy[0].Descending;
+        return true;
     }
 
     /// <summary>
