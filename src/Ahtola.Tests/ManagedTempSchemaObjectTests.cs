@@ -324,6 +324,40 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void RenamingMainColumnRewritesTempTriggerBodiesLikeSqlite()
+    {
+        using var database = new EmbeddedDatabase();
+        using var managed = database.Connect();
+        using var sqlite = OpenSqlite();
+        var setup = new[]
+        {
+            "CREATE TABLE src_temp_main (a INTEGER PRIMARY KEY, b)",
+            "CREATE TABLE log_temp_main (v)",
+            "CREATE TEMP TABLE temp_driver_main (x)",
+            "INSERT INTO src_temp_main VALUES (1, 500)",
+            "CREATE TRIGGER trig_temp_main AFTER INSERT ON temp.temp_driver_main BEGIN "
+                + "INSERT INTO log_temp_main SELECT b FROM src_temp_main WHERE a = new.x; END",
+        };
+        foreach (var sql in setup)
+        {
+            Execute(managed, sql);
+            Execute(sqlite, sql);
+        }
+
+        Execute(managed, "ALTER TABLE src_temp_main RENAME COLUMN b TO c");
+        Execute(sqlite, "ALTER TABLE src_temp_main RENAME COLUMN b TO c");
+        Execute(managed, "INSERT INTO temp.temp_driver_main VALUES (1)");
+        Execute(sqlite, "INSERT INTO temp.temp_driver_main VALUES (1)");
+
+        AssertQueriesMatch(managed, sqlite, "SELECT v FROM log_temp_main");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT instr(sql, 'src_temp_main') > 0, instr(sql, ' b ') = 0 "
+                + "FROM temp.sqlite_schema WHERE name = 'trig_temp_main'");
+    }
+
+    [Test]
     public void TempViewBodyOutsideTheTempSchemaIsRejectedUpFront()
     {
         using var database = new EmbeddedDatabase();

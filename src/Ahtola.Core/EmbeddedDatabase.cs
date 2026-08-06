@@ -4888,7 +4888,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return new ExecutionResult([], [], 0, true);
     }
 
-    private static RenameColumnSchema CreateRenameColumnSchema(
+    internal static RenameColumnSchema CreateRenameColumnSchema(
         IReadOnlyDictionary<string, EmbeddedTable> tables,
         IReadOnlyDictionary<string, ViewDefinition> views,
         string renamedTable,
@@ -37333,12 +37333,12 @@ public sealed class EmbeddedConnection : IDisposable
             _tempDatabase.MarkSchemaMutated();
     }
 
-    private sealed record PendingTempTriggerTableRename(EmbeddedDatabase.SchemaCatalog Catalog);
+    private sealed record PendingTempTriggerCatalogRewrite(EmbeddedDatabase.SchemaCatalog Catalog);
 
     // Temp triggers are connection-private, so the altered database cannot rewrite their stored
     // definitions itself. Prepare their catalog replacement before the primary ALTER succeeds,
     // then publish it with the same transaction lifetime as the table rename.
-    private PendingTempTriggerTableRename? PrepareTempTriggerTableRename(RoutedStatement routed)
+    private PendingTempTriggerCatalogRewrite? PrepareTempTriggerTableRename(RoutedStatement routed)
     {
         if (!ReferenceEquals(routed.Database, _database)
             || routed.Statement is not AlterTableRenameStatement rename)
@@ -37380,10 +37380,109 @@ public sealed class EmbeddedConnection : IDisposable
             changed = true;
         }
 
-        return changed ? new PendingTempTriggerTableRename(candidateCatalog) : null;
+        return changed ? new PendingTempTriggerCatalogRewrite(candidateCatalog) : null;
     }
 
-    private void PublishTempTriggerTableRename(PendingTempTriggerTableRename pending)
+    private PendingTempTriggerCatalogRewrite? PrepareTempTriggerColumnRename(RoutedStatement routed)
+    {
+        if (!ReferenceEquals(routed.Database, _database)
+            || routed.Statement is not AlterTableRenameColumnStatement rename)
+        {
+            return null;
+        }
+
+        var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
+        if (tempCatalog.Triggers.Count == 0)
+            return null;
+
+        var primaryCatalog = GetTransactionState(_database)?.Catalog ?? _database.LiveCatalog;
+        if (!primaryCatalog.Tables.TryGetValue(rename.TableName, out var renamedTable))
+            return null;
+
+        var oldName = renamedTable.Columns[renamedTable.GetColumnIndex(rename.ColumnName)];
+        var primarySchema = EmbeddedDatabase.CreateRenameColumnSchema(
+            primaryCatalog.Tables,
+            primaryCatalog.Views,
+            renamedTable.Name,
+            renamedTable.Columns.ToArray());
+        var rewriteSchema = CreateTempTriggerRenameColumnSchema(primarySchema, tempCatalog);
+        var candidateCatalog = tempCatalog.Clone();
+        var changed = false;
+        foreach (var trigger in tempCatalog.Triggers.Values)
+        {
+            string? rewritten;
+            try
+            {
+                rewritten = RenameColumnRewriter.RewriteSchemaObject(
+                    trigger.Sql,
+                    oldName,
+                    rename.NewName,
+                    rename.QuoteNewName,
+                    rewriteSchema);
+            }
+            catch (RenameColumnRewriteException exception)
+            {
+                throw new EmbeddedSqlException(
+                    $"error in trigger {trigger.Name} after rename: {exception.Message}",
+                    exception);
+            }
+
+            if (rewritten is null)
+                continue;
+
+            var parsed = (CreateTriggerStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
+            candidateCatalog.Triggers[trigger.Name] = trigger with
+            {
+                UpdateOfColumns = parsed.UpdateOfColumns,
+                When = parsed.When,
+                Body = parsed.Body,
+                Sql = parsed.Sql,
+            };
+            changed = true;
+        }
+
+        return changed ? new PendingTempTriggerCatalogRewrite(candidateCatalog) : null;
+    }
+
+    private static RenameColumnSchema CreateTempTriggerRenameColumnSchema(
+        RenameColumnSchema primarySchema,
+        EmbeddedDatabase.SchemaCatalog tempCatalog)
+    {
+        return new RenameColumnSchema(ResolveColumns, IsRenameTarget);
+
+        IReadOnlyList<string>? ResolveColumns(string name)
+        {
+            if (ManagedSchemaName.TrySplit(name, out var schema, out var localName))
+            {
+                return schema.Equals("temp", StringComparison.OrdinalIgnoreCase)
+                    ? ResolveTempColumns(localName)
+                    : schema.Equals("main", StringComparison.OrdinalIgnoreCase)
+                        ? primarySchema.ResolveColumns(name)
+                        : null;
+            }
+
+            return ResolveTempColumns(name) ?? primarySchema.ResolveColumns(name);
+        }
+
+        bool IsRenameTarget(string name)
+        {
+            if (ManagedSchemaName.TrySplit(name, out var schema, out _))
+                return schema.Equals("main", StringComparison.OrdinalIgnoreCase)
+                    && primarySchema.IsRenameTarget(name);
+
+            return ResolveTempColumns(name) is null && primarySchema.IsRenameTarget(name);
+        }
+
+        IReadOnlyList<string>? ResolveTempColumns(string name)
+        {
+            if (tempCatalog.Tables.TryGetValue(name, out var table))
+                return table.Columns;
+
+            return tempCatalog.Views.TryGetValue(name, out var view) ? view.Columns : null;
+        }
+    }
+
+    private void PublishTempTriggerCatalogRewrite(PendingTempTriggerCatalogRewrite pending)
     {
         if (GetTransactionState(_tempDatabase) is { } state)
         {
@@ -38075,7 +38174,8 @@ public sealed class EmbeddedConnection : IDisposable
                 EmbeddedDatabase.SchemaCatalog? statementCatalog = null;
                 HashSet<EmbeddedDatabase.ForeignKeyViolation>? deferredBefore = null;
                 var tempTriggers = CreateTempTriggerBridge(routed.Database, out var tempTriggerSession);
-                var pendingTempTriggerRename = PrepareTempTriggerTableRename(routed);
+                var pendingTempTriggerRewrite = PrepareTempTriggerTableRename(routed)
+                    ?? PrepareTempTriggerColumnRename(routed);
                 try
                 {
                     ExecutionResult result;
@@ -38194,8 +38294,8 @@ public sealed class EmbeddedConnection : IDisposable
                     if (ReferenceEquals(routed.Database, _tempDatabase))
                         _tempInitialized = true;
 
-                    if (result.Changed && pendingTempTriggerRename is not null)
-                        PublishTempTriggerTableRename(pendingTempTriggerRename);
+                    if (result.Changed && pendingTempTriggerRewrite is not null)
+                        PublishTempTriggerCatalogRewrite(pendingTempTriggerRewrite);
 
                     tempTriggerSession?.Commit();
                     return result;
