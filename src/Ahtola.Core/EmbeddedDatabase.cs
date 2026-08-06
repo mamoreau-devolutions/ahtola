@@ -513,6 +513,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
         EmbeddedIndex Index,
         bool Search);
 
+    private sealed record ManagedOrIndexUnionPlan(
+        NamedTableSource Source,
+        EmbeddedTable Table,
+        IReadOnlyList<(EmbeddedIndex Index, Expression Branch)> Branches);
+
     private sealed record ReturningTableSnapshot(SqlValue[][] Rows, long[] RowIds);
 
     internal sealed record ReturningCteScope(
@@ -19479,6 +19484,21 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 ],
                 0);
         }
+        if (statement.Inner is SelectStatement orUnionSelect
+            && TryPlanManagedOrIndexUnion(orUnionSelect, compilationContext) is { } orUnionPlan)
+        {
+            return new ExecutionResult(
+                ExplainQueryPlanColumns(),
+                [
+                    [
+                        SqlValue.Integer(1),
+                        SqlValue.Integer(0),
+                        SqlValue.Integer(0),
+                        SqlValue.Text(FormatManagedOrIndexUnionExplainDetail(orUnionPlan)),
+                    ],
+                ],
+                0);
+        }
         if (statement.Inner is SelectStatement partialIndexSelect
             && TryGetPartialIndexScanSource(partialIndexSelect, compilationContext, out var partialIndexSource))
         {
@@ -20492,7 +20512,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (source.IndexDirective is IndexedByDirective)
             return CreateForcedIndexScanPlan(source, table, statement.Where);
 
-        foreach (var index in table.Indexes.OrderBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase))
+        ManagedIndexScanPlan? best = null;
+        var bestScore = int.MinValue;
+        // Collect usable indexes and pick the highest score instead of first-by-name.
+        // Score favors equality SEARCH depth, ORDER BY elision, and covering projection.
+        foreach (var index in table.Indexes)
         {
             // Skip indexes the managed planner cannot evaluate (registered functions /
             // overridden collations), and skip partial indexes whose WHERE is not
@@ -20523,11 +20547,91 @@ public sealed partial class EmbeddedDatabase : IDisposable
             // without an indexed key constraint. Turso renders this as "SCAN ... USING INDEX ...".
             // Plain indexes also qualify when ORDER BY matches the index key order or the
             // WHERE probes the leading term (SEARCH).
-            if (search || ordered || scansOnlyPartialPredicate)
-                return new ManagedIndexScanPlan(source, table, index, search);
+            if (!search && !ordered && !scansOnlyPartialPredicate)
+                continue;
+
+            var plan = new ManagedIndexScanPlan(source, table, index, search);
+            var score = ScoreManagedIndexPlan(plan, statement, ordered, scansOnlyPartialPredicate);
+            if (score > bestScore
+                || (score == bestScore
+                    && best is not null
+                    && string.Compare(index.Name, best.Index.Name, StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                best = plan;
+                bestScore = score;
+            }
         }
 
-        return null;
+        return best;
+    }
+
+    /// <summary>
+    /// Heuristic access-method score (higher wins). Not a full cost model — enough to
+    /// prefer multi-column equality prefixes and covering indexes over name order.
+    /// </summary>
+    private static int ScoreManagedIndexPlan(
+        ManagedIndexScanPlan plan,
+        SelectStatement statement,
+        bool ordered,
+        bool scansOnlyPartialPredicate)
+    {
+        var score = 0;
+        if (plan.Search)
+        {
+            score += 1000;
+            score += CountLeadingEqualityIndexTerms(statement.Where, plan.Table, plan.Index) * 100;
+            if (WhereUsesIndexEqualityTerm(statement.Where, plan.Table, plan.Index.Columns[0]))
+                score += 50;
+        }
+
+        if (ordered)
+            score += 400;
+
+        if (IndexCoversSelect(statement, plan.Table, plan.Index))
+            score += 200;
+
+        if (scansOnlyPartialPredicate)
+            score += 25;
+
+        // Prefer narrower keys when utility is otherwise equal.
+        score -= plan.Index.Columns.Count;
+        return score;
+    }
+
+    private static int CountLeadingEqualityIndexTerms(
+        Expression? where,
+        EmbeddedTable table,
+        EmbeddedIndex index)
+    {
+        var count = 0;
+        foreach (var term in index.Columns)
+        {
+            if (!WhereUsesIndexEqualityTerm(where, table, term))
+                break;
+            count++;
+        }
+
+        return count;
+    }
+
+    private static bool WhereUsesIndexEqualityTerm(
+        Expression? expression,
+        EmbeddedTable table,
+        EmbeddedIndexColumn term)
+    {
+        if (expression is null)
+            return false;
+        if (expression is BinaryExpression { Operator: BinaryOperator.And } and)
+            return WhereUsesIndexEqualityTerm(and.Left, table, term)
+                || WhereUsesIndexEqualityTerm(and.Right, table, term);
+        if (expression is not BinaryExpression binary
+            || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.Is))
+        {
+            return false;
+        }
+
+        return QueryExpressionMatchesIndexTerm(binary.Left, table, term)
+            || QueryExpressionMatchesIndexTerm(binary.Right, table, term);
     }
 
     private static string FormatManagedIndexExplainDetail(
@@ -20858,6 +20962,199 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return new SourceData(table.Columns, rows);
     }
 
+    /// <summary>
+    /// Plans a multi-index OR union when WHERE is a top-level OR of equality
+    /// predicates, each of which can SEARCH a distinct usable index.
+    /// </summary>
+    private ManagedOrIndexUnionPlan? TryPlanManagedOrIndexUnion(
+        SelectStatement statement,
+        QueryContext context)
+    {
+        if (statement.Source is not NamedTableSource source
+            || source.IndexDirective is not null
+            || IsSchemaTable(source.Name)
+            || context.CommonTableExpressions.ContainsKey(source.Name)
+            || context.Views?.ContainsKey(source.Name) == true
+            || !context.Tables.TryGetValue(source.Name, out var table)
+            || statement.Where is null
+            || statement.OrderBy.Count != 0
+            || IsAggregateSelect(statement)
+            || statement.GroupBy.Count != 0
+            || statement.Having is not null)
+        {
+            return null;
+        }
+
+        if (!TrySplitTopLevelOrBranches(statement.Where, out var branches) || branches.Count < 2)
+            return null;
+
+        var planned = new List<(EmbeddedIndex Index, Expression Branch)>(branches.Count);
+        foreach (var branch in branches)
+        {
+            if (!TryFindEqualityIndexForBranch(table, source, branch, out var index))
+                return null;
+
+            planned.Add((index, branch));
+        }
+
+        // Require at least one distinct index name so this is a real multi-index OR,
+        // not a single-index multi-equality that should use a plain index scan.
+        if (planned.Select(item => item.Index.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() < 2)
+            return null;
+
+        return new ManagedOrIndexUnionPlan(source, table, planned);
+    }
+
+    private static bool TrySplitTopLevelOrBranches(
+        Expression expression,
+        out List<Expression> branches)
+    {
+        branches = [];
+        CollectTopLevelOrLeaves(expression, branches);
+        return branches.Count >= 2
+            && branches.All(branch => branch is BinaryExpression
+            {
+                Operator: BinaryOperator.Equal or BinaryOperator.Is
+            });
+    }
+
+    private static void CollectTopLevelOrLeaves(Expression expression, List<Expression> leaves)
+    {
+        if (expression is BinaryExpression { Operator: BinaryOperator.Or } orExpr)
+        {
+            CollectTopLevelOrLeaves(orExpr.Left, leaves);
+            CollectTopLevelOrLeaves(orExpr.Right, leaves);
+            return;
+        }
+
+        leaves.Add(expression);
+    }
+
+    private bool TryFindEqualityIndexForBranch(
+        EmbeddedTable table,
+        NamedTableSource source,
+        Expression branch,
+        out EmbeddedIndex index)
+    {
+        index = null!;
+        if (branch is not BinaryExpression binary
+            || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.Is))
+        {
+            return false;
+        }
+
+        EmbeddedIndex? best = null;
+        var bestScore = int.MinValue;
+        foreach (var candidate in table.Indexes)
+        {
+            if (IndexUsesRegisteredFunctions(candidate)
+                || IndexUsesOverriddenBuiltInCollation(candidate, table)
+                || candidate.IsPartial
+                || !IndexExpressionSemantics.PredicateImplies(
+                    branch,
+                    candidate.Where,
+                    source.Name,
+                    source.Alias)
+                || !WhereUsesIndexEqualityTerm(branch, table, candidate.Columns[0]))
+            {
+                continue;
+            }
+
+            var score = 1000
+                + CountLeadingEqualityIndexTerms(branch, table, candidate) * 100
+                - candidate.Columns.Count;
+            if (score > bestScore
+                || (score == bestScore
+                    && best is not null
+                    && string.Compare(candidate.Name, best.Name, StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+
+        if (best is null)
+            return false;
+
+        index = best;
+        return true;
+    }
+
+    private SourceData GetManagedOrIndexUnionRows(
+        ManagedOrIndexUnionPlan plan,
+        SqlValue[] parameters,
+        QueryContext context,
+        SourceRow? outerRow)
+    {
+        var table = plan.Table;
+        var positions = new SortedSet<int>();
+        foreach (var (index, branch) in plan.Branches)
+        {
+            for (var position = 0; position < table.Rows.Count; position++)
+            {
+                context.CheckInterrupt();
+                var rowId = table.HasRowid ? table.RowIds[position] : (long?)null;
+                if (!IndexExpressionSemantics.Qualifies(
+                        index,
+                        table,
+                        table.Rows[position],
+                        rowId,
+                        EvaluateIndexExpression))
+                {
+                    continue;
+                }
+
+                var probeRow = new SourceRow(
+                    table.Columns,
+                    table.Rows[position],
+                    BuildQualifiedColumns(plan.Source.Alias ?? plan.Source.Name, table.Columns),
+                    outerRow,
+                    RowId: rowId,
+                    RowIdQualifier: plan.Source.Alias ?? plan.Source.Name,
+                    ColumnDefinitions: table.ColumnDefinitions,
+                    QualifiedColumnDefinitions: BuildQualifiedColumnDefinitions(
+                        plan.Source.Alias ?? plan.Source.Name,
+                        table.ColumnDefinitions));
+                // Branch equality is re-checked so non-matching keys on this index are skipped.
+                if (!IsTrue(Evaluate(branch, parameters, probeRow, context)))
+                    continue;
+
+                positions.Add(position);
+            }
+        }
+
+        var qualifier = plan.Source.Alias ?? plan.Source.Name;
+        var qualifiedColumns = BuildQualifiedColumns(qualifier, table.Columns);
+        var rows = new SourceRow[positions.Count];
+        var write = 0;
+        foreach (var position in positions)
+        {
+            var rowId = table.HasRowid ? table.RowIds[position] : (long?)null;
+            rows[write++] = new SourceRow(
+                table.Columns,
+                table.Rows[position],
+                qualifiedColumns,
+                outerRow,
+                RowId: rowId,
+                RowIdQualifier: qualifier,
+                ColumnDefinitions: table.ColumnDefinitions,
+                QualifiedColumnDefinitions: BuildQualifiedColumnDefinitions(
+                    qualifier,
+                    table.ColumnDefinitions));
+        }
+
+        return new SourceData(table.Columns, rows);
+    }
+
+    private static string FormatManagedOrIndexUnionExplainDetail(ManagedOrIndexUnionPlan plan)
+    {
+        var tableName = plan.Source.Alias ?? plan.Source.Name;
+        var indexes = string.Join(
+            ", ",
+            plan.Branches.Select(branch => branch.Index.Name));
+        return $"MULTI-INDEX OR {tableName} USING INDEXES {indexes}";
+    }
+
     private int CompareManagedIndexEntries(
         EmbeddedTable table,
         EmbeddedIndex index,
@@ -20986,11 +21283,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ? limit
             : null;
         var indexPlan = TryPlanManagedIndexScan(statement, context);
+        var orUnionPlan = indexPlan is null
+            ? TryPlanManagedOrIndexUnion(statement, context)
+            : null;
         var streamProjectionRows = CanStreamProjectionRows(statement, context, outerRow);
         // A managed index plan wins over the transient probe: the index path defines
         // row order (SQLite parity, INDEXED BY), while the probe only prunes a plain scan.
+        // Top-level OR equality branches can each SEARCH a different index and union positions.
         var source = indexPlan is not null
             ? GetManagedIndexRows(indexPlan, context, outerRow)
+            : orUnionPlan is not null
+                ? GetManagedOrIndexUnionRows(orUnionPlan, parameters, context, outerRow)
             : TryGetTransientLookupRows(
                     statement.Source,
                     statement.Where,

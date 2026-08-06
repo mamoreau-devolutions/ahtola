@@ -704,6 +704,71 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
+    public void OrClauseUsesMultiIndexUnion()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b INT, c TEXT);");
+        Execute(connection, "CREATE INDEX idx_a ON t(a);");
+        Execute(connection, "CREATE INDEX idx_b ON t(b);");
+        Execute(connection, "INSERT INTO t VALUES (1,10,'x'),(2,20,'y'),(3,10,'z'),(1,30,'w');");
+
+        var plan = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT c FROM t WHERE a = 1 OR b = 20;");
+        plan.Should().ContainSingle();
+        plan[0][3].AsText().Should().Contain("MULTI-INDEX OR");
+        plan[0][3].AsText().Should().Contain("idx_a");
+        plan[0][3].AsText().Should().Contain("idx_b");
+
+        ReadRows(connection, "SELECT c FROM t WHERE a = 1 OR b = 20 ORDER BY c;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("w"), SqlValue.Text("x"), SqlValue.Text("y"));
+    }
+
+    [Test]
+    public void AccessMethodPrefersEqualitySearchOverAlphabeticalOrderOnlyIndex()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b INT, c TEXT);");
+        // Alphabetical first index only supports ORDER BY a — not the WHERE b=? SEARCH.
+        Execute(connection, "CREATE INDEX idx_a ON t(a);");
+        Execute(connection, "CREATE INDEX idx_b ON t(b);");
+        Execute(connection, "INSERT INTO t VALUES (1,10,'x'),(2,20,'y'),(3,10,'z');");
+
+        var plan = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT c FROM t WHERE b = 10;");
+        plan.Should().ContainSingle();
+        plan[0][3].AsText().Should().Contain("USING INDEX idx_b");
+        plan[0][3].AsText().Should().Contain("SEARCH");
+        plan[0][3].AsText().Should().NotContain("idx_a");
+
+        ReadRows(connection, "SELECT c FROM t WHERE b = 10 ORDER BY c;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("x"), SqlValue.Text("z"));
+    }
+
+    [Test]
+    public void AccessMethodPrefersLongerEqualityPrefix()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b INT, c INT);");
+        Execute(connection, "CREATE INDEX idx_a ON t(a);");
+        Execute(connection, "CREATE INDEX idx_ab ON t(a, b);");
+        Execute(connection, "INSERT INTO t VALUES (1,2,3),(1,2,4),(1,9,5);");
+
+        var plan = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT c FROM t WHERE a = 1 AND b = 2;");
+        plan.Should().ContainSingle();
+        plan[0][3].AsText().Should().Contain("USING INDEX idx_ab");
+
+        ReadRows(connection, "SELECT c FROM t WHERE a = 1 AND b = 2;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Integer(3), SqlValue.Integer(4));
+    }
+
+    [Test]
     public void CoveringIndexIsReportedInExplainQueryPlan()
     {
         var database = new EmbeddedDatabase();

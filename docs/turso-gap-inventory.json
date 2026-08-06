@@ -538,7 +538,7 @@
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Turso extracts WHERE-clause conjuncts into per-table Constraints and picks the cheapest access method (rowid seek, single/multi-column index seek, or full scan) per table independently of join order, considering multiple candidate indexes and their selectivity. Ahtola's ResolveScanTarget/IndexSemantics resolve at most one usable index per scan target via direct predicate-to-index matching (IndexExpressionSemantics.PredicateImplies/SplitConjuncts); there is no comparison between competing candidate indexes on the same table, no partial-index-aware cost comparison, and no multi-index intersection (Turso's optimizer/multi_index.rs, OR-clause index union) at all.",
+      "notes": "Partial 2026-08-06. TryPlanManagedIndexScan scores competing indexes (equality SEARCH depth, ORDER BY elision, covering, partial-only scan) instead of first-by-name. Evidence: CompiledSortedScanExecutionTests.AccessMethodPrefersEqualitySearchOverAlphabeticalOrderOnlyIndex, AccessMethodPrefersLongerEqualityPrefix. Residual: no row-count selectivity/cost model, no multi-index AND intersection, join-order-independent per-table constraint extraction still thinner than Turso best_access_method.",
       "status": "open"
     },
     {
@@ -546,11 +546,11 @@
       "layer": "compilation",
       "kind": "missing",
       "turso_ref": "turso-src/core/translate/optimizer/multi_index.rs",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::TryPlanManagedOrIndexUnion / GetManagedOrIndexUnionRows",
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [],
-      "notes": "SQLite/Turso can satisfy `WHERE a=1 OR b=2` (with separate indexes on a and b) via an index-union/OR-optimization instead of a full scan. Ahtola's compiler has no equivalent: OR predicates in WHERE fall back to sequential scan filtering (FilterRegistersInstruction), never index lookups per OR-branch.",
+      "notes": "Partial 2026-08-06. Top-level OR of equality branches, each SEARCH-able on a distinct index, plans MULTI-INDEX OR and unions row positions in the managed evaluator path; EQP reports MULTI-INDEX OR ... USING INDEXES. Evidence: CompiledSortedScanExecutionTests.OrClauseUsesMultiIndexUnion. Residual: no VDBE multi-index bitmap/union opcodes, no AND multi-index intersection, ORDER BY/aggregate OR unions still fall back, compiled VDBE may still sequential-filter when the evaluator path is not taken.",
       "status": "open"
     },
     {
