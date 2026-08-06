@@ -879,6 +879,8 @@ aggregates because the EF Core provider depends on them).
 | **F2.28 — ORDER BY index elision** | 2026-08-06 | `compile-no-order-by-elision-from-index` (closed — rowid/PK alias + secondary index ORDER BY without sorter; plain indexes eligible for SEARCH/ORDER planning) | 11 → 11 |
 | **F2.29 — covering-index EQP label** | 2026-08-06 | `compile-select-compiler-no-multi-table-covering-index` partial — IndexCoversSelect + EXPLAIN QUERY PLAN `USING COVERING INDEX`; index-only table skip still open | 11 → 11 |
 | **F2.30 — access-method score + OR union** | 2026-08-06 | `compile-no-access-method-selection` partial (score competing indexes); `compile-no-or-clause-index-union` partial (MULTI-INDEX OR equality union in evaluator/EQP) | 11 → 11 |
+| **F2.31 — OR compile + COVERING OpenRead** | 2026-08-06 | OR union compiled Rewind path; OpenRead `USING COVERING INDEX` / `MULTI-INDEX OR` labels | 11 → 11 |
+| **F2.32 — self-ref ON DELETE SET NULL Program** | 2026-08-06 | `vdbe-trigger-subprogram-machinery` further partial — Program path for self-ref ON DELETE SET NULL | 11 → 11 |
 
 Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
 redistributed onto a newly-unmasked blocker within the same commit group.

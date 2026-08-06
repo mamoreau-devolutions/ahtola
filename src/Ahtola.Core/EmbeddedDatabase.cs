@@ -19128,7 +19128,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         var foreignKey = table.ForeignKeys[0];
         if (!string.Equals(foreignKey.ParentTable, statement.TableName, StringComparison.OrdinalIgnoreCase)
-            || foreignKey.OnDelete != ForeignKeyAction.Cascade)
+            || foreignKey.OnDelete is not (ForeignKeyAction.Cascade or ForeignKeyAction.SetNull))
         {
             return false;
         }
@@ -19161,24 +19161,45 @@ public sealed partial class EmbeddedDatabase : IDisposable
         for (var index = 0; index < parentRegisters.Length; index++)
             parentRegisters[index] = new Register(index);
 
+        var setNull = foreignKey.OnDelete == ForeignKeyAction.SetNull;
         var cascadeAction = VdbeSubprogram.CreateDeferred(
             parentRegisters.Length,
-            binding => CreateCompiledCascadeWriteTargets(
-                context,
+            binding => setNull
+                ? CreateCompiledSetNullWriteTargets(
+                    context,
+                    statement.TableName,
+                    table,
+                    foreignKey,
+                    parent,
+                    binding)
+                : CreateCompiledCascadeWriteTargets(
+                    context,
+                    statement.TableName,
+                    table,
+                    foreignKey,
+                    parent,
+                    binding));
+        // CASCADE may recurse (child delete re-enters the same Program). SET NULL only
+        // nulls direct children — no nested ProgramInstruction after each mutation.
+        var actionProgram = setNull
+            ? DmlStatementCompiler.BuildProgramWithMutationPrograms(
+                DmlKind.Update,
                 statement.TableName,
-                table,
-                foreignKey,
-                parent,
-                binding));
-        var actionProgram = DmlStatementCompiler.BuildProgramWithMutationPrograms(
-            DmlKind.Delete,
-            statement.TableName,
-            table.Columns.Length,
-            filter: null,
-            CreateParentKeyCaptureInstructions(parent, parentRegisters),
-            [new ProgramInstruction(parentRegisters, cascadeAction)],
-            registerCount: parentRegisters.Length,
-            parameterSlotCount: parentRegisters.Length);
+                table.Columns.Length,
+                filter: null,
+                beforeMutation: Array.Empty<VdbeInstruction>(),
+                afterMutation: Array.Empty<VdbeInstruction>(),
+                registerCount: 0,
+                parameterSlotCount: parentRegisters.Length)
+            : DmlStatementCompiler.BuildProgramWithMutationPrograms(
+                DmlKind.Delete,
+                statement.TableName,
+                table.Columns.Length,
+                filter: null,
+                CreateParentKeyCaptureInstructions(parent, parentRegisters),
+                [new ProgramInstruction(parentRegisters, cascadeAction)],
+                registerCount: parentRegisters.Length,
+                parameterSlotCount: parentRegisters.Length);
         cascadeAction.Resolve(actionProgram);
 
         var sourceRows = table.Rows.ToArray();
@@ -19269,6 +19290,64 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     table,
                     sourceRowIds[index],
                     countAsCascade: true),
+                Commit = () => null,
+            },
+        ];
+    }
+
+    private IReadOnlyList<VdbeWriteTarget?> CreateCompiledSetNullWriteTargets(
+        QueryContext context,
+        string tableName,
+        EmbeddedTable table,
+        ForeignKeyDefinition foreignKey,
+        ForeignKeyParent parent,
+        VdbeParameterBinding? binding)
+    {
+        if (binding is null)
+            throw new InvalidOperationException("A compiled foreign-key SET NULL action requires parent key bindings.");
+
+        var parentValues = new SqlValue[binding.Count];
+        for (var index = 0; index < parentValues.Length; index++)
+            parentValues[index] = binding[index];
+
+        var childColumns = ResolveForeignKeyChildColumns(table, tableName, foreignKey);
+        var matchingPositions = FindForeignKeyChildPositions(
+            table,
+            tableName,
+            foreignKey,
+            parent,
+            parentValues);
+        // Snapshot positions/rowids: parent delete may already have removed a self-row.
+        var sourceRowIds = new long[matchingPositions.Count];
+        for (var index = 0; index < matchingPositions.Count; index++)
+            sourceRowIds[index] = table.RowIds[matchingPositions[index]];
+
+        return
+        [
+            new VdbeWriteTarget
+            {
+                TableName = tableName,
+                RowCount = sourceRowIds.Length,
+                GetRow = index =>
+                {
+                    var position = table.RowIds.IndexOf(sourceRowIds[index]);
+                    return position >= 0 ? table.Rows[position] : new SqlValue[table.Columns.Length];
+                },
+                GetRowId = index => sourceRowIds[index],
+                MutateRow = index =>
+                {
+                    var position = table.RowIds.IndexOf(sourceRowIds[index]);
+                    if (position < 0)
+                        return new VdbeRowMutation(new SqlValue[table.Columns.Length], sourceRowIds[index]);
+
+                    var updated = (SqlValue[])table.Rows[position].Clone();
+                    foreach (var column in childColumns)
+                        updated[column] = SqlValue.Null;
+                    table.Rows[position] = updated;
+                    context.ReportRowChange(SqliteChangeOperation.Update, tableName, table, sourceRowIds[index]);
+                    _totalChanges++;
+                    return new VdbeRowMutation(updated, sourceRowIds[index]);
+                },
                 Commit = () => null,
             },
         ];

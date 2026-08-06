@@ -318,6 +318,19 @@ public sealed class ManagedForeignKeyFullSemanticsTests
     }
 
     [Test]
+    public void SelfReferentialSetNullOnDeleteMatchesSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "PRAGMA foreign_keys = ON",
+                "CREATE TABLE node(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES node(id) ON DELETE SET NULL)",
+                "INSERT INTO node VALUES (1, NULL), (2, 1), (3, 2)",
+                "DELETE FROM node WHERE id = 1",
+            ],
+            "SELECT id, parent_id FROM node ORDER BY id");
+    }
+
+    [Test]
     public void DeferredCascadeCyclesResolveWithoutRecursiveReentry()
     {
         AssertMatchesSqlite(

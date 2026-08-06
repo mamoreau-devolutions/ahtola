@@ -174,7 +174,7 @@
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [],
-      "notes": "The Program primitive invokes a child VDBE program with a separate register frame, fixed parent-register bindings, cached resumable child state, suppressed child rows, and a deferred form for recursive references. It now lowers the narrow trigger-free, single self-referential ON DELETE CASCADE shape through dynamic child write targets; Gosub/Return/BeginSubrtn, trigger lowering, and broader FK-action lowering are still absent. Further work must preserve Turso's trigger/FK change-counter, error, and statement-rollback timing.",
+      "notes": "Partial 2026-08-06. Program + deferred recursive form lower trigger-free single self-referential ON DELETE CASCADE and ON DELETE SET NULL (SET NULL uses a non-recursive Update subprogram). Evidence: ManagedForeignKeyFullSemanticsTests.SelfReferentialCascadeIsBoundedAndMatchesSqlite, SelfReferentialSetNullOnDeleteMatchesSqlite. Residual: Gosub/Return/BeginSubrtn, SQL trigger program lowering, ON UPDATE CASCADE/SET NULL via Program, multi-FK and cross-table action programs, change-counter/error/rollback timing parity with Turso triggers.",
       "status": "open"
     },
     {
