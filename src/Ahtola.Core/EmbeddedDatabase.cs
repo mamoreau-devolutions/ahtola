@@ -38925,10 +38925,13 @@ public sealed class EmbeddedConnection : IDisposable
         if (targetIsForeign && !temporary)
             throw new EmbeddedSqlException("CREATE TRIGGER cannot span managed database schemas.");
 
-        // A persistent trigger body only ever runs inside its own database. A temp trigger body is
-        // dispatched by this connection, so it may name objects in other schemas.
-        if (ExpressionContainsSchemaQualification(statement.When)
-            || !temporary && statement.Body.Any(ContainsSchemaQualification))
+        // A persistent trigger body only ever runs inside its own database. SQLite/Turso allow
+        // explicit references to that same schema, while qualified mutation targets remain
+        // invalid in trigger bodies. A temp trigger body is dispatched by this connection, so it
+        // may name objects in other schemas.
+        if (!temporary
+            && (PersistentTriggerReferencesForeignSchema(statement, homeSchema)
+                || statement.Body.Any(HasQualifiedTriggerMutationTarget)))
         {
             throw new EmbeddedSqlException(
                 "Managed persistent trigger bodies cannot reference another database schema.");
@@ -38943,10 +38946,53 @@ public sealed class EmbeddedConnection : IDisposable
                 TableName = local,
                 Temporary = temporary,
                 TargetSchema = targetIsForeign ? resolvedTargetSchema : null,
+                When = temporary || statement.When is null || !ExpressionContainsSchemaQualification(statement.When)
+                    ? statement.When
+                    : RewriteExpressionSchema(
+                        statement.When,
+                        homeSchema,
+                        new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+                Body = temporary
+                    ? statement.Body
+                    : statement.Body.Select(body => ContainsSchemaQualification(body)
+                        ? RewriteStatementSchema(body, homeSchema)
+                        : body).ToArray(),
                 // SQLite stores the ON-clause target qualifier verbatim and drops only the
                 // trigger's own-name qualifier; the parser's stored text already matches that.
                 Sql = statement.Sql,
             });
+    }
+
+    private static bool PersistentTriggerReferencesForeignSchema(
+        CreateTriggerStatement statement,
+        string homeSchema)
+    {
+        var schemas = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var commonTableExpressions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        CollectExpressionSchemas(statement.When, schemas, commonTableExpressions);
+        foreach (var bodyStatement in statement.Body)
+        {
+            if (bodyStatement is QueryStatement query)
+                CollectQuerySchemas(query, schemas, commonTableExpressions);
+            else
+                CollectStatementSchemas(bodyStatement, schemas, commonTableExpressions);
+        }
+
+        return schemas.Any(schema => schema.Length != 0
+            && schema[0] != UnqualifiedSchemaMarker
+            && !schema.Equals(homeSchema, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool HasQualifiedTriggerMutationTarget(ParsedStatement statement)
+    {
+        return statement switch
+        {
+            InsertStatement insert => ManagedSchemaName.TrySplit(insert.TableName, out _, out _),
+            UpdateStatement update => ManagedSchemaName.TrySplit(update.TableName, out _, out _),
+            DeleteStatement delete => ManagedSchemaName.TrySplit(delete.TableName, out _, out _),
+            WithDmlStatement with => HasQualifiedTriggerMutationTarget(with.Dml),
+            _ => false,
+        };
     }
 
     private RoutedStatement RouteCreateView(CreateViewStatement statement)
@@ -39376,6 +39422,8 @@ public sealed class EmbeddedConnection : IDisposable
                 foreach (var argument in function.Arguments)
                     CollectExpressionSchemas(argument, schemas, commonTableExpressions);
                 CollectExpressionSchemas(function.Filter, schemas, commonTableExpressions);
+                foreach (var orderBy in function.AggregateOrderBy ?? [])
+                    CollectExpressionSchemas(orderBy.Expression, schemas, commonTableExpressions);
                 CollectWindowSchemas(function.Window, schemas, commonTableExpressions);
                 return;
             case CollationExpression collation:

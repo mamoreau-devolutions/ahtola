@@ -568,6 +568,22 @@ public sealed class ManagedTriggerRowSemanticsTests
     }
 
     [Test]
+    public void PersistentTriggerAllowsExplicitReferencesToItsOwnSchema()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE data(id INTEGER PRIMARY KEY)");
+        Execute(
+            connection,
+            "CREATE TRIGGER data_after AFTER INSERT ON data "
+                + "BEGIN SELECT main.data.id FROM main.data; END");
+
+        Execute(connection, "INSERT INTO data VALUES (1)");
+        ReadRows(connection, "SELECT id FROM data").Should().ContainSingle()
+            .Which[0].Should().Be(SqlValue.Integer(1));
+    }
+
+    [Test]
     public void RecursiveAttachedAndTempTriggersRemainSchemaLocal()
     {
         var fileSystem = new InMemoryFileSystem();
