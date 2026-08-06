@@ -550,7 +550,7 @@
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Partial 2026-08-06. Top-level OR of equality branches, each SEARCH-able on a distinct index, plans MULTI-INDEX OR and unions row positions in the managed evaluator path; EQP reports MULTI-INDEX OR ... USING INDEXES. Evidence: CompiledSortedScanExecutionTests.OrClauseUsesMultiIndexUnion. Residual: no VDBE multi-index bitmap/union opcodes, no AND multi-index intersection, ORDER BY/aggregate OR unions still fall back, compiled VDBE may still sequential-filter when the evaluator path is not taken.",
+      "notes": "Partial 2026-08-06. Top-level OR of equality branches, each SEARCH-able on a distinct index, plans MULTI-INDEX OR and unions row positions in the managed evaluator path and compiles a Rewind scan over the unioned rows; EQP reports MULTI-INDEX OR ... USING INDEXES and OpenRead uses MULTI-INDEX OR. Evidence: CompiledSortedScanExecutionTests.OrClauseUsesMultiIndexUnion. Residual: no VDBE multi-index bitmap/union opcodes, no AND multi-index intersection, ORDER BY/aggregate OR unions still fall back.",
       "status": "open"
     },
     {
@@ -985,7 +985,7 @@
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Partial 2026-08-06. EXPLAIN QUERY PLAN now reports USING COVERING INDEX when IndexCoversSelect proves every projection/WHERE/ORDER BY column is in the index key (or rowid). Evidence: CompiledSortedScanExecutionTests.CoveringIndexIsReportedInExplainQueryPlan. Residual: SelectStatementCompiler still opens the base table cursor after index seek and reads ColumnInstruction from table rows; multi-table covering and true index-only OpenRead (no table b-tree) remain open. Turso access_method.rs skips the table b-tree when coverage is proven.",
+      "notes": "Partial 2026-08-06. EXPLAIN QUERY PLAN reports USING COVERING INDEX when IndexCoversSelect proves coverage; compiled OpenRead labels USING COVERING INDEX as well. Evidence: CompiledSortedScanExecutionTests.CoveringIndexIsReportedInExplainQueryPlan. Residual: cursor still materializes full table-width rows (no durable index-only leaf walk); multi-table covering remains open.",
       "status": "open"
     },
     {

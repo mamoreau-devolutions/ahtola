@@ -782,6 +782,13 @@ public class CompiledSortedScanExecutionTests
         covering.Should().ContainSingle();
         covering[0][3].AsText().Should().Contain("USING COVERING INDEX idx_t_a");
 
+        // EXPLAIN bytecode OpenRead also labels COVERING when coverage is proven.
+        var explain = ReadRows(connection, "EXPLAIN SELECT a FROM t ORDER BY a;");
+        explain.Select(row => row[1].AsText() + "|" + row[5].AsText())
+            .Should()
+            .Contain(line => line.Contains("OpenRead", StringComparison.Ordinal)
+                && line.Contains("USING COVERING INDEX idx_t_a", StringComparison.Ordinal));
+
         // SELECT b needs a non-indexed column — plain USING INDEX.
         var nonCovering = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT b FROM t ORDER BY a;");
         nonCovering.Should().ContainSingle();

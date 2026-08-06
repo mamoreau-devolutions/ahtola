@@ -29,6 +29,25 @@ internal sealed class SelectStatementCompiler
     private readonly VdbeNumericAffinity _moduloAffinity;
     private readonly VdbeNumericAffinity _integerAffinity;
 
+    private static string FormatOpenReadTable(ScanTarget target)
+    {
+        if (target.IndexName is null)
+            return target.TableName;
+
+        // Covering indexes append " COVERING" to the logical index name.
+        if (target.IndexName.EndsWith(" COVERING", StringComparison.Ordinal))
+        {
+            var name = target.IndexName[..^" COVERING".Length];
+            return $"{target.TableName} USING COVERING INDEX {name}";
+        }
+
+        // Multi-index OR unions use joined names (idx_a+idx_b).
+        if (target.IndexName.Contains('+', StringComparison.Ordinal))
+            return $"{target.TableName} USING MULTI-INDEX OR {target.IndexName}";
+
+        return $"{target.TableName} USING INDEX {target.IndexName}";
+    }
+
     public SelectStatementCompiler(
         Func<Expression, bool> isConstant,
         Func<Expression, SqlValue> fold,
@@ -214,9 +233,7 @@ internal sealed class SelectStatementCompiler
             {
                 new OpenReadCursorInstruction(
                     seekCursor,
-                    target.IndexName is null
-                        ? target.TableName
-                        : $"{target.TableName} USING INDEX {target.IndexName}",
+                    FormatOpenReadTable(target),
                     target.Columns.Length),
                 rhsLoad,
                 new SeekRowidInstruction(
@@ -306,9 +323,7 @@ internal sealed class SelectStatementCompiler
             {
                 new OpenReadCursorInstruction(
                     seekCursor,
-                    target.IndexName is null
-                        ? target.TableName
-                        : $"{target.TableName} USING INDEX {target.IndexName}",
+                    FormatOpenReadTable(target),
                     target.Columns.Length),
                 new LoadConstantInstruction(startRowIdRegister, ((LiteralExpression)startBound).Value),
             };
@@ -409,9 +424,7 @@ internal sealed class SelectStatementCompiler
         {
             new OpenReadCursorInstruction(
                 cursor,
-                target.IndexName is null
-                    ? target.TableName
-                    : $"{target.TableName} USING INDEX {target.IndexName}",
+                FormatOpenReadTable(target),
                 target.Columns.Length),
             new RewindCursorInstruction(cursor, new ProgramCounter(closeAddr)),
         };
@@ -491,9 +504,7 @@ internal sealed class SelectStatementCompiler
         {
             new OpenReadCursorInstruction(
                 cursor,
-                target.IndexName is null
-                    ? target.TableName
-                    : $"{target.TableName} USING INDEX {target.IndexName}",
+                FormatOpenReadTable(target),
                 target.Columns.Length),
             new LastCursorInstruction(cursor, new ProgramCounter(closeAddr)),
         };

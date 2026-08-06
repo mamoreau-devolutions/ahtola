@@ -13484,6 +13484,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     materializeIndexRows: true,
                     out compiled);
             }
+            else if (!context.CancellationToken.CanBeCanceled
+                && TryPlanManagedOrIndexUnion(select, context) is { } orUnionPlan)
+            {
+                compiledIndex = TryCompileManagedOrIndexUnionSelect(
+                    select,
+                    orUnionPlan,
+                    parameters,
+                    context,
+                    outerRow,
+                    out compiled);
+            }
 
             if (!compiledIndex)
                 TryCompileSelect(select, parameters, context, outerRow, out compiled);
@@ -13673,6 +13684,70 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return compiler.TryCompile(select, out compiled);
     }
 
+    private bool TryCompileManagedOrIndexUnionSelect(
+        SelectStatement select,
+        ManagedOrIndexUnionPlan plan,
+        SqlValue[] parameters,
+        QueryContext context,
+        SourceRow? outerRow,
+        out CompiledSelect compiled)
+    {
+        select = ResolveNamedWindows(select);
+        context = EnterCollationSource(context, select.Source);
+        if (IsAggregateSelect(select)
+            || CollectSelectWindowFunctions(select).Count != 0
+            || select.Distinct
+            || select.Limit is not null
+            || select.Offset is not null
+            || select.OrderBy.Count != 0
+            || select.GroupBy.Count != 0
+            || select.Having is not null)
+        {
+            compiled = null!;
+            return false;
+        }
+
+        var source = GetManagedOrIndexUnionRows(plan, parameters, context, outerRow);
+        var rows = source.Rows.Select(row => row.Values).ToArray();
+        var rowIds = plan.Table.HasRowid
+            ? source.Rows.Select(row =>
+                row.RowId ?? throw new InvalidOperationException("OR-union row is missing its rowid.")).ToArray()
+            : null;
+        var qualifier = plan.Source.Alias ?? plan.Source.Name;
+        var qualifiedColumns = BuildQualifiedColumns(qualifier, plan.Table.Columns);
+        var indexLabel = string.Join(
+            "+",
+            plan.Branches.Select(branch => branch.Index.Name).Distinct(StringComparer.OrdinalIgnoreCase));
+        var target = new ScanTarget(
+            plan.Source.Name,
+            qualifier,
+            plan.Table.Columns,
+            rows,
+            name => ResolveScanColumnIndex(name, plan.Table.Columns, qualifiedColumns),
+            rowIds,
+            indexLabel,
+            plan.Table.ColumnDefinitions,
+            BuildQualifiedColumnDefinitions(qualifier, plan.Table.ColumnDefinitions));
+
+        // WHERE was consumed while building the union positions.
+        var compileForScan = select with { Where = null };
+        var compiler = new SelectStatementCompiler(
+            IsConstantScalarExpression,
+            expression => Evaluate(expression, parameters, null, context),
+            _ => target,
+            (where, scan) => CompileRowPredicate(where, scan, parameters, context, outerRow),
+            (where, scan) => CanEmitNativeScanPredicate(where, scan, context),
+            (where, scan) => CompileSimpleRowIdPredicate(where, scan, parameters, context, outerRow),
+            (statement, scan) => CompileDistinctScanEquality(statement, scan, context),
+            function => TryGetRoutableBuiltinScalarCall(function, out var routable)
+                ? BuildBuiltinScalarFunction(routable, parameters, context)
+                : null,
+            ArithmeticNumericAffinity,
+            ModuloNumericAffinity,
+            BitwiseIntegerAffinity);
+        return compiler.TryCompile(compileForScan, out compiled);
+    }
+
     private bool TryCompileManagedIndexSelect(
         SelectStatement select,
         ManagedIndexScanPlan plan,
@@ -13691,6 +13766,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             var qualifier = plan.Source.Alias ?? plan.Source.Name;
             var qualifiedColumns = BuildQualifiedColumns(qualifier, plan.Table.Columns);
+            var covering = IndexCoversSelect(select, plan.Table, plan.Index);
+            var indexName = covering
+                ? $"{plan.Index.Name} COVERING"
+                : plan.Index.Name;
             return new ScanTarget(
                 plan.Source.Name,
                 qualifier,
@@ -13701,7 +13780,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     plan.Table.Columns,
                     qualifiedColumns),
                 targetRowIds,
-                plan.Index.Name,
+                indexName,
                 plan.Table.ColumnDefinitions,
                 BuildQualifiedColumnDefinitions(
                     qualifier,
