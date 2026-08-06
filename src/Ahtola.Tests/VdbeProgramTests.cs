@@ -27,6 +27,8 @@ public class VdbeProgramTests
         ((int)VdbeOpcode.FkCounter).Should().Be(82);
         ((int)VdbeOpcode.FkIfZero).Should().Be(83);
         ((int)VdbeOpcode.FkCheck).Should().Be(84);
+        ((int)VdbeOpcode.SeekGE).Should().Be(85);
+        ((int)VdbeOpcode.IdxDelete).Should().Be(96);
 
         typeof(VdbeProgram).GetConstructor(
             [

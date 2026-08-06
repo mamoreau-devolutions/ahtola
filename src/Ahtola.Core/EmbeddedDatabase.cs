@@ -13856,6 +13856,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 target);
         }
 
+        // When ORDER BY is fully satisfied by the selected index, strip OrderBy so
+        // SelectStatementCompiler emits a plain Rewind/Next scan (no sorter). Execution
+        // binds index-ordered rows when materializeIndexRows is true; EXPLAIN only needs
+        // the bytecode shape (OpenRead USING INDEX + Rewind), not the row order.
+        var compileForScan = select;
+        if (select.OrderBy.Count > 0
+            && OrderByUsesIndex(select.OrderBy, plan.Table, plan.Index))
+        {
+            compileForScan = select with { OrderBy = Array.Empty<OrderByTerm>() };
+        }
+
         var compiler = new SelectStatementCompiler(
             IsConstantScalarExpression,
             expression => Evaluate(expression, parameters, null, context),
@@ -13870,7 +13881,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ArithmeticNumericAffinity,
             ModuloNumericAffinity,
             BitwiseIntegerAffinity);
-        return compiler.TryCompile(select, out compiled);
+        return compiler.TryCompile(compileForScan, out compiled);
     }
 
     // DISTINCT runs as rows stream from the cursor, whereas the evaluator first materializes every filtered
@@ -20483,14 +20494,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         foreach (var index in table.Indexes.OrderBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase))
         {
-            if ((!index.IsPartial && index.Columns.All(term => !term.IsExpression))
+            // Skip indexes the managed planner cannot evaluate (registered functions /
+            // overridden collations), and skip partial indexes whose WHERE is not
+            // implied by the query predicate. Plain (non-partial, non-expression)
+            // indexes are eligible for SEARCH and ORDER BY elision.
+            if (IndexUsesRegisteredFunctions(index)
+                || IndexUsesOverriddenBuiltInCollation(index, table)
                 || !IndexExpressionSemantics.PredicateImplies(
                     statement.Where,
                     index.Where,
                     source.Name,
-                    source.Alias)
-                || IndexUsesRegisteredFunctions(index)
-                || IndexUsesOverriddenBuiltInCollation(index, table))
+                    source.Alias))
             {
                 continue;
             }
@@ -20507,6 +20521,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     source.Alias);
             // A query whose predicate exactly matches a partial index can scan that index
             // without an indexed key constraint. Turso renders this as "SCAN ... USING INDEX ...".
+            // Plain indexes also qualify when ORDER BY matches the index key order or the
+            // WHERE probes the leading term (SEARCH).
             if (search || ordered || scansOnlyPartialPredicate)
                 return new ManagedIndexScanPlan(source, table, index, search);
         }

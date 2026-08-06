@@ -683,6 +683,27 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
+    public void OrderBySecondaryIndexElidesSorter()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b TEXT);");
+        Execute(connection, "CREATE INDEX idx_t_a ON t(a);");
+        Execute(connection, "INSERT INTO t VALUES (3,'c'),(1,'a'),(2,'b');");
+
+        // Index order satisfies ORDER BY a; compiled plan must not open a sorter.
+        RouteUsesSorter(connection, "SELECT b FROM t ORDER BY a;").Should().BeFalse();
+        var opcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT b FROM t ORDER BY a;"));
+        opcodes.Should().Contain("Rewind");
+        opcodes.Should().NotContain(op => op.Contains("Sorter", StringComparison.Ordinal));
+
+        ReadRows(connection, "SELECT b FROM t ORDER BY a;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("a"), SqlValue.Text("b"), SqlValue.Text("c"));
+    }
+
+    [Test]
     public void OrderByIntegerPrimaryKeyAliasElidesSorter()
     {
         var database = new EmbeddedDatabase();

@@ -254,6 +254,39 @@ public enum VdbeOpcode
     FkIfZero = 83,
     /// <summary>Halt with SQLITE_CONSTRAINT_FOREIGNKEY when the FK counter is non-zero (Turso <c>FkCheck</c>).</summary>
     FkCheck = 84,
+    /// <summary>Seek to first key ≥ bound (Turso <c>SeekGE</c>).</summary>
+    SeekGE = 85,
+    /// <summary>Seek to first key &gt; bound (Turso <c>SeekGT</c>).</summary>
+    SeekGT = 86,
+    /// <summary>Seek to last key ≤ bound (Turso <c>SeekLE</c>).</summary>
+    SeekLE = 87,
+    /// <summary>Seek to last key &lt; bound (Turso <c>SeekLT</c>).</summary>
+    SeekLT = 88,
+    /// <summary>Index-cursor SeekGE (Turso <c>IdxGE</c>).</summary>
+    IdxGE = 89,
+    /// <summary>Index-cursor SeekGT (Turso <c>IdxGT</c>).</summary>
+    IdxGT = 90,
+    /// <summary>Index-cursor SeekLE (Turso <c>IdxLE</c>).</summary>
+    IdxLE = 91,
+    /// <summary>Index-cursor SeekLT (Turso <c>IdxLT</c>).</summary>
+    IdxLT = 92,
+    /// <summary>Load the current index entry's rowid into a register (Turso <c>IdxRowid</c>).</summary>
+    IdxRowId = 93,
+    /// <summary>Copy the current cursor row's packed payload into registers (Turso <c>RowData</c>).</summary>
+    RowData = 94,
+    /// <summary>Insert a key into an index/ephemeral cursor (Turso <c>IdxInsert</c>).</summary>
+    IdxInsert = 95,
+    /// <summary>Delete the current index entry (Turso <c>IdxDelete</c>).</summary>
+    IdxDelete = 96,
+}
+
+/// <summary>Key-order seek comparison used by SeekGE/GT/LE/LT and IdxGE/GT/LE/LT.</summary>
+public enum VdbeKeySeekOperator
+{
+    GreaterThanOrEqual = 0,
+    GreaterThan = 1,
+    LessThanOrEqual = 2,
+    LessThan = 3,
 }
 
 /// <summary>
@@ -2037,6 +2070,91 @@ public sealed record FkCheckInstruction(bool Deferred) : VdbeInstruction
 }
 
 /// <summary>
+/// Positions <paramref name="Cursor"/> on the first (GE/GT) or last (LE/LT) row whose
+/// leading columns compare to <paramref name="Key"/> per <paramref name="Operator"/>.
+/// When <paramref name="EqOnly"/> is set, a GE/LE seek requires an exact match (Turso
+/// <c>eq_only</c>). Jumps to <paramref name="NotFoundTarget"/> when no qualifying row
+/// exists. <paramref name="IsIndex"/> selects the Idx* opcode names for EXPLAIN parity;
+/// runtime semantics are the same for materialization-backed cursors.
+/// </summary>
+public sealed record SeekKeyInstruction(
+    Cursor Cursor,
+    RegisterRange Key,
+    VdbeKeySeekOperator Operator,
+    bool EqOnly,
+    bool IsIndex,
+    ProgramCounter NotFoundTarget,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => (IsIndex, Operator) switch
+    {
+        (false, VdbeKeySeekOperator.GreaterThanOrEqual) => VdbeOpcode.SeekGE,
+        (false, VdbeKeySeekOperator.GreaterThan) => VdbeOpcode.SeekGT,
+        (false, VdbeKeySeekOperator.LessThanOrEqual) => VdbeOpcode.SeekLE,
+        (false, VdbeKeySeekOperator.LessThan) => VdbeOpcode.SeekLT,
+        (true, VdbeKeySeekOperator.GreaterThanOrEqual) => VdbeOpcode.IdxGE,
+        (true, VdbeKeySeekOperator.GreaterThan) => VdbeOpcode.IdxGT,
+        (true, VdbeKeySeekOperator.LessThanOrEqual) => VdbeOpcode.IdxLE,
+        (true, VdbeKeySeekOperator.LessThan) => VdbeOpcode.IdxLT,
+        _ => VdbeOpcode.SeekGE,
+    };
+}
+
+/// <summary>
+/// Writes the current cursor row's rowid into <paramref name="Destination"/> (Turso
+/// <c>IdxRowid</c>). Works for any cursor that exposes rowids.
+/// </summary>
+public sealed record IdxRowIdInstruction(Cursor Cursor, Register Destination) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.IdxRowId;
+}
+
+/// <summary>
+/// Copies the current cursor row into <paramref name="Destination"/> (width =
+/// destination count), starting at column 0 (Turso <c>RowData</c> simplified to
+/// register columns rather than a packed record blob).
+/// </summary>
+public sealed record RowDataInstruction(Cursor Cursor, RegisterRange Destination) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.RowData;
+}
+
+/// <summary>Turso <c>IdxInsertFlags</c> bitfield.</summary>
+[Flags]
+public enum VdbeIdxInsertFlags : byte
+{
+    None = 0,
+    Append = 0x01,
+    UseSeek = 0x02,
+    NChange = 0x04,
+    NoOpDuplicate = 0x08,
+}
+
+/// <summary>
+/// Inserts <paramref name="Key"/> into an ephemeral/index cursor. With
+/// <see cref="VdbeIdxInsertFlags.NoOpDuplicate"/>, a matching key is a no-op
+/// instead of a second insert (Turso <c>IdxInsert</c>).
+/// </summary>
+public sealed record IdxInsertInstruction(
+    Cursor Cursor,
+    RegisterRange Key,
+    VdbeIdxInsertFlags Flags = VdbeIdxInsertFlags.None) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.IdxInsert;
+}
+
+/// <summary>
+/// Deletes the entry at the current cursor position from an ephemeral/index
+/// cursor (Turso <c>IdxDelete</c>). Optional <paramref name="Key"/> seeks first.
+/// </summary>
+public sealed record IdxDeleteInstruction(
+    Cursor Cursor,
+    RegisterRange? Key = null) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.IdxDelete;
+}
+
+/// <summary>
 /// Opens the statement's outermost transaction over the interpreter's mutable register state,
 /// snapshotting the register file so a later <see cref="RollbackTransactionInstruction"/> can restore
 /// it. It fails at run time when a transaction is already open, mirroring SQLite's "cannot start a
@@ -2708,6 +2826,60 @@ public sealed class VdbeProgram
                     ValidateJumpTarget(fkIfZero.Target, instructionIndex);
                     break;
                 case FkCheckInstruction:
+                    break;
+                case SeekKeyInstruction seekKey:
+                    ValidateOpenCursor(seekKey.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(seekKey.Key, instructionIndex);
+                    if (seekKey.Key.Count <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} SeekKey requires a positive key width.");
+                    }
+
+                    if (!Enum.IsDefined(seekKey.Operator))
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has an undefined SeekKey operator.");
+                    }
+
+                    ValidateJumpTarget(seekKey.NotFoundTarget, instructionIndex);
+                    break;
+                case IdxRowIdInstruction idxRowId:
+                    ValidateOpenCursor(idxRowId.Cursor, openCursors, instructionIndex);
+                    ValidateRegister(idxRowId.Destination, instructionIndex);
+                    break;
+                case RowDataInstruction rowData:
+                    ValidateOpenCursor(rowData.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(rowData.Destination, instructionIndex);
+                    if (rowData.Destination.Count <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} RowData requires a positive destination width.");
+                    }
+
+                    break;
+                case IdxInsertInstruction idxInsert:
+                    ValidateOpenCursor(idxInsert.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(idxInsert.Key, instructionIndex);
+                    if (idxInsert.Key.Count <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} IdxInsert requires a positive key width.");
+                    }
+
+                    break;
+                case IdxDeleteInstruction idxDelete:
+                    ValidateOpenCursor(idxDelete.Cursor, openCursors, instructionIndex);
+                    if (idxDelete.Key is { } deleteKey)
+                    {
+                        ValidateRegisterRange(deleteKey, instructionIndex);
+                        if (deleteKey.Count <= 0)
+                        {
+                            throw new VdbeProgramValidationException(
+                                $"VDBE instruction {instructionIndex} IdxDelete key requires a positive width.");
+                        }
+                    }
+
                     break;
                 case SeekRowidRangeInstruction seekRowidRange:
                     ValidateOpenCursor(seekRowidRange.Cursor, openCursors, instructionIndex);

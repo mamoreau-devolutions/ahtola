@@ -221,6 +221,36 @@ public static class VdbeExplain
                 0,
                 null,
                 fkCheck.Deferred ? "check deferred fk counter" : "check statement fk counter"),
+            SeekKeyInstruction seekKey => (
+                seekKey.Cursor.Index,
+                seekKey.NotFoundTarget.Offset,
+                seekKey.Key.Start.Index,
+                $"{seekKey.Operator}{(seekKey.EqOnly ? " eq_only" : string.Empty)} {FormatRange(seekKey.Key)}",
+                seekKey.Description),
+            IdxRowIdInstruction idxRowId => (
+                idxRowId.Cursor.Index,
+                idxRowId.Destination.Index,
+                0,
+                null,
+                $"r[{idxRowId.Destination.Index}]=idx rowid c[{idxRowId.Cursor.Index}]"),
+            RowDataInstruction rowData => (
+                rowData.Cursor.Index,
+                rowData.Destination.Start.Index,
+                rowData.Destination.Count,
+                null,
+                $"rowdata c[{rowData.Cursor.Index}] -> {FormatRange(rowData.Destination)}"),
+            IdxInsertInstruction idxInsert => (
+                idxInsert.Cursor.Index,
+                (long)idxInsert.Flags,
+                idxInsert.Key.Count,
+                FormatRange(idxInsert.Key),
+                $"idx insert c[{idxInsert.Cursor.Index}] flags={idxInsert.Flags}"),
+            IdxDeleteInstruction idxDelete => (
+                idxDelete.Cursor.Index,
+                0,
+                idxDelete.Key?.Count ?? 0,
+                idxDelete.Key is { } k ? FormatRange(k) : null,
+                $"idx delete c[{idxDelete.Cursor.Index}]"),
             SeekRowidRangeInstruction seekRowidRange => (
                 seekRowidRange.Cursor.Index,
                 seekRowidRange.NotFoundTarget.Offset,

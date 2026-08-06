@@ -117,39 +117,38 @@ internal sealed class SelectStatementCompiler
     {
         compiled = null!;
 
-        // Rowid ORDER BY elision (Turso order.rs eliminate_order_by subset):
-        // ScanTarget materializes rows in ascending rowid order, so
-        //   ORDER BY rowid ASC  → plain Rewind/Next scan (no sorter)
-        //   ORDER BY rowid DESC → Last/Prev reverse scan (no sorter)
-        // Only bare rowid/_rowid_/oid (IsTargetRowIdReference); INTEGER PK alias
-        // columns and secondary-index ORDER BY stay on the sorter path until the
-        // access-method planner lands. WHERE/GROUP BY/HAVING/LIMIT/OFFSET/DISTINCT
-        // still block elision (predicate + reverse path not combined yet).
-        if (TryGetBareRowidOrderBy(statement, out var rowidOrderTarget, out var rowidOrderDescending))
-        {
-            if (rowidOrderDescending)
-                return TryCompileReverseRowidScan(statement, rowidOrderTarget, out compiled);
+        // ORDER BY elision (Turso order.rs eliminate_order_by subset):
+                // Bare rowid / INTEGER PK alias:
+                //   ASC  → plain Rewind/Next (physical rowid order)
+                //   DESC → Last/Prev reverse scan
+                // Secondary-index ORDER BY is elided by the caller stripping OrderBy after
+                // materializing rows in index order (see TryCompileManagedIndexSelect).
+                // WHERE/GROUP BY/HAVING/LIMIT/OFFSET/DISTINCT still block the plain scan path
+                // except WHERE which is handled below as usual.
+                if (TryGetBareRowidOrderBy(statement, out var rowidOrderTarget, out var rowidOrderDescending))
+                {
+                    if (rowidOrderDescending)
+                        return TryCompileReverseRowidScan(statement, rowidOrderTarget, out compiled);
 
-            // ASC: fall through into the forward-scan compiler with OrderBy treated
-            // as already satisfied (gate below uses elideOrderBy).
-        }
-        else
-        {
-            rowidOrderTarget = null;
-            rowidOrderDescending = false;
-        }
+                    // ASC: fall through into the forward-scan compiler with OrderBy elided.
+                }
+                else
+                {
+                    rowidOrderTarget = null;
+                    rowidOrderDescending = false;
+                }
 
-        var elideOrderBy = rowidOrderTarget is not null && !rowidOrderDescending;
+                var elideOrderBy = rowidOrderTarget is not null && !rowidOrderDescending;
 
-        if (statement.Having is not null
-            || statement.GroupBy.Count != 0
-            || (statement.OrderBy.Count != 0 && !elideOrderBy)
-            || statement.Limit is not null
-            || statement.Offset is not null
-            || statement.Projections.Count == 0)
-        {
-            return false;
-        }
+                if (statement.Having is not null
+                    || statement.GroupBy.Count != 0
+                    || (statement.OrderBy.Count != 0 && !elideOrderBy)
+                    || statement.Limit is not null
+                    || statement.Offset is not null
+                    || statement.Projections.Count == 0)
+                {
+                    return false;
+                }
 
         var target = _resolveScanTarget(statement.Source!);
         if (target is null)

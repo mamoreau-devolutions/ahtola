@@ -464,6 +464,46 @@ public sealed class ResumableStatement : IDisposable
                         AdvanceInstructionPointer();
                         break;
                     }
+                case SeekKeyInstruction seekKey:
+                    {
+                        if (TrySeekKey(seekKey.Cursor, seekKey.Key, seekKey.Operator, seekKey.EqOnly))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = seekKey.NotFoundTarget;
+                        break;
+                    }
+                case IdxRowIdInstruction idxRowId:
+                    {
+                        _registers[idxRowId.Destination.Index] = SqlValue.Integer(CurrentCursorRowId(idxRowId.Cursor));
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case RowDataInstruction rowData:
+                    {
+                        var row = CurrentCursorRow(rowData.Cursor);
+                        var dest = rowData.Destination;
+                        for (var i = 0; i < dest.Count; i++)
+                        {
+                            _registers[dest.Start.Index + i] = i < row.Length
+                                ? row[i]
+                                : SqlValue.Null;
+                        }
+
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case IdxInsertInstruction idxInsert:
+                    {
+                        ExecuteIdxInsert(idxInsert);
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case IdxDeleteInstruction idxDelete:
+                    {
+                        ExecuteIdxDelete(idxDelete);
+                        AdvanceInstructionPointer();
+                        break;
+                    }
                 case SeekRowidRangeInstruction seekRowidRange:
                     {
                         // Position the cursor on the first row whose rowid satisfies StartOp relative
@@ -1809,21 +1849,7 @@ public sealed class ResumableStatement : IDisposable
         var rows = source.Rows;
         for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
         {
-            var row = rows[rowIndex];
-            if (row.Length < keyValues.Length)
-                continue;
-
-            var match = true;
-            for (var column = 0; column < keyValues.Length; column++)
-            {
-                if (!row[column].Equals(keyValues[column]))
-                {
-                    match = false;
-                    break;
-                }
-            }
-
-            if (!match)
+            if (!RowMatchesKeyPrefix(rows[rowIndex], keyValues))
                 continue;
 
             _cursorPositions[cursor.Index] = rowIndex;
@@ -1831,6 +1857,171 @@ public sealed class ResumableStatement : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Positions the cursor for SeekGE/GT/LE/LT (and Idx* aliases). GE/GT take the first
+    /// qualifying row in scan order; LE/LT take the last. EqOnly requires an exact match
+    /// on GE/LE (Turso eq_only). Comparison uses SqlValue binary equality/order via
+    /// <see cref="CompareKeyPrefix"/>.
+    /// </summary>
+    private bool TrySeekKey(
+        Cursor cursor,
+        RegisterRange key,
+        VdbeKeySeekOperator op,
+        bool eqOnly)
+    {
+        _materializedRows[cursor.Index] = null;
+        var keyValues = ReadRegisters(key);
+        var source = RequireCursorSource(cursor);
+        var rows = source.Rows;
+        var found = -1;
+
+        for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            var cmp = CompareKeyPrefix(rows[rowIndex], keyValues);
+            var qualifies = op switch
+            {
+                VdbeKeySeekOperator.GreaterThanOrEqual => cmp >= 0,
+                VdbeKeySeekOperator.GreaterThan => cmp > 0,
+                VdbeKeySeekOperator.LessThanOrEqual => cmp <= 0,
+                VdbeKeySeekOperator.LessThan => cmp < 0,
+                _ => false,
+            };
+            if (!qualifies)
+                continue;
+
+            if (eqOnly
+                && op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.LessThanOrEqual
+                && cmp != 0)
+            {
+                continue;
+            }
+
+            // GE/GT: first match; LE/LT: last match.
+            if (op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.GreaterThan)
+            {
+                found = rowIndex;
+                break;
+            }
+
+            found = rowIndex;
+        }
+
+        if (found < 0)
+            return false;
+
+        _cursorPositions[cursor.Index] = found;
+        return true;
+    }
+
+    private static bool RowMatchesKeyPrefix(SqlValue[] row, SqlValue[] key)
+    {
+        if (row.Length < key.Length)
+            return false;
+
+        for (var column = 0; column < key.Length; column++)
+        {
+            if (!row[column].Equals(key[column]))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Lexicographic comparison of row's leading columns against key. Nulls sort
+    /// lowest (SQLite default BINARY). Returns negative if row &lt; key, 0 if equal
+    /// for the key width, positive if row &gt; key.
+    /// </summary>
+    private static int CompareKeyPrefix(SqlValue[] row, SqlValue[] key)
+    {
+        var width = key.Length;
+        for (var column = 0; column < width; column++)
+        {
+            if (column >= row.Length)
+                return -1;
+
+            var cmp = CompareSqlValues(row[column], key[column]);
+            if (cmp != 0)
+                return cmp;
+        }
+
+        return 0;
+    }
+
+    private static int CompareSqlValues(SqlValue left, SqlValue right)
+    {
+        if (left.Kind == SqlValueKind.Null && right.Kind == SqlValueKind.Null)
+            return 0;
+        if (left.Kind == SqlValueKind.Null)
+            return -1;
+        if (right.Kind == SqlValueKind.Null)
+            return 1;
+        if (left.Equals(right))
+            return 0;
+
+        // Prefer numeric order when both are numeric; otherwise ordinal text / kind order.
+        if (TryAsDouble(left, out var leftNum) && TryAsDouble(right, out var rightNum))
+            return leftNum.CompareTo(rightNum);
+
+        if (left.Kind == SqlValueKind.Text && right.Kind == SqlValueKind.Text)
+            return string.CompareOrdinal(left.AsText(), right.AsText());
+
+        // Mixed/non-text kinds: order by kind then fall back to inequality.
+        var kindOrder = left.Kind.CompareTo(right.Kind);
+        return kindOrder != 0 ? kindOrder : left.Equals(right) ? 0 : -1;
+    }
+
+    private static bool TryAsDouble(SqlValue value, out double number)
+    {
+        switch (value.Kind)
+        {
+            case SqlValueKind.Integer:
+                number = value.AsInteger();
+                return true;
+            case SqlValueKind.Real:
+                number = value.AsReal();
+                return true;
+            default:
+                number = 0;
+                return false;
+        }
+    }
+
+    private void ExecuteIdxInsert(IdxInsertInstruction idxInsert)
+    {
+        var ephemeral = RequireEphemeralTable(idxInsert.Cursor);
+        var key = ReadRegisters(idxInsert.Key);
+        if ((idxInsert.Flags & VdbeIdxInsertFlags.NoOpDuplicate) != 0
+            && ephemeral.ContainsKeyPrefix(key))
+        {
+            return;
+        }
+
+        ephemeral.Insert(key);
+        if ((idxInsert.Flags & VdbeIdxInsertFlags.NChange) != 0)
+            RowsAffected = checked(RowsAffected + 1);
+    }
+
+    private void ExecuteIdxDelete(IdxDeleteInstruction idxDelete)
+    {
+        var ephemeral = RequireEphemeralTable(idxDelete.Cursor);
+        if (idxDelete.Key is { } keyRange)
+        {
+            var key = ReadRegisters(keyRange);
+            if (!ephemeral.TryDeleteKeyPrefix(key))
+                return;
+        }
+        else
+        {
+            var position = _cursorPositions[idxDelete.Cursor.Index];
+            if (!ephemeral.TryDeleteAt(position))
+                return;
+            _cursorPositions[idxDelete.Cursor.Index] = -1;
+        }
+
+        _materializedRows[idxDelete.Cursor.Index] = null;
     }
 
     private Exception CreateHaltException(HaltInstruction halt)
@@ -1920,7 +2111,8 @@ public sealed class ResumableStatement : IDisposable
 
     /// <summary>
     /// In-memory ephemeral table backing an <see cref="OpenEphemeralInstruction"/> cursor.
-    /// Rows are append-only with sequential 1-based rowids for SeekRowid/NotExists/Found.
+    /// Rows are append-only with sequential 1-based rowids for SeekRowid/NotExists/Found,
+    /// and support IdxInsert/IdxDelete key maintenance.
     /// </summary>
     private sealed class EphemeralTableRuntime
     {
@@ -1953,6 +2145,44 @@ public sealed class ResumableStatement : IDisposable
             _rowIds.Add(_nextRowId);
             _nextRowId = checked(_nextRowId + 1);
             _sourceView = null;
+        }
+
+        public bool ContainsKeyPrefix(SqlValue[] key)
+        {
+            foreach (var row in _rows)
+            {
+                if (RowMatchesKeyPrefix(row, key))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public bool TryDeleteKeyPrefix(SqlValue[] key)
+        {
+            for (var i = 0; i < _rows.Count; i++)
+            {
+                if (!RowMatchesKeyPrefix(_rows[i], key))
+                    continue;
+
+                _rows.RemoveAt(i);
+                _rowIds.RemoveAt(i);
+                _sourceView = null;
+                return true;
+            }
+
+            return false;
+        }
+
+        public bool TryDeleteAt(int position)
+        {
+            if (position < 0 || position >= _rows.Count)
+                return false;
+
+            _rows.RemoveAt(position);
+            _rowIds.RemoveAt(position);
+            _sourceView = null;
+            return true;
         }
 
         public VdbeCursorSource AsCursorSource()

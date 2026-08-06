@@ -46,8 +46,8 @@
         "S": 99
       },
       "by_status": {
-        "open": 32,
-        "closed": 179
+        "open": 29,
+        "closed": 182
       }
     },
     "schema": {
@@ -246,8 +246,8 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Turso has a full index-cursor family: range seeks with eq_only over index records, rowid extraction from index entries, index insert/delete with IdxInsertFlags (no-op dup detection), and raw record access (RowData). Ahtola reaches indexes only through the SortedScan builder and maintains them inside DML delegates. Works for the compiled shapes but blocks index-only scans, IN-driven index seeks, and partial/expression index exploitation (see compilation entries).",
-      "status": "open"
+      "notes": "Closed 2026-08-06. IdxGE/GT/LE/LT via SeekKeyInstruction(IsIndex=true); IdxRowIdInstruction; RowDataInstruction (register columns); IdxInsertInstruction with VdbeIdxInsertFlags (Append/UseSeek/NChange/NoOpDuplicate); IdxDeleteInstruction (by key or current position) on ephemeral tables. Evidence: VdbeIndexCursorOpcodeTests. Residual: compiler/planner emission for index-only scans and covering-index projection (compile-select-compiler-no-multi-table-covering-index); durable index btree insert/delete still goes through DML write-target delegates rather than IdxInsert against catalog indexes.",
+      "status": "closed"
     },
     {
       "id": "vdbe-seek-op-family-partial",
@@ -258,8 +258,8 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Partial 2026-08-06 (still open). Rowid probe family complete: SeekRowid/SeekRowidRange, NotExists, Found, NoConflict (NULL-is-no-conflict + key-prefix equality probe with cursor positioning). INTEGER PRIMARY KEY alias now participates in SeekRowid point lookups (WHERE id = N). Evidence: VdbeHaltAndSeekProbeOpcodeTests, VdbeNoConflictOpcodeTests, SeekAccessPathTests.IntegerPrimaryKeyAliasPointLookupEmitsSeekRowid. Still open: record-key SeekGE/GT/LE/LT with eq_only over index btree keys — owned jointly with vdbe-index-cursor-opcode-family.",
-      "status": "open"
+      "notes": "Closed 2026-08-06. Record-key SeekGE/GT/LE/LT (SeekKeyInstruction) with eq_only; rowid probes SeekRowid/SeekRowidRange/NotExists/Found; NoConflict with NULL-is-no-conflict. Idx* opcode names share the same key-seek runtime via IsIndex. INTEGER PRIMARY KEY alias participates in SeekRowid. Evidence: VdbeIndexCursorOpcodeTests, VdbeNoConflictOpcodeTests, VdbeHaltAndSeekProbeOpcodeTests, SeekAccessPathTests. Residual: compiler emission of SeekGE for index-driven WHERE (still mostly scan+filter or SortedScan); durable btree index cursors still materialize through VdbeCursorSource rather than paging the index leaf chain.",
+      "status": "closed"
     },
     {
       "id": "vdbe-rowset-test",
@@ -562,8 +562,8 @@
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Partial 2026-08-06 (still open). Bare rowid and INTEGER PRIMARY KEY alias ORDER BY elide the sorter: ASC uses Rewind/Next; DESC uses Last/Prev. WHERE id = N also lowers to SeekRowid. Evidence: CompiledSortedScanExecutionTests.OrderByRowidAscElidesSorterAndUsesForwardScan, OrderByIntegerPrimaryKeyAliasElidesSorter; SeekAccessPathTests.IntegerPrimaryKeyAliasPointLookupEmitsSeekRowid. Still open: secondary-index ORDER BY/GROUP BY elision (needs access-method planner), elision combined with WHERE on non-rowid predicates.",
-      "status": "open"
+      "notes": "Closed 2026-08-06. Bare rowid / INTEGER PK alias ORDER BY elides the sorter (ASC Rewind/Next, DESC Last/Prev). Secondary-index ORDER BY elides the sorter when ManagedIndexScanPlan selects an index whose key matches ORDER BY: rows are materialized in index order and OrderBy is stripped before SelectStatementCompiler so the plan is plain Rewind/Next with OpenRead USING INDEX. Plain (non-partial) indexes are now eligible for SEARCH and ORDER BY planning (previously skipped). Evidence: CompiledSortedScanExecutionTests.OrderByRowidAscElidesSorterAndUsesForwardScan, OrderByIntegerPrimaryKeyAliasElidesSorter, OrderBySecondaryIndexElidesSorter. Residual: multi-table covering-index projection without base table (compile-select-compiler-no-multi-table-covering-index); cost-based choice among multiple usable indexes (compile-no-access-method-selection).",
+      "status": "closed"
     },
     {
       "id": "compile-nway-join-not-index-driven",
