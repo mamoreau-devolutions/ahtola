@@ -18,10 +18,8 @@ on_conflict.sqltest::mvcc-upsert-set-pk-on-conflict-target-resolves | expected 2
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery | expected success but got error: managed execution exceeded 30 seconds
-temp_tables.sqltest::temp-table-join-can-distinguish-main-and-temp | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 temp_tables_mvcc.sqltest::pragma-temp-journal-mode-mvcc-is-ignored | expected 2 row(s), got 2 row(s); row 0 expected 'wal' but was 'memory'
 temp_tables_mvcc.sqltest::temp-autoincrement-is-allowed-when-main-db-is-mvcc | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'wal'
-transactions.sqltest::temp-and-main-table-in-immediate-tx | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 update_attached_db_index.sqltest::update-attached-db-rowid-with-where-subquery | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 alter_table.sqltest::alter-table-rename-column-temp-trigger-attached-cross-table | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 alter_table.sqltest::temp-trigger-attached-read-cross-table | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.

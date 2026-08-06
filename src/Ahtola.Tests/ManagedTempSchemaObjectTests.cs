@@ -525,6 +525,63 @@ public sealed class ManagedTempSchemaObjectTests
         AssertQueriesMatch(managed, sqlite, "SELECT name, sql FROM sqlite_temp_schema ORDER BY name");
     }
 
+    [Test]
+    public void ReadOnlyQueriesCanJoinMainAndTempSnapshots()
+    {
+        using var database = new EmbeddedDatabase();
+        using var managed = database.Connect();
+        using var sqlite = OpenSqlite();
+        var setup = new[]
+        {
+            "CREATE TABLE join_t(x INTEGER)",
+            "INSERT INTO main.join_t VALUES (1)",
+            "CREATE TEMP TABLE join_t(x INTEGER)",
+            "INSERT INTO temp.join_t VALUES (2)",
+            "CREATE TABLE main_t(id INTEGER PRIMARY KEY)",
+            "CREATE TEMP TABLE temp_t(id INTEGER PRIMARY KEY)",
+        };
+        foreach (var sql in setup)
+        {
+            Execute(managed, sql);
+            Execute(sqlite, sql);
+        }
+
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT m.x, t.x FROM main.join_t AS m, temp.join_t AS t");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT main.join_t.x, temp.join_t.x FROM main.join_t, temp.join_t");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT m.x, (SELECT t.x FROM temp.join_t AS t) FROM main.join_t AS m");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT group_concat(m.x ORDER BY (SELECT t.x FROM temp.join_t AS t)) FROM main.join_t AS m");
+
+        foreach (var sql in new[]
+                 {
+                     "BEGIN IMMEDIATE",
+                     "INSERT INTO main_t VALUES (1), (2)",
+                     "INSERT INTO temp_t VALUES (10), (20)",
+                 })
+        {
+            Execute(managed, sql);
+            Execute(sqlite, sql);
+        }
+
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT m.id, t.id FROM main_t AS m, temp_t AS t ORDER BY m.id, t.id");
+        Execute(managed, "COMMIT");
+        Execute(sqlite, "COMMIT");
+    }
+
     private static MsData.SqliteConnection OpenSqlite()
     {
         var connection = new MsData.SqliteConnection("Data Source=:memory:");

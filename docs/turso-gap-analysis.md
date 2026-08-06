@@ -489,9 +489,10 @@ Highest-impact entries:
 - **`compile-affinity-rules-diverge-in-subquery-and-compound-contexts`**
   (s1, 28 mapped): affinity propagation through subqueries and compound
   selects diverges — companion to `vdbe-typecheck-on-write`.
-- **ATTACH family** (s2/s4, 65 + 61 mapped): cross-database queries and
-  same-file ATTACH are unsupported/limited — by design for the managed
-  single-file model, but it gates a large DDL-test surface.
+- **ATTACH family** (s2/s4, 65 + 61 mapped): attached-database cross-schema
+  statements and same-file ATTACH are unsupported/limited — by design for the
+  managed single-file model, but it gates a large DDL-test surface. Read-only
+  main/temp base-table joins are supported from a connection-local snapshot.
 - **Planner** (s3): no subquery flattening (63 mapped), no decorrelation
   (25), no join-order optimization, no ORDER BY elision from indexes (17),
   no partial (18) or expression (19) indexes.
@@ -503,7 +504,7 @@ Highest-impact entries:
 | ID | Kind | Severity | Effort | Mapped fails | Cited | Summary |
 | --- | --- | --- | --- | ---: | ---: | --- |
 | `compile-select-alias-visibility` | divergent | s1-correctness | M | 66 | 9 | SELECT-list aliases are not visible in GROUP BY/HAVING/JOIN-USING contexts ("no such column: cnt/total/key"); ambiguous-column errors also misreport which name is ambiguo… |
-| `compile-attach-cross-database-support` | partial | s2-capability | L | 65 | 8 | Managed ATTACH supports file-backed attachments and independent connection-owned `:memory:` attachments, but cross-database statements remain rejected. Temp/main mixed statements are likewise rejected. Blocks the entire 4… |
+| `compile-attach-cross-database-support` | partial | s2-capability | L | 65 | 8 | Managed ATTACH supports file-backed attachments and independent connection-owned `:memory:` attachments. Read-only main/temp base-table queries share a connection-local snapshot, while attached-database statements and cross-schema writes remain rejected. Blocks the entire 4… |
 | `compile-no-subquery-flattening` | missing | s3-perf | L | 63 | 0 | SQLite/Turso can flatten many `FROM (SELECT ...)` derived-table subqueries into the outer query when safe (no aggregates/DISTINCT/LIMIT conflicts), avoiding a materializa… |
 | `compile-attach-same-file-not-supported` | missing | s4-intentional | S | 61 | 2 | Independent `:memory:` attachments are connection-owned, but attaching an existing managed in-memory database or an already-open file identity remains unsupported by design (… |
 | `compile-window-function-tie-break-ordering-diverges` | divergent | s1-correctness | M | 54 | 6 | Multiple DENSE_RANK/RANK conformance cases show different peer-grouping outcomes (which rows tie for the same rank) versus SQLite/Turso when collation (NOCASE), cross-typ… |

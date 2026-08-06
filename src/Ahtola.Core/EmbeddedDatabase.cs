@@ -1403,6 +1403,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
     }
 
+    internal SchemaCatalog SnapshotCatalog()
+    {
+        lock (_gate)
+        {
+            return new SchemaCatalog(_tables, _views, _triggers).Clone();
+        }
+    }
+
     /// <summary>
     /// Publishes the working catalog a temp trigger body mutated. The connection only calls this
     /// once the statement that fired the trigger succeeded, so a failed statement discards the
@@ -37965,8 +37973,8 @@ public sealed class EmbeddedConnection : IDisposable
             return;
         }
 
-        var mainCatalog = GetTransactionState(_database)?.Catalog ?? _database.LiveCatalog;
-        var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
+        var mainCatalog = GetTransactionState(_database)?.Catalog ?? _database.SnapshotCatalog();
+        var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.SnapshotCatalog();
         var alteredCatalog = ReferenceEquals(routed.Database, _database) ? mainCatalog : tempCatalog;
         if (tempCatalog.Triggers.Count == 0
             || !alteredCatalog.Tables.TryGetValue(drop.TableName, out var originalTable))
@@ -38272,7 +38280,8 @@ public sealed class EmbeddedConnection : IDisposable
     private readonly record struct RoutedStatement(
         EmbeddedDatabase Database,
         ParsedStatement Statement,
-        bool IsAttached);
+        bool IsAttached,
+        EmbeddedDatabase.SchemaCatalog? ReadCatalog = null);
 
     internal EmbeddedConnection(EmbeddedDatabase database)
     {
@@ -38886,7 +38895,25 @@ public sealed class EmbeddedConnection : IDisposable
                     var mutationReserved = ReserveTransactionMutation(routed.Database, routed.Statement);
                     try
                     {
-                        if (transactionState is null)
+                        if (routed.ReadCatalog is not null)
+                        {
+                            result = routed.Database.Execute(
+                                routed.Statement,
+                                parameters,
+                                routed.ReadCatalog,
+                                _lastInsertRowId,
+                                _foreignKeys,
+                                _recursiveTriggers,
+                                _deferForeignKeys,
+                                inTransaction: _transactionDatabases is not null,
+                                cancellationToken,
+                                compilationEnabled: false,
+                                tempTriggers,
+                                CreateStatementHooks(routed.Database, includeCommitGate: false),
+                                ignoreCheckConstraints: _ignoreCheckConstraints,
+                                executeTableList: ExecutePragmaTableList);
+                        }
+                        else if (transactionState is null)
                         {
                             try
                             {
@@ -40092,6 +40119,13 @@ public sealed class EmbeddedConnection : IDisposable
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (resolvedSchemas.Count == 0)
             return new RoutedStatement(_database, statement, IsAttached: false);
+        if (statement is QueryStatement query
+            && resolvedSchemas.Count == 2
+            && resolvedSchemas.Contains("main")
+            && resolvedSchemas.Contains("temp"))
+        {
+            return RouteMainTempReadQuery(query);
+        }
         if (resolvedSchemas.Count != 1)
         {
             throw new EmbeddedSqlException(
@@ -40109,6 +40143,325 @@ public sealed class EmbeddedConnection : IDisposable
 
         return new RoutedStatement(attachment.Database, rewritten, IsAttached: true);
     }
+
+    // Temp is connection-private, so a read-only catalog can safely combine its current snapshot with main.
+    // Attached databases deliberately remain outside this route because they have independent lock lifecycles.
+    private RoutedStatement RouteMainTempReadQuery(QueryStatement query)
+    {
+        var mainCatalog = GetTransactionState(_database)?.Catalog ?? _database.LiveCatalog;
+        var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
+        var mainTableNames = new HashSet<string>(mainCatalog.Tables.Keys, StringComparer.OrdinalIgnoreCase);
+        var tempTableNames = new HashSet<string>(tempCatalog.Tables.Keys, StringComparer.OrdinalIgnoreCase);
+        var tables = new Dictionary<string, EmbeddedTable>(StringComparer.OrdinalIgnoreCase);
+        var sourceNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        AddTables("main", mainCatalog, tempTableNames);
+        AddTables("temp", tempCatalog, mainTableNames);
+
+        return new RoutedStatement(
+            _database,
+            RewriteMainTempReadQuery(query, sourceNames, new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+            IsAttached: false,
+            new EmbeddedDatabase.SchemaCatalog(
+                tables,
+                new Dictionary<string, ViewDefinition>(StringComparer.OrdinalIgnoreCase),
+                new Dictionary<string, TriggerDefinition>(StringComparer.OrdinalIgnoreCase)));
+
+        void AddTables(
+            string schema,
+            EmbeddedDatabase.SchemaCatalog catalog,
+            HashSet<string> otherTableNames)
+        {
+            foreach (var pair in catalog.Tables)
+            {
+                var sourceName = otherTableNames.Contains(pair.Key)
+                    ? "\u0001" + schema + ":" + pair.Key
+                    : pair.Key;
+                tables.Add(sourceName, pair.Value);
+                sourceNames.Add(MainTempSourceKey(schema, pair.Key), sourceName);
+            }
+        }
+    }
+
+    private QueryStatement RewriteMainTempReadQuery(
+        QueryStatement query,
+        IReadOnlyDictionary<string, string> sourceNames,
+        HashSet<string> commonTableExpressions)
+    {
+        return query switch
+        {
+            SelectStatement select => select with
+            {
+                Projections = select.Projections.Select(projection => projection with
+                {
+                    Expression = RewriteMainTempReadExpression(
+                        projection.Expression,
+                        sourceNames,
+                        commonTableExpressions)!,
+                }).ToArray(),
+                Source = RewriteMainTempReadSource(select.Source, sourceNames, commonTableExpressions),
+                Where = RewriteMainTempReadExpression(select.Where, sourceNames, commonTableExpressions),
+                GroupBy = select.GroupBy.Select(expression =>
+                    RewriteMainTempReadExpression(expression, sourceNames, commonTableExpressions)!).ToArray(),
+                Having = RewriteMainTempReadExpression(select.Having, sourceNames, commonTableExpressions),
+                NamedWindows = select.NamedWindows.Select(window => window with
+                {
+                    Specification = RewriteMainTempReadWindow(
+                        window.Specification,
+                        sourceNames,
+                        commonTableExpressions)!,
+                }).ToArray(),
+                OrderBy = RewriteMainTempReadOrderBy(select.OrderBy, sourceNames, commonTableExpressions),
+                Limit = RewriteMainTempReadExpression(select.Limit, sourceNames, commonTableExpressions),
+                Offset = RewriteMainTempReadExpression(select.Offset, sourceNames, commonTableExpressions),
+            },
+            ValuesClause values => values with
+            {
+                Rows = values.Rows.Select(row => row.Select(expression =>
+                    RewriteMainTempReadExpression(expression, sourceNames, commonTableExpressions)!).ToArray()).ToArray(),
+            },
+            CompoundSelectStatement compound => compound with
+            {
+                Terms = compound.Terms.Select(term =>
+                    RewriteMainTempReadQuery(term, sourceNames, commonTableExpressions)).ToArray(),
+                OrderBy = RewriteMainTempReadOrderBy(compound.OrderBy, sourceNames, commonTableExpressions),
+                Limit = RewriteMainTempReadExpression(compound.Limit, sourceNames, commonTableExpressions),
+                Offset = RewriteMainTempReadExpression(compound.Offset, sourceNames, commonTableExpressions),
+            },
+            WithSelectStatement with => RewriteMainTempReadWithSelect(with, sourceNames, commonTableExpressions),
+            _ => throw new InvalidOperationException($"Cannot rewrite query {query.GetType().Name}."),
+        };
+    }
+
+    private WithSelectStatement RewriteMainTempReadWithSelect(
+        WithSelectStatement statement,
+        IReadOnlyDictionary<string, string> sourceNames,
+        HashSet<string> commonTableExpressions)
+    {
+        var names = new HashSet<string>(commonTableExpressions, StringComparer.OrdinalIgnoreCase);
+        var rewrittenCommonTableExpressions = new List<CommonTableExpression>();
+        foreach (var commonTableExpression in statement.CommonTableExpressions)
+        {
+            names.Add(commonTableExpression.Name);
+            rewrittenCommonTableExpressions.Add(commonTableExpression with
+            {
+                Query = RewriteMainTempReadQuery(commonTableExpression.Query, sourceNames, names),
+            });
+        }
+
+        return statement with
+        {
+            CommonTableExpressions = rewrittenCommonTableExpressions,
+            Query = RewriteMainTempReadQuery(statement.Query, sourceNames, names),
+        };
+    }
+
+    private TableSource? RewriteMainTempReadSource(
+        TableSource? source,
+        IReadOnlyDictionary<string, string> sourceNames,
+        HashSet<string> commonTableExpressions)
+    {
+        return source switch
+        {
+            null => null,
+            NamedTableSource named when !named.IsSchemaQualified
+                && commonTableExpressions.Contains(named.Name) => named,
+            NamedTableSource named => RewriteMainTempReadNamedSource(named, sourceNames),
+            DerivedTableSource derived => derived with
+            {
+                Query = RewriteMainTempReadQuery(derived.Query, sourceNames, commonTableExpressions),
+            },
+            JoinTableSource join => join with
+            {
+                Left = RewriteMainTempReadSource(join.Left, sourceNames, commonTableExpressions)!,
+                Right = RewriteMainTempReadSource(join.Right, sourceNames, commonTableExpressions)!,
+                Condition = RewriteMainTempReadExpression(
+                    join.Condition,
+                    sourceNames,
+                    commonTableExpressions),
+            },
+            TableValuedFunctionSource function => function with
+            {
+                Arguments = [.. function.Arguments.Select(argument =>
+                    RewriteMainTempReadExpression(argument, sourceNames, commonTableExpressions)!)],
+            },
+            _ => throw new InvalidOperationException($"Cannot rewrite source {source.GetType().Name}."),
+        };
+    }
+
+    private NamedTableSource RewriteMainTempReadNamedSource(
+        NamedTableSource source,
+        IReadOnlyDictionary<string, string> sourceNames)
+    {
+        var sourceName = source.Name;
+        var schema = ManagedSchemaName.TrySplit(sourceName, out var qualifiedSchema, out var localName)
+            ? qualifiedSchema
+            : ResolveCollectedSchema(UnqualifiedSchemaMarker + sourceName);
+        if (!ManagedSchemaName.TrySplit(sourceName, out _, out localName))
+            localName = sourceName;
+
+        return sourceNames.TryGetValue(MainTempSourceKey(schema, localName), out var rewritten)
+            ? source with { Name = rewritten, IsSchemaQualified = false }
+            : source;
+    }
+
+    private IReadOnlyList<OrderByTerm> RewriteMainTempReadOrderBy(
+        IReadOnlyList<OrderByTerm> orderBy,
+        IReadOnlyDictionary<string, string> sourceNames,
+        HashSet<string> commonTableExpressions)
+        => orderBy.Select(term => term with
+        {
+            Expression = RewriteMainTempReadExpression(term.Expression, sourceNames, commonTableExpressions)!,
+        }).ToArray();
+
+    private Expression? RewriteMainTempReadExpression(
+        Expression? expression,
+        IReadOnlyDictionary<string, string> sourceNames,
+        HashSet<string> commonTableExpressions)
+    {
+        return expression switch
+        {
+            null => null,
+            ColumnExpression column when column.Schema is { } schema
+                && column.Qualifier is { } qualifier
+                && sourceNames.TryGetValue(MainTempSourceKey(schema, qualifier), out var sourceName)
+                => column with
+                {
+                    Name = sourceName + "." + column.UnqualifiedName,
+                    Qualifier = sourceName,
+                    Schema = null,
+                },
+            ScalarSubqueryExpression scalarSubquery => scalarSubquery with
+            {
+                Query = RewriteMainTempReadQuery(
+                    scalarSubquery.Query,
+                    sourceNames,
+                    commonTableExpressions),
+            },
+            ExistsExpression exists => exists with
+            {
+                Query = RewriteMainTempReadQuery(exists.Query, sourceNames, commonTableExpressions),
+            },
+            InSubqueryExpression inSubquery => inSubquery with
+            {
+                Value = RewriteMainTempReadExpression(
+                    inSubquery.Value,
+                    sourceNames,
+                    commonTableExpressions)!,
+                Query = RewriteMainTempReadQuery(inSubquery.Query, sourceNames, commonTableExpressions),
+            },
+            FunctionExpression function => function with
+            {
+                Arguments = function.Arguments.Select(argument =>
+                    RewriteMainTempReadExpression(argument, sourceNames, commonTableExpressions)!).ToArray(),
+                Filter = RewriteMainTempReadExpression(function.Filter, sourceNames, commonTableExpressions),
+                Window = RewriteMainTempReadWindow(function.Window, sourceNames, commonTableExpressions),
+                AggregateOrderBy = function.AggregateOrderBy is null
+                    ? null
+                    : RewriteMainTempReadOrderBy(
+                        function.AggregateOrderBy,
+                        sourceNames,
+                        commonTableExpressions),
+            },
+            RowValueExpression rowValue => rowValue with
+            {
+                Values = rowValue.Values.Select(value =>
+                    RewriteMainTempReadExpression(value, sourceNames, commonTableExpressions)!).ToArray(),
+            },
+            CollationExpression collation => collation with
+            {
+                Expression = RewriteMainTempReadExpression(
+                    collation.Expression,
+                    sourceNames,
+                    commonTableExpressions)!,
+            },
+            CastExpression cast => cast with
+            {
+                Expression = RewriteMainTempReadExpression(cast.Expression, sourceNames, commonTableExpressions)!,
+            },
+            CaseExpression @case => @case with
+            {
+                Operand = RewriteMainTempReadExpression(@case.Operand, sourceNames, commonTableExpressions),
+                Clauses = @case.Clauses.Select(clause => clause with
+                {
+                    When = RewriteMainTempReadExpression(clause.When, sourceNames, commonTableExpressions)!,
+                    Then = RewriteMainTempReadExpression(clause.Then, sourceNames, commonTableExpressions)!,
+                }).ToArray(),
+                Else = RewriteMainTempReadExpression(@case.Else, sourceNames, commonTableExpressions),
+            },
+            LikeExpression like => like with
+            {
+                Value = RewriteMainTempReadExpression(like.Value, sourceNames, commonTableExpressions)!,
+                Pattern = RewriteMainTempReadExpression(like.Pattern, sourceNames, commonTableExpressions)!,
+                Escape = RewriteMainTempReadExpression(like.Escape, sourceNames, commonTableExpressions),
+            },
+            GlobExpression glob => glob with
+            {
+                Value = RewriteMainTempReadExpression(glob.Value, sourceNames, commonTableExpressions)!,
+                Pattern = RewriteMainTempReadExpression(glob.Pattern, sourceNames, commonTableExpressions)!,
+            },
+            InExpression @in => @in with
+            {
+                Value = RewriteMainTempReadExpression(@in.Value, sourceNames, commonTableExpressions)!,
+                Values = @in.Values.Select(value =>
+                    RewriteMainTempReadExpression(value, sourceNames, commonTableExpressions)!).ToArray(),
+            },
+            BetweenExpression between => between with
+            {
+                Value = RewriteMainTempReadExpression(between.Value, sourceNames, commonTableExpressions)!,
+                Lower = RewriteMainTempReadExpression(between.Lower, sourceNames, commonTableExpressions)!,
+                Upper = RewriteMainTempReadExpression(between.Upper, sourceNames, commonTableExpressions)!,
+            },
+            UnaryExpression unary => unary with
+            {
+                Operand = RewriteMainTempReadExpression(unary.Operand, sourceNames, commonTableExpressions)!,
+            },
+            BinaryExpression binary => binary with
+            {
+                Left = RewriteMainTempReadExpression(binary.Left, sourceNames, commonTableExpressions)!,
+                Right = RewriteMainTempReadExpression(binary.Right, sourceNames, commonTableExpressions)!,
+            },
+            _ => expression,
+        };
+    }
+
+    private WindowSpecification? RewriteMainTempReadWindow(
+        WindowSpecification? window,
+        IReadOnlyDictionary<string, string> sourceNames,
+        HashSet<string> commonTableExpressions)
+    {
+        if (window is null)
+            return null;
+
+        return window with
+        {
+            PartitionBy = window.PartitionBy.Select(expression =>
+                RewriteMainTempReadExpression(expression, sourceNames, commonTableExpressions)!).ToArray(),
+            OrderBy = RewriteMainTempReadOrderBy(window.OrderBy, sourceNames, commonTableExpressions),
+            Frame = window.Frame is null
+                ? null
+                : window.Frame with
+                {
+                    Start = window.Frame.Start with
+                    {
+                        Offset = RewriteMainTempReadExpression(
+                            window.Frame.Start.Offset,
+                            sourceNames,
+                            commonTableExpressions),
+                    },
+                    End = window.Frame.End with
+                    {
+                        Offset = RewriteMainTempReadExpression(
+                            window.Frame.End.Offset,
+                            sourceNames,
+                            commonTableExpressions),
+                    },
+                },
+        };
+    }
+
+    private static string MainTempSourceKey(string schema, string name)
+        => schema + "\u0001" + name;
 
     private string ResolveCollectedSchema(string schema)
     {
