@@ -37488,6 +37488,7 @@ public sealed class EmbeddedConnection : IDisposable
 {
     private const int MaximumAttachedDatabases = 10;
     private const char UnqualifiedSchemaMarker = '\0';
+    private const string PersistentTriggerColumnSchemaMarker = "\u0001persistent-trigger-columns";
     private readonly EmbeddedDatabase _database;
     private EmbeddedDatabase _tempDatabase;
     private readonly Dictionary<string, AttachedDatabase> _attachedDatabases = new(StringComparer.OrdinalIgnoreCase);
@@ -39099,21 +39100,9 @@ public sealed class EmbeddedConnection : IDisposable
     private ExecutionResult ExecuteAttach(AttachDatabaseStatement statement, SqlValue[] parameters)
     {
         EnsureAutocommitAttachmentLifecycle();
-        if (!_database.IsFileBacked)
-        {
-            throw new EmbeddedSqlException(
-                "Managed ATTACH requires a file-backed managed primary database so attachments share its file system.");
-        }
-
         var pathValue = _database.EvaluateConstant(statement.Path, parameters, _lastInsertRowId);
         var requestedPath = EmbeddedDatabase.ToSqlText(pathValue);
         var (path, uriReadOnly) = ResolveAttachmentPath(requestedPath);
-        if (string.IsNullOrWhiteSpace(path)
-            || path.Equals(":memory:", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new EmbeddedSqlException(
-                "Managed ATTACH supports only non-empty file paths; memory databases are not supported.");
-        }
 
         if (statement.Alias.Equals("main", StringComparison.OrdinalIgnoreCase)
             || statement.Alias.Equals("temp", StringComparison.OrdinalIgnoreCase))
@@ -39125,6 +39114,49 @@ public sealed class EmbeddedConnection : IDisposable
             throw new EmbeddedSqlException($"database {statement.Alias} is already in use");
         if (_attachedDatabases.Count >= MaximumAttachedDatabases)
             throw new EmbeddedSqlException($"too many attached databases - maximum {MaximumAttachedDatabases}");
+
+        if (path.Equals(":memory:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_database.IsFileBacked)
+            {
+                throw new EmbeddedSqlException(
+                    "Managed ATTACH supports only non-empty file paths; memory databases are not supported.");
+            }
+            if (uriReadOnly)
+                throw new EmbeddedSqlException("Managed ATTACH cannot open an in-memory database read-only.");
+            if (statement.Key is not null)
+                throw new EmbeddedSqlException("Managed ATTACH KEY is not supported for in-memory attachments.");
+
+            var sequence = GetNextAttachedDatabaseSequence();
+            var inMemoryAttached = new EmbeddedDatabase();
+            try
+            {
+                _database.CopyFunctionAndCollationRegistriesTo(inMemoryAttached);
+                _attachedDatabases.Add(
+                    statement.Alias,
+                    new AttachedDatabase(
+                        string.Empty,
+                        $"\0memory:{sequence}",
+                        inMemoryAttached,
+                        sequence,
+                        ownedFileSystem: null));
+            }
+            catch
+            {
+                inMemoryAttached.Dispose();
+                throw;
+            }
+
+            return ExecutionResult.Empty;
+        }
+
+        if (!_database.IsFileBacked)
+        {
+            throw new EmbeddedSqlException(
+                "Managed ATTACH requires a file-backed managed primary database so attachments share its file system.");
+        }
+        if (string.IsNullOrWhiteSpace(path))
+            throw new EmbeddedSqlException("Managed ATTACH supports only non-empty file paths.");
 
         var pathIdentity = GetAttachmentPathIdentity(path);
         var pathComparer = GetAttachmentPathComparer();
@@ -39249,7 +39281,8 @@ public sealed class EmbeddedConnection : IDisposable
 
     private ExecutionResult ExecuteDetach(DetachDatabaseStatement statement)
     {
-        EnsureAutocommitAttachmentLifecycle();
+        if (_transactionDatabases is not null)
+            throw new EmbeddedSqlException($"database {statement.Alias} is locked");
         if (!_attachedDatabases.TryGetValue(statement.Alias, out var attachment))
             throw new EmbeddedSqlException($"no such database: {statement.Alias}");
         if (attachment.Database.HasOpenBlobHandles)
@@ -39824,9 +39857,15 @@ public sealed class EmbeddedConnection : IDisposable
         // explicit references to that same schema, while qualified mutation targets remain
         // invalid in trigger bodies. A temp trigger body is dispatched by this connection, so it
         // may name objects in other schemas.
-        if (!temporary
-            && (PersistentTriggerReferencesForeignSchema(statement, homeSchema)
-                || statement.Body.Any(HasQualifiedTriggerMutationTarget)))
+        var foreignSchema = temporary
+            ? null
+            : FindPersistentTriggerForeignSchema(statement, homeSchema);
+        if (foreignSchema is not null)
+        {
+            throw new EmbeddedSqlException(
+                $"trigger {triggerName} cannot reference objects in database {foreignSchema}");
+        }
+        if (!temporary && statement.Body.Any(HasQualifiedTriggerMutationTarget))
         {
             throw new EmbeddedSqlException(
                 "Managed persistent trigger bodies cannot reference another database schema.");
@@ -39841,24 +39880,33 @@ public sealed class EmbeddedConnection : IDisposable
                 TableName = local,
                 Temporary = temporary,
                 TargetSchema = targetIsForeign ? resolvedTargetSchema : null,
-                When = temporary || statement.When is null || !ExpressionContainsSchemaQualification(statement.When)
+                When = temporary || statement.When is null
                     ? statement.When
                     : RewriteExpressionSchema(
-                        statement.When,
-                        homeSchema,
+                        ExpressionContainsSchemaQualification(statement.When)
+                            ? RewriteExpressionSchema(
+                                statement.When,
+                                homeSchema,
+                                new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+                            : statement.When,
+                        PersistentTriggerColumnSchemaMarker,
                         new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
                 Body = temporary
                     ? statement.Body
-                    : statement.Body.Select(body => ContainsSchemaQualification(body)
-                        ? RewriteStatementSchema(body, homeSchema)
-                        : body).ToArray(),
+                    : statement.Body.Select(body =>
+                    {
+                        var rewritten = ContainsSchemaQualification(body)
+                            ? RewriteStatementSchema(body, homeSchema)
+                            : body;
+                        return RewriteStatementSchema(rewritten, PersistentTriggerColumnSchemaMarker);
+                    }).ToArray(),
                 // SQLite stores the ON-clause target qualifier verbatim and drops only the
                 // trigger's own-name qualifier; the parser's stored text already matches that.
                 Sql = statement.Sql,
             });
     }
 
-    private static bool PersistentTriggerReferencesForeignSchema(
+    private static string? FindPersistentTriggerForeignSchema(
         CreateTriggerStatement statement,
         string homeSchema)
     {
@@ -39873,7 +39921,7 @@ public sealed class EmbeddedConnection : IDisposable
                 CollectStatementSchemas(bodyStatement, schemas, commonTableExpressions);
         }
 
-        return schemas.Any(schema => schema.Length != 0
+        return schemas.FirstOrDefault(schema => schema.Length != 0
             && schema[0] != UnqualifiedSchemaMarker
             && !schema.Equals(homeSchema, StringComparison.OrdinalIgnoreCase));
     }
@@ -39899,8 +39947,15 @@ public sealed class EmbeddedConnection : IDisposable
                 ? viewSchema
                 : "main";
         if (!statement.Temporary
-            && !homeSchema.Equals("main", StringComparison.OrdinalIgnoreCase)
+            && homeSchema.Equals("main", StringComparison.OrdinalIgnoreCase)
             && ContainsSchemaQualification(statement))
+        {
+            throw new EmbeddedSqlException(
+                "A view in the main schema cannot reference objects in an attached database.");
+        }
+        if (!statement.Temporary
+            && !homeSchema.Equals("main", StringComparison.OrdinalIgnoreCase)
+            && ContainsSchemaQualification(statement.Query))
         {
             throw new EmbeddedSqlException("This schema-qualified statement is not supported by managed ATTACH.");
         }
@@ -40663,6 +40718,9 @@ public sealed class EmbeddedConnection : IDisposable
     {
         return expression switch
         {
+            ColumnExpression column when schema.Equals(PersistentTriggerColumnSchemaMarker, StringComparison.Ordinal)
+                && column.Schema is not null
+                => column with { Schema = null },
             ScalarSubqueryExpression scalarSubquery => scalarSubquery with
             {
                 Query = RewriteQuerySchema(scalarSubquery.Query, schema, commonTableExpressions),

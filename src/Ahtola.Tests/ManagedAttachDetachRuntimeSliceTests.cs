@@ -85,6 +85,43 @@ public sealed class ManagedAttachDetachRuntimeSliceTests
     }
 
     [Test]
+    public void InMemoryPrimaryAttachesIndependentConnectionOwnedMemoryDatabases()
+    {
+        using var main = new EmbeddedDatabase();
+        using var connection = main.Connect();
+
+        Execute(connection, "ATTACH DATABASE ':memory:' AS aux;");
+        Execute(connection, "ATTACH DATABASE ':memory:' AS other;");
+        Execute(connection, "CREATE TABLE main.items(value TEXT);");
+        Execute(connection, "CREATE TABLE aux.items(value TEXT);");
+        Execute(connection, "CREATE TABLE other.items(value TEXT);");
+        Execute(connection, "INSERT INTO main.items VALUES ('main');");
+        Execute(connection, "INSERT INTO aux.items VALUES ('aux');");
+        Execute(connection, "INSERT INTO other.items VALUES ('other');");
+
+        var databases = ReadRows(connection, "PRAGMA database_list;");
+        databases.Should().HaveCount(3);
+        databases[0].Should().Equal(SqlValue.Integer(0), SqlValue.Text("main"), SqlValue.Text(string.Empty));
+        databases[1].Should().Equal(SqlValue.Integer(2), SqlValue.Text("aux"), SqlValue.Text(string.Empty));
+        databases[2].Should().Equal(SqlValue.Integer(3), SqlValue.Text("other"), SqlValue.Text(string.Empty));
+        ReadRows(connection, "SELECT value FROM main.items;")
+            .Should().ContainSingle().Which.Should().Equal(SqlValue.Text("main"));
+        ReadRows(connection, "SELECT value FROM aux.items;")
+            .Should().ContainSingle().Which.Should().Equal(SqlValue.Text("aux"));
+        ReadRows(connection, "SELECT value FROM other.items;")
+            .Should().ContainSingle().Which.Should().Equal(SqlValue.Text("other"));
+
+        Execute(connection, "BEGIN;");
+        var locked = () => Execute(connection, "DETACH DATABASE other;");
+        locked.Should().Throw<EmbeddedSqlException>().WithMessage("database other is locked");
+        Execute(connection, "ROLLBACK;");
+        Execute(connection, "DETACH DATABASE aux;");
+        Execute(connection, "DETACH DATABASE other;");
+        var detached = () => ReadRows(connection, "SELECT value FROM aux.items;");
+        detached.Should().Throw<EmbeddedSqlException>().WithMessage("no such database: aux");
+    }
+
+    [Test]
     public void AttachedWithoutRowidCatalogCommitsRollsBackAndReopens()
     {
         var fileSystem = new InMemoryFileSystem();
@@ -332,7 +369,7 @@ public sealed class ManagedAttachDetachRuntimeSliceTests
 
             Execute(connection, "BEGIN;");
             var detachInTransaction = () => Execute(connection, "DETACH aux;");
-            detachInTransaction.Should().Throw<EmbeddedSqlException>().WithMessage("*not supported inside a transaction*");
+            detachInTransaction.Should().Throw<EmbeddedSqlException>().WithMessage("database aux is locked");
             var attachInTransaction = () => Execute(
                 connection,
                 "ATTACH DATABASE 'attach-other-secondary.db' AS other;");
