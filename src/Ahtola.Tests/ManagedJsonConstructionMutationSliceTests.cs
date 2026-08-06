@@ -49,7 +49,7 @@ public class ManagedJsonConstructionMutationSliceTests
     }
 
     [Test]
-    public void ErrorPositionAndUnsupportedInputsHaveExplicitFailures()
+    public void ErrorPositionAndInvalidInputsHaveExplicitFailures()
     {
         AssertInteger("json_error_position('{]')", 2);
         AssertInteger("json_error_position('{\"a\":}')", 6);
@@ -58,11 +58,14 @@ public class ManagedJsonConstructionMutationSliceTests
 
         AssertText("json_set('{\"x\":1}', '$.x[', 1)", "{\"x\":1}");
         Assert.Throws<EmbeddedSqlException>(() => Scalar("json_object('only-key')"));
-        Assert.Throws<EmbeddedSqlException>(() => Scalar("json_array(x'00')"));
+        Assert.Throws<EmbeddedSqlException>(() => Scalar("json_array(x'ff')"));
         Assert.Throws<EmbeddedSqlException>(() => Scalar("json_set('{}', '$.x[', 1)"));
+        Assert.Throws<EmbeddedSqlException>(() => Scalar("json_insert('{}', '$.value')"))
+            .Message.Should().Be("json_insert() needs an odd number of arguments");
+        Assert.Throws<EmbeddedSqlException>(() => Scalar("json_replace('{}', '$.value')"))
+            .Message.Should().Be("json_replace() needs an odd number of arguments");
         Assert.Throws<EmbeddedSqlException>(() => Scalar("json('{unquoted:1}')"));
-        var unsupported = Assert.Throws<EmbeddedSqlException>(() => Scalar("jsonb_array(1)"));
-        unsupported!.Message.Should().Be("no such function: JSONB_ARRAY");
+        AssertText("json(jsonb_array(1))", "[1]");
     }
 
     [Test]

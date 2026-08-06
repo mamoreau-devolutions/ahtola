@@ -158,6 +158,11 @@ internal sealed record AlterTableRenameColumnStatement(
     string NewName,
     bool QuoteNewName = false) : ParsedStatement;
 
+internal sealed record AlterTableAlterColumnStatement(
+    string TableName,
+    string ColumnName,
+    EmbeddedColumn Column) : ParsedStatement;
+
 internal sealed record AlterTableDropColumnStatement(string TableName, string ColumnName) : ParsedStatement;
 
 internal sealed record InsertStatement(
@@ -183,7 +188,9 @@ internal sealed record UpsertTargetColumn(
     string? Collation,
     bool Descending = false,
     Expression? Expression = null,
-    string? ExpressionSql = null)
+    string? ExpressionSql = null,
+    string? Qualifier = null,
+    string? Schema = null)
 {
     public bool IsExpression => Expression is not null;
 }
@@ -200,7 +207,15 @@ internal sealed record UpsertClause(
     IReadOnlyList<UpsertTargetColumn> Target,
     UpsertAction Action,
     Expression? TargetWhere = null,
-    string? TargetWhereSql = null);
+    string? TargetWhereSql = null,
+    UpsertClause? Next = null)
+{
+    public IEnumerable<UpsertClause> Clauses()
+    {
+        for (UpsertClause? clause = this; clause is not null; clause = clause.Next)
+            yield return clause;
+    }
+}
 
 internal sealed record UpdateStatement(
     string TableName,
@@ -402,6 +417,9 @@ internal enum TransactionMode
     /// <summary>Take the write lock lazily, at the first write.</summary>
     Deferred,
 
+    /// <summary>Use Turso's MVCC-only concurrent transaction mode.</summary>
+    Concurrent,
+
     /// <summary>Take the write lock at <c>BEGIN</c>.</summary>
     Immediate,
 
@@ -409,11 +427,13 @@ internal enum TransactionMode
     Exclusive,
 }
 
-internal sealed record BeginStatement(TransactionMode Mode = TransactionMode.Deferred) : ParsedStatement;
+internal sealed record BeginStatement(
+    TransactionMode Mode = TransactionMode.Deferred,
+    string? Name = null) : ParsedStatement;
 
-internal sealed record CommitStatement : ParsedStatement;
+internal sealed record CommitStatement(string? Name = null) : ParsedStatement;
 
-internal sealed record RollbackStatement : ParsedStatement;
+internal sealed record RollbackStatement(string? Name = null) : ParsedStatement;
 
 internal sealed record SavepointStatement(string Name) : ParsedStatement;
 
@@ -426,7 +446,8 @@ internal abstract record TableSource;
 internal sealed record NamedTableSource(
     string Name,
     string? Alias = null,
-    TableIndexDirective? IndexDirective = null) : TableSource;
+    TableIndexDirective? IndexDirective = null,
+    bool IsSchemaQualified = false) : TableSource;
 
 internal abstract record TableIndexDirective;
 
@@ -767,7 +788,8 @@ internal sealed record ColumnExpression(
     string Name,
     string? Qualifier = null,
     string? UnqualifiedName = null,
-    bool? BooleanKeyword = null) : Expression;
+    bool? BooleanKeyword = null,
+    string? Schema = null) : Expression;
 
 internal sealed record FunctionExpression(
     string Name,

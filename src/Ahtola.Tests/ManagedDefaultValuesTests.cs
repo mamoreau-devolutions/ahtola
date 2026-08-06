@@ -13,7 +13,7 @@ public sealed class ManagedDefaultValuesTests
         using var connection = database.Connect();
         Execute(
             connection,
-            "CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT DEFAULT 'new', quantity INTEGER DEFAULT 3, doubled AS (quantity * 2) STORED);");
+            "CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT DEFAULT 'new', quantity INTEGER DEFAULT 3, doubled AS (quantity * 2) VIRTUAL);");
         Execute(connection, "CREATE TABLE audit(event TEXT DEFAULT 'inserted');");
         Execute(
             connection,
@@ -70,7 +70,7 @@ public sealed class ManagedDefaultValuesTests
         {
             Execute(
                 connection,
-                "CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT DEFAULT 'persisted', quantity INTEGER DEFAULT 4, doubled AS (quantity * 2) STORED);");
+                "CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT DEFAULT 'persisted', quantity INTEGER DEFAULT 4, doubled AS (quantity * 2) VIRTUAL);");
             Execute(connection, "INSERT INTO items DEFAULT VALUES;");
         }
 
@@ -86,6 +86,37 @@ public sealed class ManagedDefaultValuesTests
                 SqlValue.Text("persisted"),
                 SqlValue.Integer(4),
                 SqlValue.Integer(8));
+    }
+
+    [TestCase("bare_identifier", "bare_identifier")]
+    [TestCase("[bracketed identifier]", "bracketed identifier")]
+    [TestCase("\"quoted identifier\"", "quoted identifier")]
+    public void BareIdentifierDefaultsAreStoredAsText(string defaultExpression, string expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, $"CREATE TABLE defaults(value TEXT DEFAULT {defaultExpression});");
+        Execute(connection, "INSERT INTO defaults DEFAULT VALUES;");
+
+        ReadRows(connection, "SELECT value FROM defaults;")
+            .Should()
+            .ContainSingle()
+            .Which
+            .Should()
+            .Equal(SqlValue.Text(expected));
+    }
+
+    [Test]
+    public void ParenthesizedIdentifierDefaultsRemainNonConstantExpressions()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        Action create = () => Execute(connection, "CREATE TABLE defaults(value TEXT DEFAULT (identifier));");
+
+        create.Should()
+            .Throw<EmbeddedSqlException>()
+            .WithMessage("default value of column [value] is not constant");
     }
 
     private static void Execute(EmbeddedConnection connection, string sql)

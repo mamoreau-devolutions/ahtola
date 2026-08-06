@@ -60,6 +60,43 @@ public sealed class ManagedForeignKeyFileCatalogDurabilityTests
     }
 
     [Test]
+    public void AddedColumnForeignKeyEnforcesBeforeAndAfterReopen()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        const string path = "added-column-foreign-key.db";
+
+        using (var database = EmbeddedDatabase.OpenFile(path, fileSystem))
+        using (var connection = database.Connect())
+        {
+            Execute(connection, "PRAGMA foreign_keys = ON;");
+            Execute(connection, "CREATE TABLE parent(code TEXT UNIQUE);");
+            Execute(connection, "CREATE TABLE child(id INTEGER);");
+            Execute(
+                connection,
+                "ALTER TABLE child ADD COLUMN code TEXT REFERENCES parent(code) "
+                    + "ON DELETE RESTRICT ON UPDATE RESTRICT;");
+            ScalarText(connection, "SELECT sql FROM sqlite_schema WHERE name = 'child';")
+                .Should().Contain("REFERENCES parent(code)");
+
+            Execute(connection, "INSERT INTO parent VALUES ('ok');");
+            Execute(connection, "INSERT INTO child(id, code) VALUES (1, 'ok'), (2, NULL);");
+            Action invalidChild = () => Execute(connection, "INSERT INTO child(id, code) VALUES (3, 'missing');");
+            invalidChild.Should().Throw<EmbeddedSqlException>().WithMessage("FOREIGN KEY constraint failed");
+        }
+
+        using var reopened = EmbeddedDatabase.OpenFile(path, fileSystem);
+        using var reopenedConnection = reopened.Connect();
+        Execute(reopenedConnection, "PRAGMA foreign_keys = ON;");
+        ScalarInteger(reopenedConnection, "SELECT COUNT(*) FROM child;").Should().Be(2);
+        Value(reopenedConnection, "SELECT code FROM child WHERE id = 1;").Should().Be(SqlValue.Text("ok"));
+        Value(reopenedConnection, "SELECT code FROM child WHERE id = 2;").Should().Be(SqlValue.Null);
+        Action reopenedInvalidChild = () => Execute(
+            reopenedConnection,
+            "INSERT INTO child(id, code) VALUES (3, 'missing');");
+        reopenedInvalidChild.Should().Throw<EmbeddedSqlException>().WithMessage("FOREIGN KEY constraint failed");
+    }
+
+    [Test]
     public void CompositeActionsAndDeferralRoundTripAcrossReopenAndFailedCommitRepair()
     {
         var fileSystem = new InMemoryFileSystem();

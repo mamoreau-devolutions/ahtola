@@ -85,6 +85,29 @@ public class WindowSqlRoutingTests
     }
 
     [Test]
+    public void DefaultRangeAggregateReusesPeerFrameAcrossJoinRows()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE w(p TEXT, v INTEGER);");
+        Execute(connection, "INSERT INTO w SELECT 'p' || (value % 3), value FROM generate_series(1, 60);");
+
+        var rows = ReadRows(connection, """
+            SELECT a.p
+            FROM w AS a JOIN w AS b USING (p) JOIN w AS d USING (p)
+            ORDER BY a.p, sum(1e18) OVER (ORDER BY a.p)
+            LIMIT 6;
+            """);
+
+        rows.Select(row => row[0]).Should().Equal(
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"));
+    }
+
+    [Test]
     public void MultipleWindowFunctionsSharingOneSpecRouteThroughOneSorter()
     {
         using var connection = new EmbeddedDatabase().Connect();
@@ -103,6 +126,30 @@ public class WindowSqlRoutingTests
             (SqlValue.Integer(2), SqlValue.Integer(30), SqlValue.Integer(2)),
             (SqlValue.Integer(3), SqlValue.Integer(60), SqlValue.Integer(3)),
             (SqlValue.Integer(4), SqlValue.Integer(100), SqlValue.Integer(4)));
+    }
+
+    [Test]
+    public void DistinctWindowSpecsRetainInnerOrderWithinOuterPeers()
+    {
+        string[] setup =
+        [
+            "CREATE TABLE nc (x TEXT COLLATE NOCASE, y INTEGER);",
+            "INSERT INTO nc VALUES ('a', 1), ('A', 2), ('b', 3);",
+        ];
+        const string query =
+            "SELECT y, dense_rank() OVER (ORDER BY x), " +
+            "dense_rank() OVER (ORDER BY x COLLATE BINARY) FROM nc;";
+
+        using var connection = new EmbeddedDatabase().Connect();
+        foreach (var statement in setup)
+            Execute(connection, statement);
+
+        var rows = ReadRows(connection, query);
+        rows.Select(row => (row[0], row[1], row[2])).Should().Equal(
+            (SqlValue.Integer(2), SqlValue.Integer(1), SqlValue.Integer(1)),
+            (SqlValue.Integer(1), SqlValue.Integer(1), SqlValue.Integer(2)),
+            (SqlValue.Integer(3), SqlValue.Integer(2), SqlValue.Integer(3)));
+        AssertMatchesSqlite(rows, setup, query);
     }
 
     [Test]

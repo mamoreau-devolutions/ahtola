@@ -128,7 +128,7 @@ public sealed partial class EmbeddedDatabase
         if (named.IndexDirective is not null
             || IsSchemaTable(named.Name)
             || context.Tables.ContainsKey(named.Name)
-            || context.CommonTableExpressions.ContainsKey(named.Name)
+            || IsCommonTableExpression(named, context)
             || TryGetView(context, named.Name, out _))
         {
             return false;

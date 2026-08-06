@@ -148,7 +148,7 @@ public sealed class AggregateStorageIntegrationTests
                     group_key TEXT COLLATE NOCASE,
                     amount INTEGER,
                     payload TEXT DEFAULT '{payload}',
-                    doubled INTEGER GENERATED ALWAYS AS (amount * 2) STORED
+                    doubled INTEGER GENERATED ALWAYS AS (amount * 2) VIRTUAL
                 );
                 """);
             Execute(

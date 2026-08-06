@@ -140,6 +140,42 @@ public sealed class ManagedAggregateAndJsonFunctionParityTests
             .Should().Equal("a-b-c", "a-b-c", "a-b-c");
     }
 
+    [Test]
+    public void JsonbFunctionsUseSQLiteBinaryEncodingAndRoundTripThroughJson()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Seed(connection);
+
+        ReadValue(connection, "SELECT hex(jsonb_group_object(1, 2));")
+            .Should().Be(SqlValue.Text("4C17311332"));
+        ReadValue(connection, "SELECT hex(jsonb_group_object(1.5, 2));")
+            .Should().Be(SqlValue.Text("6C37312E351332"));
+        ReadValue(connection, "SELECT hex(jsonb(NULL));")
+            .Should().Be(SqlValue.Text("00"));
+        ReadValue(connection, "SELECT json(jsonb_group_object(1, jsonb_array(2)));")
+            .Should().Be(SqlValue.JsonText("{\"1\":[2]}"));
+        ReadValue(connection, "SELECT json(jsonb_set(jsonb_object('a', 1), '$.b', 2));")
+            .Should().Be(SqlValue.JsonText("{\"a\":1,\"b\":2}"));
+        ReadValue(connection, "SELECT json(jsonb_extract(jsonb_array(1, 2), '$'));")
+            .Should().Be(SqlValue.JsonText("[1,2]"));
+    }
+
+    [Test]
+    public void JsonbMutatorsPreserveJsonMutatorArityDiagnostics()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        var insert = () => ReadValue(connection, "SELECT jsonb_insert('{}', '$.a');");
+        insert.Should().Throw<EmbeddedSqlException>()
+            .WithMessage("json_insert() needs an odd number of arguments");
+
+        var replace = () => ReadValue(connection, "SELECT jsonb_replace('{}', '$.a');");
+        replace.Should().Throw<EmbeddedSqlException>()
+            .WithMessage("json_replace() needs an odd number of arguments");
+    }
+
     [TestCase("SELECT json_pretty('{\"a\":1,\"b\":[1,2],\"c\":{}}');",
         "{\n    \"a\": 1,\n    \"b\": [\n        1,\n        2\n    ],\n    \"c\": {}\n}")]
     [TestCase("SELECT json_pretty('[1,{\"x\":null}]');",

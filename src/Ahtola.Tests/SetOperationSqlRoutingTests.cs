@@ -16,14 +16,34 @@ public class SetOperationSqlRoutingTests
     // ---- INTERSECT routes -------------------------------------------------------------------------
 
     [Test]
-    public void IntersectKeepsDistinctFirstTermRowsPresentInSecond()
+    public void IntersectTraversesTheMaterializedSetInKeyOrder()
     {
         using var connection = new EmbeddedDatabase().Connect();
         SeedSingleColumn(connection);
 
-        // t = {1,2,2,3}; u = {2,4}. Distinct t rows also in u, in first-term order => {2}.
+        // t = {1,2,2,3}; u = {2,4}. The only shared row is {2}.
         Column0(ReadRows(connection, "SELECT a FROM t INTERSECT SELECT a FROM u;"))
             .Should().Equal(SqlValue.Integer(2));
+    }
+
+    [Test]
+    public void IntersectAndExceptRouteAndOrderSurvivingRowsByTheirFullTuple()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE t(a INTEGER);");
+        Execute(connection, "CREATE TABLE u(a INTEGER);");
+        Execute(connection, "INSERT INTO t VALUES (3), (1), (2);");
+        Execute(connection, "INSERT INTO u VALUES (1), (3);");
+
+        Column0(ReadRows(connection, "SELECT a FROM t INTERSECT SELECT a FROM u;"))
+            .Should().Equal(SqlValue.Integer(1), SqlValue.Integer(3));
+        Column0(ReadRows(connection, "SELECT a FROM t EXCEPT SELECT a FROM u;"))
+            .Should().Equal(SqlValue.Integer(2));
+
+        Execute(connection, "DELETE FROM u;");
+        Execute(connection, "INSERT INTO u VALUES (2);");
+        Column0(ReadRows(connection, "SELECT a FROM t EXCEPT SELECT a FROM u;"))
+            .Should().Equal(SqlValue.Integer(1), SqlValue.Integer(3));
     }
 
     [Test]
@@ -58,7 +78,7 @@ public class SetOperationSqlRoutingTests
         using var connection = new EmbeddedDatabase().Connect();
         SeedNullableSingleColumn(connection);
 
-        // tn = {NULL,1,2}; un = {NULL,2,3}. NULL==NULL for set ops, so distinct tn present in un => {NULL,2}.
+        // tn = {NULL,1,2}; un = {NULL,2,3}. NULL==NULL for set ops, so distinct shared rows are {NULL,2}.
         var rows = ReadRows(connection, "SELECT a FROM tn INTERSECT SELECT a FROM un;");
 
         rows.Should().HaveCount(2);
@@ -74,7 +94,7 @@ public class SetOperationSqlRoutingTests
         using var connection = new EmbeddedDatabase().Connect();
         SeedSingleColumn(connection);
 
-        // t = {1,2,2,3}; u = {2,4}. Distinct t rows not in u, in first-term order => {1,3}.
+        // t = {1,2,2,3}; u = {2,4}. Distinct t rows not in u => {1,3}.
         Column0(ReadRows(connection, "SELECT a FROM t EXCEPT SELECT a FROM u;"))
             .Should().Equal(SqlValue.Integer(1), SqlValue.Integer(3));
     }
@@ -85,7 +105,7 @@ public class SetOperationSqlRoutingTests
         using var connection = new EmbeddedDatabase().Connect();
         SeedTwoColumn(connection);
 
-        // t rows not present in u, de-duplicated on the whole tuple, first-term order => {(1,x),(3,z)}.
+        // t rows not present in u, de-duplicated on the whole tuple => {(1,x),(3,z)}.
         var rows = ReadRows(connection, "SELECT a, b FROM t EXCEPT SELECT a, b FROM u;");
 
         rows.Should().HaveCount(2);
@@ -101,7 +121,7 @@ public class SetOperationSqlRoutingTests
         Execute(connection, "CREATE TABLE v(a INTEGER);");
         Execute(connection, "INSERT INTO v VALUES (2), (3), (5);");
 
-        // t EXCEPT u EXCEPT v == t minus (u UNION v): distinct t rows absent from both => {1}.
+        // t EXCEPT u EXCEPT v == t minus (u UNION v): the only surviving row is {1}.
         Column0(ReadRows(connection, "SELECT a FROM t EXCEPT SELECT a FROM u EXCEPT SELECT a FROM v;"))
             .Should().Equal(SqlValue.Integer(1));
     }
@@ -112,7 +132,7 @@ public class SetOperationSqlRoutingTests
         using var connection = new EmbeddedDatabase().Connect();
         SeedNullableSingleColumn(connection);
 
-        // tn = {NULL,1,2}; un = {NULL,2,3}. NULL and 2 are removed (present in un), leaving => {1}.
+        // tn = {NULL,1,2}; un = {NULL,2,3}. NULL and 2 are removed, leaving {1}.
         Column0(ReadRows(connection, "SELECT a FROM tn EXCEPT SELECT a FROM un;"))
             .Should().Equal(SqlValue.Integer(1));
     }
@@ -423,7 +443,7 @@ public class SetOperationSqlRoutingTests
 
         // The projection emitter treats COLLATE as a value-preserving wrapper, while the compound
         // equality delegate derives NOCASE from the first term. 'X'~'x' and 'y'~'Y' therefore match,
-        // yielding {'X','y'} in first-term order; under BINARY the result would be empty.
+        // yielding {'X','y'} in NOCASE key order; under BINARY the result would be empty.
         Column0(ReadRows(connection, "SELECT a COLLATE NOCASE FROM t INTERSECT SELECT a FROM u;"))
             .Should().Equal(SqlValue.Text("X"), SqlValue.Text("y"));
 

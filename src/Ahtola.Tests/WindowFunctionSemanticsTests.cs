@@ -135,6 +135,27 @@ public sealed class WindowFunctionSemanticsTests
     }
 
     [Test]
+    public void NegativeLagOffsetsMatchSqliteNavigationSemantics()
+    {
+        string[] setup =
+        [
+            "CREATE TABLE offsets(x INTEGER, offset_value INTEGER);",
+            "INSERT INTO offsets VALUES (1, -1), (2, 2), (3, -2), (4, 1), (5, -3);",
+        ];
+
+        AssertMatchesSqlite(
+            setup,
+            """
+            SELECT x,
+                   lag(x, -3) OVER (ORDER BY x),
+                   lead(x, -3) OVER (ORDER BY x),
+                   lag(x, offset_value) OVER (ORDER BY x),
+                   lead(x, offset_value) OVER (ORDER BY x)
+            FROM offsets;
+            """);
+    }
+
+    [Test]
     public void NamedWindowChainingFilteringAndComposedResultsMatchSqlite()
     {
         AssertMatchesSqlite(
@@ -178,6 +199,23 @@ public sealed class WindowFunctionSemanticsTests
         AssertMatchesSqlite(Setup, query, 1L, 1L, 2L, 3L, 1L);
         AssertMatchesSqlite(Setup, query, 0L, 2L, 1L, 2L, -1L);
         AssertMatchesSqlite(Setup, query, "1", 1.0, "2", 2.9, -1.0);
+    }
+
+    [Test]
+    public void NtileUsesSqliteIntegerPrefixCoercion()
+    {
+        string[] setup =
+        [
+            "CREATE TABLE valueset(value INTEGER);",
+            "INSERT INTO valueset VALUES (1), (2), (3), (4), (5);",
+        ];
+
+        foreach (var bucketCount in new[] { "'2abc'", "'1e2'", "X'33'" })
+        {
+            AssertMatchesSqlite(
+                setup,
+                $"SELECT value, ntile({bucketCount}) OVER (ORDER BY value) FROM valueset;");
+        }
     }
 
     [Test]

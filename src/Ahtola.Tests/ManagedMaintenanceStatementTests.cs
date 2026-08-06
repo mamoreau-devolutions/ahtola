@@ -62,11 +62,11 @@ public sealed class ManagedMaintenanceStatementTests
     }
 
     [Test]
-    public void AnalyzeReportsThePlannerBoundaryBeforeAnyMutation()
+    public void AnalyzeRefreshesTargetStatisticsAndRollsBackWithTheTransaction()
     {
         var faults = new DeterministicFaultInjector();
         var fileSystem = new InMemoryFileSystem(faults);
-        const string path = "analyze-boundary.db";
+        const string path = "analyze-statistics.db";
         using var database = EmbeddedDatabase.OpenFile(path, fileSystem);
         using var connection = database.Connect();
         Execute(
@@ -75,9 +75,19 @@ public sealed class ManagedMaintenanceStatementTests
             CREATE TABLE data(id INTEGER PRIMARY KEY, value TEXT);
             CREATE INDEX data_value ON data(value);
             INSERT INTO data VALUES (1, 'one');
+            INSERT INTO data VALUES (2, 'two');
+            INSERT INTO data VALUES (3, 'two');
+            CREATE TABLE unindexed(value TEXT);
+            INSERT INTO unindexed VALUES ('first'), ('second');
+            CREATE TABLE empty(value TEXT);
+            CREATE TABLE composite(a INTEGER, b INTEGER);
+            CREATE INDEX composite_ab ON composite(a, b);
+            INSERT INTO composite VALUES (1, 1), (1, 2), (2, 1), (2, 1);
+            CREATE TABLE partial(value TEXT);
+            CREATE INDEX partial_value ON partial(value) WHERE value = 'include';
+            INSERT INTO partial VALUES ('include'), ('include'), ('exclude');
             """);
 
-        var bytesBefore = ReadAllBytes(fileSystem, path);
         var writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
         foreach (var sql in new[]
                  {
@@ -89,24 +99,85 @@ public sealed class ManagedMaintenanceStatementTests
                      "ANALYZE data_value;",
                  })
         {
-            Assert.Throws<EmbeddedSqlException>(() => Execute(connection, sql))!
-                .Message.Should().Be(
-                    "Managed ANALYZE is not supported because sqlite_stat tables and planner statistics "
-                    + "are not implemented; no statistics were changed.");
+            Execute(connection, sql);
+            SerializeRows(ReadRows(
+                    connection,
+                    "SELECT tbl, idx, stat FROM sqlite_stat1 WHERE tbl = 'data' ORDER BY rowid;"))
+                .Should()
+                .Equal(["T:data|T:data_value|T:3 2"]);
         }
 
-        faults.GetOperationCount(FileSystemOperation.Write).Should().Be(writesBefore);
-        ReadAllBytes(fileSystem, path).Should().Equal(bytesBefore);
+        ReadText(connection, "SELECT stat FROM sqlite_stat1 WHERE tbl = 'unindexed' AND idx IS NULL;")
+            .Should().Be("2");
+        ReadInteger(connection, "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'empty';").Should().Be(0);
+        ReadText(connection, "SELECT stat FROM sqlite_stat1 WHERE idx = 'composite_ab';").Should().Be("4 2 2");
+        ReadText(connection, "SELECT stat FROM sqlite_stat1 WHERE tbl = 'partial' AND idx IS NULL;")
+            .Should().Be("3");
+        ReadText(connection, "SELECT stat FROM sqlite_stat1 WHERE idx = 'partial_value';").Should().Be("2 2");
+        faults.GetOperationCount(FileSystemOperation.Write).Should().BeGreaterThan(writesBefore);
         ReadInteger(
                 connection,
                 "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'sqlite_stat1';")
-            .Should().Be(0);
+            .Should().Be(1);
 
         Execute(connection, "BEGIN;");
-        Assert.Throws<EmbeddedSqlException>(() => Execute(connection, "ANALYZE data;"));
-        Execute(connection, "INSERT INTO data VALUES (2, 'two');");
+        Execute(connection, "INSERT INTO data VALUES (4, 'three');");
+        Execute(connection, "ANALYZE data;");
+        ReadText(connection, "SELECT stat FROM sqlite_stat1 WHERE idx = 'data_value';").Should().Be("4 2");
         Execute(connection, "ROLLBACK;");
-        ReadInteger(connection, "SELECT COUNT(*) FROM data;").Should().Be(1);
+        ReadInteger(connection, "SELECT COUNT(*) FROM data;").Should().Be(3);
+        ReadText(connection, "SELECT stat FROM sqlite_stat1 WHERE idx = 'data_value';").Should().Be("3 2");
+
+        Assert.Throws<EmbeddedSqlException>(() => Execute(connection, "ANALYZE missing;"))!
+            .Message.Should().Be("no such table or index: missing");
+    }
+
+    [Test]
+    public void AnalyzeStatisticsSurviveFileReopen()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        const string path = "analyze-reopen.db";
+        using (var database = EmbeddedDatabase.OpenFile(path, fileSystem))
+        using (var connection = database.Connect())
+        {
+            Execute(
+                connection,
+                """
+                CREATE TABLE data(id INTEGER PRIMARY KEY, value TEXT);
+                CREATE INDEX data_value ON data(value);
+                INSERT INTO data VALUES (1, 'one'), (2, 'two'), (3, 'two');
+                ANALYZE data;
+                """);
+        }
+
+        using var reopened = EmbeddedDatabase.OpenFile(path, fileSystem);
+        using var reopenedConnection = reopened.Connect();
+        SerializeRows(ReadRows(reopenedConnection, "SELECT tbl, idx, stat FROM sqlite_stat1 ORDER BY rowid;"))
+            .Should()
+            .Equal(["T:data|T:data_value|T:3 2"]);
+    }
+
+    [Test]
+    public void AnalyzeRoutesAttachedDatabaseAndQualifiedTargets()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using var database = EmbeddedDatabase.OpenFile("analyze-main.db", fileSystem);
+        using var connection = database.Connect();
+        Execute(connection, "ATTACH DATABASE 'analyze-aux.db' AS aux;");
+        Execute(
+            connection,
+            """
+            CREATE TABLE aux.data(id INTEGER PRIMARY KEY, value TEXT);
+            CREATE INDEX aux.data_value ON data(value);
+            INSERT INTO aux.data VALUES (1, 'one'), (2, 'two'), (3, 'two');
+            ANALYZE aux;
+            """);
+
+        ReadText(connection, "SELECT stat FROM aux.sqlite_stat1 WHERE idx = 'data_value';")
+            .Should().Be("3 2");
+        Execute(connection, "ANALYZE aux.data;");
+        ReadText(connection, "SELECT stat FROM aux.sqlite_stat1 WHERE idx = 'data_value';")
+            .Should().Be("3 2");
     }
 
     [Test]

@@ -31,6 +31,30 @@ internal sealed record ScanTarget(
     IReadOnlyDictionary<string, EmbeddedColumn>? QualifiedColumnDefinitions = null)
 {
     public bool HasRowId => RowIds is not null;
+
+    /// <summary>
+    /// Materializes this scan's cursor source. Table B-trees rewind to their smallest rowid; index
+    /// scans retain their index-key order instead.
+    /// </summary>
+    public VdbeCursorSource CreateCursorSource()
+    {
+        if (RowIds is null || IndexName is not null || RowIds.Count < 2)
+            return new VdbeCursorSource(Rows, RowIds);
+
+        var rowOrder = Enumerable.Range(0, RowIds.Count).ToArray();
+        Array.Sort(rowOrder, (left, right) => RowIds[left].CompareTo(RowIds[right]));
+
+        var rows = new SqlValue[Rows.Count][];
+        var rowIds = new long[RowIds.Count];
+        for (var outputIndex = 0; outputIndex < rowOrder.Length; outputIndex++)
+        {
+            var sourceIndex = rowOrder[outputIndex];
+            rows[outputIndex] = Rows[sourceIndex];
+            rowIds[outputIndex] = RowIds[sourceIndex];
+        }
+
+        return new VdbeCursorSource(rows, rowIds);
+    }
 }
 
 /// <summary>

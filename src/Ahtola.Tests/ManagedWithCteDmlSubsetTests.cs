@@ -71,6 +71,39 @@ public class ManagedWithCteDmlSubsetTests
     }
 
     [Test]
+    public void ManagedWithCteUpdateFromRematerializesReturningAfterTriggerMutation()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE target(id INTEGER PRIMARY KEY, value INTEGER);");
+        Execute(connection, "CREATE TABLE source(id INTEGER PRIMARY KEY, bump INTEGER);");
+        Execute(connection, "INSERT INTO target VALUES (1, 0), (2, 0), (3, 0);");
+        Execute(connection, "INSERT INTO source VALUES (1, 1), (2, 2), (3, 3);");
+        Execute(connection, """
+            CREATE TRIGGER mutate_source BEFORE UPDATE ON target
+            WHEN NEW.id = 1
+            BEGIN
+                UPDATE source SET bump = 100 WHERE id = 2;
+            END;
+            """);
+
+        using var statement = connection.Prepare("""
+            WITH c(id, bump) AS (SELECT id, bump FROM source)
+            UPDATE target
+            SET value = c.bump
+            FROM c
+            WHERE target.id = c.id
+            RETURNING id, (SELECT bump FROM c WHERE c.id = target.id);
+            """);
+
+        AssertRows(
+            ReadRows(statement),
+            [SqlValue.Integer(1), SqlValue.Integer(1)],
+            [SqlValue.Integer(2), SqlValue.Integer(100)],
+            [SqlValue.Integer(3), SqlValue.Integer(3)]);
+    }
+
+    [Test]
     public void ManagedWithCteDmlDeleteMaterializesTargetRowsBeforeDeleting()
     {
         var database = new EmbeddedDatabase();
@@ -122,7 +155,7 @@ public class ManagedWithCteDmlSubsetTests
     }
 
     [Test]
-    public void ManagedWithCteDmlRollsBackFailuresKeepsCtesStatementLocalAndRejectsWritableCtes()
+    public void ManagedWithCteDmlRollsBackFailuresKeepsCtesStatementLocalAndDefersUnusedCtes()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
@@ -156,10 +189,14 @@ public class ManagedWithCteDmlSubsetTests
         Assert.Throws<EmbeddedSqlException>(() => schemaQualified.Step())!
             .Message.Should().Contain("UNIQUE constraint failed");
 
-        using var unused = connection.Prepare(
-            "WITH unused AS (SELECT 2) INSERT INTO target VALUES (3);");
-        Assert.Throws<EmbeddedSqlException>(() => unused.Step())!
-            .Message.Should().Contain("requires every CTE to contribute");
+        using (var unused = connection.Prepare(
+                   "WITH unused(value) AS (VALUES (2, 4)) INSERT INTO target VALUES (3);"))
+        {
+            unused.Step().Should().Be(StatementStepResult.Done);
+        }
+
+        using var finalRows = connection.Prepare("SELECT id FROM target ORDER BY id;");
+        AssertRows(ReadRows(finalRows), [SqlValue.Integer(1)], [SqlValue.Integer(3)]);
     }
 
     private static void Execute(EmbeddedConnection connection, string sql)

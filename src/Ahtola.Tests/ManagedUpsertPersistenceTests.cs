@@ -30,7 +30,7 @@ public sealed class ManagedUpsertPersistenceTests
                         code TEXT,
                         active INTEGER,
                         value INTEGER,
-                        normalized TEXT GENERATED ALWAYS AS (lower(code)) STORED
+                        normalized TEXT GENERATED ALWAYS AS (lower(code)) VIRTUAL
                     ) STRICT;
                     CREATE UNIQUE INDEX items_active_code
                     ON items(lower(code) COLLATE NOCASE DESC)

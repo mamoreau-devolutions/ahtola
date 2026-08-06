@@ -160,6 +160,28 @@ public sealed class CteMaterializationHintTests
     }
 
     [Test]
+    public void UnreferencedCtesDeferColumnValidationForQueriesAndDml()
+    {
+        string[] setup =
+        [
+            "CREATE TABLE target(id INTEGER PRIMARY KEY, value INTEGER)",
+            "INSERT INTO target VALUES (1, 10)",
+        ];
+
+        AssertMatchesSqlite(
+            setup,
+            "WITH unused(value) AS (VALUES (2, 4)) SELECT 42;");
+        AssertDmlMatchesSqlite(
+            setup,
+            """
+            WITH unused(value) AS (VALUES (2, 4))
+            INSERT INTO target VALUES (2, 20)
+            RETURNING id, value;
+            """,
+            "SELECT id, value FROM target ORDER BY id;");
+    }
+
+    [Test]
     public void ManagedSqliteFacadeClassifiesHintedCteDmlAndReturningAsWrites()
     {
         using var connection = new ManagedSqlite.SqliteConnection(

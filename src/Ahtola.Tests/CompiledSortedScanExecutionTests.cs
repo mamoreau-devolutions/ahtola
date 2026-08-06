@@ -160,18 +160,13 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
-    public void TiedKeysFollowScanOrderOnTheCompiledSorterRoute()
+    public void TiedKeysFollowPhysicalRowidOrderOnTheCompiledSorterRoute()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
         Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, grp TEXT, tag TEXT);");
-        // Explicit out-of-order rowids: insertion/scan order is (10, 3, 7) but rowid
-        // order is (3, 7, 10). The managed sorter is stable over the insertion-ordered
-        // scan, so the grp='a' tie resolves in scan order ('ten','three'). Native SQLite
-        // scans the rowid B-tree and would resolve it ('three','ten'); that residual
-        // divergence is rooted in managed scan order (a bare SELECT diverges the same
-        // way), not in the sorter. Ties deliberately follow the managed scan stream:
-        // self-consistent, and equal to native whenever the scan orders agree.
+        // Explicit out-of-order inserts are visited in physical rowid order (3, 7, 10).
+        // The stable sorter therefore resolves the grp='a' tie as SQLite does.
         Execute(connection, "INSERT INTO t(rowid,grp,tag) VALUES (10,'a','ten'),(3,'a','three'),(7,'b','seven');");
 
         RouteUsesSorter(connection, "SELECT tag FROM t ORDER BY grp;").Should().BeTrue();
@@ -179,14 +174,14 @@ public class CompiledSortedScanExecutionTests
         ReadRows(connection, "SELECT tag FROM t ORDER BY grp;")
             .Select(row => row[0])
             .Should()
-            .Equal(SqlValue.Text("ten"), SqlValue.Text("three"), SqlValue.Text("seven"));
+            .Equal(SqlValue.Text("three"), SqlValue.Text("ten"), SqlValue.Text("seven"));
 
-        // DESC reverses tied groups as a whole; within the grp='a' tie the stable sorter
-        // keeps scan order ('ten' before 'three').
+        // DESC reverses tied groups as a whole while preserving physical rowid order within
+        // the grp='a' tie.
         ReadRows(connection, "SELECT tag FROM t ORDER BY grp DESC;")
             .Select(row => row[0])
             .Should()
-            .Equal(SqlValue.Text("seven"), SqlValue.Text("ten"), SqlValue.Text("three"));
+            .Equal(SqlValue.Text("seven"), SqlValue.Text("three"), SqlValue.Text("ten"));
     }
 
     [Test]
@@ -627,21 +622,20 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
-    public void OrderByRowidDescFallsBackToSorterWhenRowIdsAreUnsorted()
+    public void OrderByRowidDescUsesReverseScanWhenRowIdsAreUnsorted()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
         Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);");
-        // Explicit out-of-order rowid INSERTs leave RowIds = [10, 3, 7] (CommitInserts
-        // appends in INSERT order for rowid tables), so the reverse-scan gate declines
-        // (RowIdsAreAscending == false). A bare `ORDER BY rowid` key also declines the
-        // sorter route (ReferencesUnbackedRowid), so the statement runs on the evaluator —
-        // which EXPLAIN cannot describe, proving no Last/Prev was emitted.
+        // Explicit out-of-order inserts are materialized in physical rowid order before the
+        // cursor opens, so the reverse scan remains valid.
         Execute(connection, "INSERT INTO t(rowid,v) VALUES (10,'x'),(3,'y'),(7,'z');");
 
-        AssertExplainUsesEvaluator(connection, "SELECT v FROM t ORDER BY rowid DESC;");
+        var opcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT v FROM t ORDER BY rowid DESC;"));
+        opcodes.Should().Contain("Last");
+        opcodes.Should().Contain("Prev");
 
-        // Fallback is still correct: rowid-descending is 10, 7, 3 -> x, z, y.
+        // Rowid-descending is 10, 7, 3 -> x, z, y.
         ReadRows(connection, "SELECT v FROM t ORDER BY rowid DESC;")
             .Select(row => row[0])
             .Should()

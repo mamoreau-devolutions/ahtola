@@ -28,7 +28,6 @@ public sealed class ManagedDocumentedBoundaryTests
     private static readonly string[] UnsupportedStatements =
     [
         "BEGIN CONCURRENT",
-        "ANALYZE",
         "SELECT * FROM fts5vocab('t', 'row')",
         "CREATE VIRTUAL TABLE vt USING fts5(x)",
     ];

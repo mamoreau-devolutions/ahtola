@@ -129,6 +129,28 @@ public sealed class ManagedUpsertTargetInferenceTests
                     """,
                 ],
                 "SELECT code, value FROM t");
+            yield return Case(
+                "qualified-conflict-target",
+                [
+                    "CREATE TABLE t(code TEXT UNIQUE, value INTEGER)",
+                    "INSERT INTO t VALUES ('key', 1)",
+                    """
+                    INSERT INTO t VALUES ('key', 2)
+                    ON CONFLICT(t.code) DO UPDATE SET value = excluded.value
+                    """,
+                ],
+                "SELECT code, value FROM t");
+            yield return Case(
+                "three-part-qualified-conflict-target",
+                [
+                    "CREATE TABLE t(code TEXT UNIQUE, value INTEGER)",
+                    "INSERT INTO t VALUES ('key', 1)",
+                    """
+                    INSERT INTO t VALUES ('key', 2)
+                    ON CONFLICT(main.t.code) DO UPDATE SET value = excluded.value
+                    """,
+                ],
+                "SELECT code, value FROM t");
         }
     }
 
@@ -451,7 +473,7 @@ public sealed class ManagedUpsertTargetInferenceTests
                 tenant TEXT COLLATE NOCASE,
                 code INT,
                 label TEXT,
-                normalized TEXT GENERATED ALWAYS AS (lower(label)) STORED,
+                normalized TEXT GENERATED ALWAYS AS (lower(label)) VIRTUAL,
                 PRIMARY KEY(tenant DESC, code)
             ) WITHOUT ROWID, STRICT
             """,
@@ -2468,6 +2490,47 @@ public sealed class ManagedUpsertTargetInferenceTests
     {
         managed.Columns.Should().Equal(sqlite.Columns);
         managed.Rows.Should().Equal(sqlite.Rows);
+    }
+
+    [Test]
+    public void ChainedConflictClausesUseFirstMatchingActionForMultirowInsertsAndTriggers()
+    {
+        string[] setup =
+        [
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, code TEXT UNIQUE, alternate TEXT UNIQUE, value TEXT)",
+            "CREATE TABLE audit(id INTEGER, value TEXT)",
+            "CREATE TRIGGER t_update AFTER UPDATE ON t BEGIN INSERT INTO audit VALUES (NEW.id, NEW.value); END",
+            "INSERT INTO t VALUES (1, 'one', 'alpha', 'seed-one'), (2, 'two', 'beta', 'seed-two')",
+        ];
+        const string insert = """
+            INSERT INTO t VALUES
+                (3, 'one', 'new', 'ignored'),
+                (4, 'new', 'beta', 'alternate'),
+                (1, 'newer', 'newest', 'fallback')
+            ON CONFLICT(code) DO NOTHING
+            ON CONFLICT(alternate) DO UPDATE SET value = excluded.value || '-alternate'
+            ON CONFLICT DO UPDATE SET value = excluded.value || '-fallback'
+            """;
+
+        using var managedDatabase = new EmbeddedDatabase();
+        using var managed = managedDatabase.Connect();
+        using var sqlite = new MsData.SqliteConnection("Data Source=:memory:");
+        sqlite.Open();
+        foreach (var statement in setup)
+        {
+            Execute(managed, statement);
+            Execute(sqlite, statement);
+        }
+
+        Execute(managed, insert);
+        Execute(sqlite, insert);
+
+        AssertOutputsEqual(
+            QueryManaged(managed, "SELECT id, code, alternate, value FROM t ORDER BY id"),
+            QuerySqlite(sqlite, "SELECT id, code, alternate, value FROM t ORDER BY id"));
+        AssertOutputsEqual(
+            QueryManaged(managed, "SELECT id, value FROM audit ORDER BY rowid"),
+            QuerySqlite(sqlite, "SELECT id, value FROM audit ORDER BY rowid"));
     }
 
     private static QueryOutput RunManaged(IReadOnlyList<string> statements, string query)

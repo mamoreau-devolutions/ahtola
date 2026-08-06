@@ -233,6 +233,30 @@ public class SetOperationOpcodeExecutionTests
     }
 
     [Test]
+    public void RowSetInsertReplacesTheRepresentativeForAnEqualLaterRow()
+    {
+        static bool EqualsIgnoreCase(SqlValue[] left, SqlValue[] right) =>
+            string.Equals(left[0].AsText(), right[0].AsText(), StringComparison.OrdinalIgnoreCase);
+
+        VdbeInstruction[] instructions =
+        [
+            new LoadConstantInstruction(new Register(0), SqlValue.Text("first")),
+            new RowSetInsertInstruction(new RegisterRange(new Register(0), 1), EqualsIgnoreCase, 0),
+            new LoadConstantInstruction(new Register(0), SqlValue.Text("FIRST")),
+            new RowSetInsertInstruction(new RegisterRange(new Register(0), 1), EqualsIgnoreCase, 0),
+            new RowSetRewindInstruction(0, new RegisterRange(new Register(0), 1), new ProgramCounter(6)),
+            new ResultRowInstruction(new RegisterRange(new Register(0), 1)),
+            new HaltInstruction(),
+        ];
+
+        RunToCompletion(new VdbeProgram(1, cursorCount: 0, instructions, distinctSetCount: 1))
+            .Should()
+            .ContainSingle()
+            .Which.Should()
+            .Equal(SqlValue.Text("FIRST"));
+    }
+
+    [Test]
     public void ResetClearsRowSetsSoAReplayReproducesTheSameOutput()
     {
         var program = SingleColumnSetOp(

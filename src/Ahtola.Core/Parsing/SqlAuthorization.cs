@@ -189,6 +189,9 @@ internal static class SqlAuthorization
                 case AlterTableRenameColumnStatement alter:
                     AlterTable(alter.TableName);
                     break;
+                case AlterTableAlterColumnStatement alter:
+                    AlterTable(alter.TableName);
+                    break;
                 case AlterTableDropColumnStatement alter:
                     AlterTable(alter.TableName);
                     break;
@@ -328,7 +331,12 @@ internal static class SqlAuthorization
                 };
             }
 
-            return upsert with { Action = action, TargetWhere = targetWhere };
+            return upsert with
+            {
+                Action = action,
+                TargetWhere = targetWhere,
+                Next = Upsert(upsert.Next, schema, table),
+            };
         }
 
         private ParsedStatement Update(UpdateStatement statement)
@@ -561,7 +569,7 @@ internal static class SqlAuthorization
                 case NamedTableSource named:
                     {
                         var (schema, name) = Split(named.Name);
-                        if (schema is null && _cteNames.Contains(name))
+                        if (schema is null && !named.IsSchemaQualified && _cteNames.Contains(name))
                         {
                             Current.Add(new Scope(null, name, named.Alias, [], IsBaseTable: false));
                             return named;

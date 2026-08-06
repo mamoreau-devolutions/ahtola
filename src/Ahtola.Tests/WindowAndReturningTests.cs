@@ -210,6 +210,66 @@ public class WindowAndReturningTests
     }
 
     [Test]
+    public void ReturningTargetSubqueriesObserveEachMutation()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE updated(id INTEGER PRIMARY KEY, value INTEGER);");
+        Execute(connection, "INSERT INTO updated VALUES (1, 10), (2, 20), (3, 30);");
+        var updatedRows = ReadRows(
+            connection,
+            """
+            UPDATE updated SET value = value + 1 WHERE id < 3
+            RETURNING id, (SELECT count(*) FROM updated WHERE value >= 21);
+            """);
+        updatedRows.Should().HaveCount(2);
+        updatedRows[0].Should().Equal(SqlValue.Integer(1), SqlValue.Integer(1));
+        updatedRows[1].Should().Equal(SqlValue.Integer(2), SqlValue.Integer(2));
+
+        Execute(connection, "CREATE TABLE deleted(id INTEGER PRIMARY KEY);");
+        Execute(connection, "INSERT INTO deleted VALUES (1), (2), (3);");
+        var deletedRows = ReadRows(
+            connection,
+            "DELETE FROM deleted WHERE id < 3 RETURNING id, (SELECT count(*) FROM deleted);");
+        deletedRows.Should().HaveCount(2);
+        deletedRows[0].Should().Equal(SqlValue.Integer(1), SqlValue.Integer(2));
+        deletedRows[1].Should().Equal(SqlValue.Integer(2), SqlValue.Integer(1));
+
+        Execute(connection, "CREATE TABLE inserted(id INTEGER);");
+        Execute(connection, "INSERT INTO inserted VALUES (1);");
+        var insertedRows = ReadRows(
+            connection,
+            "INSERT INTO inserted VALUES (2), (3) RETURNING id, (SELECT count(*) FROM inserted);");
+        insertedRows.Should().HaveCount(2);
+        insertedRows[0].Should().Equal(SqlValue.Integer(2), SqlValue.Integer(2));
+        insertedRows[1].Should().Equal(SqlValue.Integer(3), SqlValue.Integer(3));
+    }
+
+    [Test]
+    public void UpdateReturningObservesSameRowAfterTriggerWrites()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER);");
+        Execute(connection, "INSERT INTO items VALUES (1, 10);");
+        Execute(
+            connection,
+            """
+            CREATE TRIGGER adjust AFTER UPDATE ON items BEGIN
+                UPDATE items SET value = value + 100 WHERE id = NEW.id;
+            END;
+            """);
+
+        ReadRows(
+                connection,
+                """
+                UPDATE items SET value = 20 WHERE id = 1
+                RETURNING value, (SELECT value FROM items AS current WHERE current.id = items.id);
+                """)
+            .Should()
+            .ContainSingle()
+            .Which.Should().Equal(SqlValue.Integer(120), SqlValue.Integer(120));
+    }
+
+    [Test]
     public void RunningSumMatchesSqlite()
     {
         AssertMatchesSqlite(

@@ -109,6 +109,81 @@ public sealed class OrderByNullOrderingTests
     }
 
     [Test]
+    public void RedundantOrderBySuffixAfterUniqueRowidMatchesSqlite()
+    {
+        var cases = new[]
+        {
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE primary_key_table(a INTEGER PRIMARY KEY, b TEXT);",
+                    "INSERT INTO primary_key_table VALUES (1, 'x'), (2, 'y');",
+                },
+                Query:
+                    "SELECT a FROM primary_key_table " +
+                    "ORDER BY a DESC, b NOT IN (SELECT a, b FROM primary_key_table);"
+            ),
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE rowid_table(a INTEGER, b TEXT);",
+                    "INSERT INTO rowid_table VALUES (1, 'x'), (2, 'y');",
+                },
+                Query:
+                    "SELECT a FROM rowid_table " +
+                    "ORDER BY rowid DESC, b NOT IN (SELECT a, b FROM rowid_table);"
+            ),
+        };
+
+        foreach (var testCase in cases)
+            AssertMatchesSqlite(testCase.Setup, testCase.Query);
+    }
+
+    [Test]
+    public void GroupedStarProjectionWithConstantOrderByMatchesSqlite()
+    {
+        var cases = new[]
+        {
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE float_order(c1 INT);",
+                    "INSERT INTO float_order VALUES (1), (2);",
+                },
+                Query: "SELECT * FROM float_order GROUP BY c1 ORDER BY 58.058;"
+            ),
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE string_order(c1 INT);",
+                    "INSERT INTO string_order VALUES (1), (2);",
+                },
+                Query: "SELECT * FROM string_order GROUP BY c1 ORDER BY 'hello';"
+            ),
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE null_order(c1 INT);",
+                    "INSERT INTO null_order VALUES (1), (2);",
+                },
+                Query: "SELECT * FROM null_order GROUP BY c1 ORDER BY NULL;"
+            ),
+            (
+                Setup: new[]
+                {
+                    "CREATE TABLE view_order(c1 INT);",
+                    "INSERT INTO view_order VALUES (1), (2);",
+                    "CREATE VIEW ordered_view AS SELECT * FROM view_order GROUP BY c1 ORDER BY STRFTIME('test');",
+                },
+                Query: "SELECT * FROM ordered_view;"
+            ),
+        };
+
+        foreach (var testCase in cases)
+            AssertMatchesSqlite(testCase.Setup, testCase.Query);
+    }
+
+    [Test]
     public void CompiledAndFallbackWindowOrderingMatchSqlite()
     {
         string[] setup =

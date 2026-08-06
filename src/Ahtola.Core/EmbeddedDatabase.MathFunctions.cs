@@ -72,6 +72,142 @@ public sealed partial class EmbeddedDatabase
         return FromMathResult(operation(left, right));
     }
 
+    private static SqlValue EvaluateGreatestCommonDivisor(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("gcd", arguments, 2);
+        if (!TryGetTursoIntegerMathOperand(arguments[0], out var left)
+            || !TryGetTursoIntegerMathOperand(arguments[1], out var right))
+        {
+            return SqlValue.Null;
+        }
+
+        if (!TryGetGreatestCommonDivisor(left, right, out var result))
+            throw new EmbeddedSqlException("integer overflow");
+        return SqlValue.Integer(result);
+    }
+
+    private static SqlValue EvaluateLeastCommonMultiple(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("lcm", arguments, 2);
+        if (!TryGetTursoIntegerMathOperand(arguments[0], out var left)
+            || !TryGetTursoIntegerMathOperand(arguments[1], out var right))
+        {
+            return SqlValue.Null;
+        }
+
+        if (left == 0 || right == 0)
+            return SqlValue.Integer(0);
+        if (!TryGetGreatestCommonDivisor(left, right, out var greatestCommonDivisor)
+            || !TryGetAbsoluteValue(right, out var rightMagnitude)
+            || !TryMultiply(left / greatestCommonDivisor, rightMagnitude, out var product)
+            || !TryGetAbsoluteValue(product, out var result))
+        {
+            throw new EmbeddedSqlException("integer overflow");
+        }
+
+        return SqlValue.Integer(result);
+    }
+
+    private static bool TryGetTursoIntegerMathOperand(SqlValue value, out long result)
+    {
+        switch (value.Kind)
+        {
+            case SqlValueKind.Integer:
+                result = value.AsInteger();
+                return true;
+            case SqlValueKind.Real when double.IsFinite(value.AsReal()):
+                result = ToSqliteInteger(value.AsReal());
+                return true;
+            case SqlValueKind.Text:
+                return long.TryParse(
+                    value.AsText(),
+                    NumberStyles.AllowLeadingSign,
+                    CultureInfo.InvariantCulture,
+                    out result);
+            default:
+                result = 0;
+                return false;
+        }
+    }
+
+    private static bool TryGetGreatestCommonDivisor(long left, long right, out long result)
+    {
+        // Turso's gcd_inner rejects the only unrepresentable positive result:
+        // abs(Int64.MinValue). Reduce other MIN operands before the Euclidean loop.
+        if (left == long.MinValue || right == long.MinValue)
+        {
+            if (left == 0 || right == 0 || left == right)
+            {
+                result = 0;
+                return false;
+            }
+
+            if (left == long.MinValue)
+            {
+                if (right == -1)
+                {
+                    result = 1;
+                    return true;
+                }
+
+                left %= right;
+            }
+            else
+            {
+                if (left == -1)
+                {
+                    result = 1;
+                    return true;
+                }
+
+                right %= left;
+            }
+        }
+
+        while (right != 0)
+        {
+            var remainder = left % right;
+            left = right;
+            right = remainder;
+        }
+
+        result = Math.Abs(left);
+        return true;
+    }
+
+    private static bool TryGetAbsoluteValue(long value, out long result)
+    {
+        if (value == long.MinValue)
+        {
+            result = 0;
+            return false;
+        }
+
+        result = Math.Abs(value);
+        return true;
+    }
+
+    private static bool TryMultiply(long left, long right, out long result)
+    {
+        if (left == 0 || right == 0)
+        {
+            result = 0;
+            return true;
+        }
+
+        var overflows = left > 0
+            ? right > 0 ? left > long.MaxValue / right : right < long.MinValue / left
+            : right > 0 ? left < long.MinValue / right : left < long.MaxValue / right;
+        if (overflows)
+        {
+            result = 0;
+            return false;
+        }
+
+        result = left * right;
+        return true;
+    }
+
     private static SqlValue EvaluateRound(IReadOnlyList<SqlValue> arguments)
     {
         RequireArgumentCount("round", arguments, 1, 2);
@@ -109,10 +245,13 @@ public sealed partial class EmbeddedDatabase
         Func<double, double> operation)
     {
         RequireArgumentCount(functionName, arguments, 1);
-        if (!TryGetMathOperand(arguments[0], out var operand))
+        var numeric = ApplyComparisonNumericAffinity(arguments[0]);
+        if (numeric.Kind == SqlValueKind.Integer)
+            return numeric;
+        if (numeric.Kind != SqlValueKind.Real)
             return SqlValue.Null;
 
-        return FromMathResult(operation(operand));
+        return FromMathResult(operation(numeric.AsReal()));
     }
 
     private static SqlValue EvaluateLogarithm(IReadOnlyList<SqlValue> arguments)

@@ -369,8 +369,8 @@ public sealed class ManagedForeignKeyFullSemanticsTests
         AssertMatchesSqlite(
             [
                 "PRAGMA foreign_keys = ON",
-                "CREATE TABLE generated_parent(seed INTEGER, key_value INTEGER AS (seed + 1) STORED UNIQUE)",
-                "CREATE TABLE generated_child(seed INTEGER, key_value INTEGER AS (seed + 1) STORED "
+                "CREATE TABLE generated_parent(seed INTEGER, key_value INTEGER AS (seed + 1) VIRTUAL UNIQUE)",
+                "CREATE TABLE generated_child(seed INTEGER, key_value INTEGER AS (seed + 1) VIRTUAL "
                     + "REFERENCES generated_parent(key_value))",
                 "INSERT INTO generated_parent(seed) VALUES (10)",
                 "INSERT INTO generated_child(seed) VALUES (10)",

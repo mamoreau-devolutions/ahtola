@@ -190,6 +190,18 @@ public class EmbeddedEngineTests
     }
 
     [Test]
+    public void CreateViewRejectsAggregateInternalOrderBy()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(value INTEGER);");
+
+        Assert.Throws<EmbeddedSqlException>(
+                () => Execute(connection, "CREATE VIEW v AS SELECT sum(value ORDER BY value) FROM t;"))!
+            .Message.Should().Be("ORDER BY clause is not supported yet in aggregate functions");
+    }
+
+    [Test]
     public void DistinctAggregateWithOrderByIsExplicitlyRejected()
     {
         using var connection = CreateOrderedAggregateTable();
@@ -1085,23 +1097,20 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void OrderByTiesFollowScanOrderLikeNativeStableSorter()
+    public void OrderByTiesFollowPhysicalRowidOrderLikeNativeStableSorter()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
         Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT COLLATE NOCASE);");
-        // Out-of-rowid-order insertion: the managed row store scans in insertion order
-        // (native's b-tree would scan in rowid order, so absolute tie order can differ
-        // from native here). The invariant both engines share is self-consistency:
-        // ORDER BY ties follow whatever the bare scan enumerates, because the sorter is
-        // stable. EF Core's Northwind assertions check exactly this consistency.
+        // Out-of-rowid-order inserts still scan in the table B-tree's rowid order. ORDER BY
+        // ties preserve that physical scan order because the sorter is stable.
         Execute(connection, "INSERT INTO t VALUES (221, 'a'), (203, 'A'), (250, 'b'), (210, 'B');");
 
-        CollectIds(connection, "SELECT id FROM t;").Should().Equal(221, 203, 250, 210);
+        CollectIds(connection, "SELECT id FROM t;").Should().Equal(203, 210, 221, 250);
 
         // NOCASE ties ('a'='A', 'b'='B') keep scan order instead of breaking by rowid.
-        CollectIds(connection, "SELECT id FROM t ORDER BY v;").Should().Equal(221, 203, 250, 210);
-        CollectIds(connection, "SELECT id FROM t ORDER BY v DESC;").Should().Equal(250, 210, 221, 203);
+        CollectIds(connection, "SELECT id FROM t ORDER BY v;").Should().Equal(203, 221, 210, 250);
+        CollectIds(connection, "SELECT id FROM t ORDER BY v DESC;").Should().Equal(210, 250, 203, 221);
 
         // In-order insertion (scan order == rowid order) keeps the native-visible tie order.
         Execute(connection, "CREATE TABLE u(id INTEGER PRIMARY KEY, v TEXT COLLATE NOCASE);");
@@ -2202,6 +2211,31 @@ public class EmbeddedEngineTests
     }
 
     [Test]
+    public void FullOuterJoinConsumesDuplicateWhereEquijoinLikeTurso()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(x);");
+        Execute(connection, "CREATE TABLE u(x);");
+        Execute(connection, "INSERT INTO t VALUES (1), (2), (3);");
+        Execute(connection, "INSERT INTO u VALUES (2), (3), (4);");
+
+        // Turso consumes the duplicate WHERE equality as a hash key, so it emits
+        // unmatched rows despite the predicate being null-rejecting in SQLite.
+        var rows = ReadRows(connection, """
+            SELECT t.x, u.x FROM t FULL OUTER JOIN u ON t.x = u.x
+            WHERE t.x = u.x
+            ORDER BY coalesce(t.x, u.x);
+            """);
+
+        rows.Should().SatisfyRespectively(
+            row => row.Should().Equal(SqlValue.Integer(1), SqlValue.Null),
+            row => row.Should().Equal(SqlValue.Integer(2), SqlValue.Integer(2)),
+            row => row.Should().Equal(SqlValue.Integer(3), SqlValue.Integer(3)),
+            row => row.Should().Equal(SqlValue.Null, SqlValue.Integer(4)));
+    }
+
+    [Test]
     public void FullJoinUsingIsRejectedLikeTurso()
     {
         var database = new EmbeddedDatabase();
@@ -2244,7 +2278,7 @@ public class EmbeddedEngineTests
 
         Assert.Throws<EmbeddedSqlException>(
             () => connection.Prepare("SELECT * FROM t1 NATURAL JOIN t2 ON t1.a = t2.a;"))!
-            .Message.Should().StartWith("NATURAL joins may not have an ON or USING clause.");
+            .Message.Should().StartWith("a NATURAL join may not have an ON or USING clause");
     }
 
     [Test]

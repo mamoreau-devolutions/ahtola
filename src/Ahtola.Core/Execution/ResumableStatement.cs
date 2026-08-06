@@ -46,6 +46,8 @@ public sealed class ResumableStatement : IDisposable
     private readonly List<SqlValue[]>?[] _distinctSets;
     private readonly Dictionary<SqlValue[], int>?[] _groupIndexes;
     private readonly int[] _rowSetPositions;
+    private readonly Dictionary<int, IntegerRowSet> _integerRowSets = [];
+    private readonly Dictionary<int, ResumableStatement> _subprogramStatements = [];
     private readonly WorkTableRuntime?[] _workTables;
     private readonly WindowBufferRuntime?[] _windowBuffers;
     private readonly IReadOnlyList<VdbeCursorSource?>? _cursorSources;
@@ -608,11 +610,20 @@ public sealed class ResumableStatement : IDisposable
                 case DeleteInstruction delete:
                     {
                         var target = RequireWriteTarget(delete.Cursor);
-                        var deleteRow = target.DeleteRow
-                            ?? throw new InvalidOperationException(
-                                $"Cursor {delete.Cursor.Index} has no delete action bound.");
-                        deleteRow(_cursorPositions[delete.Cursor.Index]);
-                        RowsAffected = checked(RowsAffected + 1);
+                        var position = _cursorPositions[delete.Cursor.Index];
+                        if (target.TryDeleteRow is { } tryDeleteRow)
+                        {
+                            if (tryDeleteRow(position))
+                                RowsAffected = checked(RowsAffected + 1);
+                        }
+                        else
+                        {
+                            var deleteRow = target.DeleteRow
+                                ?? throw new InvalidOperationException(
+                                    $"Cursor {delete.Cursor.Index} has no delete action bound.");
+                            deleteRow(position);
+                            RowsAffected = checked(RowsAffected + 1);
+                        }
                         AdvanceInstructionPointer();
                         break;
                     }
@@ -628,6 +639,10 @@ public sealed class ResumableStatement : IDisposable
                         AdvanceInstructionPointer();
                         break;
                     }
+                case ProgramInstruction program:
+                    if (ExecuteSubprogram(program, cancellationToken))
+                        return ResumableStatementStepResult.Yielded;
+                    break;
                 case CommitInstruction commit:
                     {
                         try
@@ -825,22 +840,24 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case RowSetInsertInstruction rowSetInsert:
                     {
-                        // Record the candidate into its probe set for later membership tests, keeping one
-                        // representative per distinct tuple. Never produces a row: control just advances.
+                        // A temporary B-tree overwrites an equal key with the later record, so retain the
+                        // latest representative while preserving one row per distinct tuple.
                         var candidate = ReadRegisters(rowSetInsert.Values);
                         var set = _distinctSets[rowSetInsert.RowSetIndex] ??= [];
-                        var present = false;
-                        foreach (var stored in set)
+                        var existingIndex = -1;
+                        for (var index = 0; index < set.Count; index++)
                         {
-                            if (rowSetInsert.Equality(stored, candidate))
+                            if (rowSetInsert.Equality(set[index], candidate))
                             {
-                                present = true;
+                                existingIndex = index;
                                 break;
                             }
                         }
 
-                        if (!present)
+                        if (existingIndex < 0)
                             set.Add(candidate);
+                        else
+                            set[existingIndex] = candidate;
 
                         AdvanceInstructionPointer();
                         break;
@@ -854,6 +871,9 @@ public sealed class ResumableStatement : IDisposable
                             _instructionPointer = rowSetRewind.EmptyTarget;
                             break;
                         }
+
+                        if (rowSetRewind.Comparer is not null && set.Count > 1)
+                            set.Sort((left, right) => rowSetRewind.Comparer(left, right));
 
                         CopyRowSetRow(set[0], rowSetRewind.Destination);
                         AdvanceInstructionPointer();
@@ -873,6 +893,37 @@ public sealed class ResumableStatement : IDisposable
                         else
                         {
                             AdvanceInstructionPointer();
+                        }
+
+                        break;
+                    }
+                case RowSetTestInstruction rowSetTest:
+                    {
+                        try
+                        {
+                            var value = _registers[rowSetTest.ValueRegister.Index];
+                            if (value.Kind != SqlValueKind.Integer)
+                                throw new InvalidOperationException("RowSetTest: P3 must be an integer");
+
+                            var rowSet = _integerRowSets.TryGetValue(rowSetTest.RowSetRegister.Index, out var existing)
+                                ? existing
+                                : _integerRowSets[rowSetTest.RowSetRegister.Index] = new IntegerRowSet();
+                            if (rowSetTest.Batch != 0 && rowSet.ContainsEarlierBatch(value.AsInteger(), rowSetTest.Batch))
+                            {
+                                _instructionPointer = rowSetTest.FoundTarget;
+                            }
+                            else
+                            {
+                                if (rowSetTest.Batch != -1)
+                                    rowSet.Insert(value.AsInteger());
+
+                                AdvanceInstructionPointer();
+                            }
+                        }
+                        catch
+                        {
+                            State = ResumableStatementState.Faulted;
+                            throw;
                         }
 
                         break;
@@ -1178,6 +1229,9 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_distinctSets);
         Array.Clear(_groupIndexes);
         Array.Clear(_rowSetPositions);
+        _integerRowSets.Clear();
+        foreach (var subprogram in _subprogramStatements.Values)
+            subprogram.Reset();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
         _transaction.Reset();
@@ -1245,6 +1299,10 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_distinctSets);
         Array.Clear(_groupIndexes);
         Array.Clear(_rowSetPositions);
+        _integerRowSets.Clear();
+        foreach (var subprogram in _subprogramStatements.Values)
+            subprogram.Dispose();
+        _subprogramStatements.Clear();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
         _transaction.Reset();
@@ -1268,6 +1326,58 @@ public sealed class ResumableStatement : IDisposable
             throw new InvalidOperationException($"Cursor {cursor.Index} is not open.");
 
         _openCursors[cursor.Index] = false;
+    }
+
+    private bool ExecuteSubprogram(ProgramInstruction instruction, CancellationToken cancellationToken)
+    {
+        var instructionOffset = _instructionPointer.Offset;
+        var hasCachedSubprogram = _subprogramStatements.TryGetValue(instructionOffset, out var subprogram);
+        if (!hasCachedSubprogram
+            || (instruction.Subprogram.RequiresFreshRuntime
+                && subprogram!.State != ResumableStatementState.Yielded))
+        {
+            subprogram?.Dispose();
+            subprogram = instruction.Subprogram.CreateRuntime(CreateSubprogramBinding(instruction));
+            _subprogramStatements[instructionOffset] = subprogram;
+        }
+        else if (subprogram!.State == ResumableStatementState.Yielded)
+        {
+            subprogram.Resume();
+        }
+        else
+        {
+            subprogram.Reset();
+            if (instruction.ParameterRegisters.Count != 0)
+                subprogram.Rebind(CreateSubprogramBinding(instruction)!);
+        }
+
+        while (true)
+        {
+            switch (subprogram.StepResumable(cancellationToken))
+            {
+                case ResumableStatementStepResult.Row:
+                    continue;
+                case ResumableStatementStepResult.Yielded:
+                    State = ResumableStatementState.Yielded;
+                    return true;
+                case ResumableStatementStepResult.Done:
+                    AdvanceInstructionPointer();
+                    return false;
+                default:
+                    throw new InvalidOperationException("Nested VDBE program returned an unknown step result.");
+            }
+        }
+    }
+
+    private VdbeParameterBinding? CreateSubprogramBinding(ProgramInstruction instruction)
+    {
+        if (instruction.ParameterRegisters.Count == 0)
+            return null;
+
+        var values = new SqlValue[instruction.ParameterRegisters.Count];
+        for (var index = 0; index < values.Length; index++)
+            values[index] = _registers[instruction.ParameterRegisters[index].Index];
+        return VdbeParameterBinding.FromValues(values);
     }
 
     private void OpenSorter(OpenSorterInstruction instruction)
@@ -1571,6 +1681,31 @@ public sealed class ResumableStatement : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    // Turso's RowSetTest keeps inserts from the current batch separate so a batch cannot match itself.
+    // It is deliberately not shared with _distinctSets: that store has tuple equality and drain semantics.
+    private sealed class IntegerRowSet
+    {
+        private readonly List<long> _pending = [];
+        private readonly HashSet<long> _priorBatchValues = [];
+        private int _batch;
+
+        public void Insert(long value) => _pending.Add(value);
+
+        public bool ContainsEarlierBatch(long value, int batch)
+        {
+            if (_batch != batch)
+            {
+                foreach (var pending in _pending)
+                    _priorBatchValues.Add(pending);
+
+                _pending.Clear();
+                _batch = batch;
+            }
+
+            return _priorBatchValues.Contains(value);
+        }
     }
 
     private sealed class GroupKeyEqualityComparer(

@@ -56,6 +56,32 @@ public sealed class ManagedForeignKeyRuntimeSliceTests
     }
 
     [Test]
+    public void SelfReferentialForeignKeysUseParentAffinity()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "PRAGMA foreign_keys = ON;");
+        Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, rid TEXT REFERENCES t(id));");
+
+        Execute(connection, "INSERT INTO t(id, rid) VALUES(1, '1');");
+        Value(connection, "SELECT rid FROM t;").Should().Be(SqlValue.Text("1"));
+
+        Execute(
+            connection,
+            "CREATE TABLE deferred_t(id INTEGER PRIMARY KEY, pid TEXT REFERENCES deferred_t(id) DEFERRABLE INITIALLY DEFERRED);");
+        Execute(connection, "INSERT INTO deferred_t VALUES(1, 1);");
+        Execute(connection, "BEGIN;");
+        Execute(connection, "UPDATE deferred_t SET id = 2, pid = '2' WHERE id = 1;");
+        Execute(connection, "COMMIT;");
+        Value(connection, "SELECT pid FROM deferred_t;").Should().Be(SqlValue.Text("2"));
+
+        Execute(connection, "CREATE TABLE unique_t(id INTEGER PRIMARY KEY, key INTEGER UNIQUE, parent_key TEXT REFERENCES unique_t(key));");
+        Action invalidUniqueSelfReference = () =>
+            Execute(connection, "INSERT INTO unique_t VALUES(1, 1, '1');");
+        invalidUniqueSelfReference.Should().Throw<EmbeddedSqlException>().WithMessage("FOREIGN KEY constraint failed");
+    }
+
+    [Test]
     public void ForeignKeyDefinitionsPersistInTheManagedFileCatalog()
     {
         var fileSystem = new InMemoryFileSystem();

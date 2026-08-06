@@ -10,42 +10,44 @@
       "submodule": "turso-src/ (read-only)"
     },
     "ahtola_ref": {
-      "branch": "copilot/vdbe-gap-analysis",
-      "commit_at_analysis": "c99157b"
+      "branch": "copilot/turso-gap-analysis",
+      "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "entry_count": 185,
+    "current_conformance_expected_failures": 11,
+    "last_reconciled": "2026-08-08",
+    "entry_count": 211,
     "counts": {
       "by_layer": {
-        "vdbe": 36,
-        "compilation": 50,
-        "parser": 23,
-        "functions": 24,
+        "vdbe": 38,
+        "compilation": 66,
+        "parser": 29,
+        "functions": 26,
         "storage": 20,
         "mvcc": 14,
         "sync": 18
       },
       "by_kind": {
-        "missing": 99,
-        "divergent": 49,
+        "missing": 95,
+        "divergent": 72,
         "partial": 27,
         "extension": 8,
-        "parity": 2
+        "parity": 9
       },
       "by_severity": {
         "s3-perf": 34,
-        "s2-capability": 96,
+        "s2-capability": 104,
         "s4-intentional": 33,
-        "s1-correctness": 22
+        "s1-correctness": 40
       },
       "by_effort": {
-        "M": 73,
+        "M": 75,
         "L": 37,
-        "S": 75
+        "S": 99
       },
       "by_status": {
-        "open": 151,
-        "closed": 34
+        "open": 110,
+        "closed": 101
       }
     },
     "schema": {
@@ -65,9 +67,9 @@
     {
       "id": "vdbe-bloom-filter-opcodes",
       "layer": "vdbe",
-      "kind": "missing",
+      "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Filter + Insn::FilterAdd (bloom-filter build/probe pair)",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::SqliteJson (SQLite JSONB encoder/decoder and scalar dispatch); src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [],
@@ -79,15 +81,11 @@
       "layer": "vdbe",
       "kind": "missing",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::HashBuild, HashDistinct, HashBuildFinalize, HashProbe, HashNext, HashClose, HashClear, HashMarkMatched, HashResetMatched, HashScanUnmatched, HashNextUnmatched, HashGraceInit, HashLoadPartition, HashNextProbe, HashAdvancePartition (16 opcodes; turso-src/core/vdbe/hash_table.rs)",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs (VdbeSubprogram, ProgramInstruction); src/Ahtola.Core/Execution/ResumableStatement.cs (nested runtime execution)",
       "severity": "s3-perf",
       "effort": "L",
-      "conformance_links": [
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition",
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
-      ],
-      "notes": "Entire hash-join execution family absent, including the grace (disk-partitioned) variant for outsized build sides and the unmatched-scan support for outer joins. Ahtola joins are in-memory nested loops over materialized rows (VdbeJoinPlan/OpenJoinCursor), so large equijoins degrade. The triple-selfjoin conformance timeouts are planner-caused (no cost-based ordering) but hash join is the execution-side fix.",
+      "conformance_links": [],
+      "notes": "Entire hash-join execution family absent, including the grace (disk-partitioned) variant for outsized build sides and the unmatched-scan support for outer joins. Ahtola joins are in-memory nested loops over materialized rows (VdbeJoinPlan/OpenJoinCursor), so large equijoins degrade.",
       "status": "open"
     },
     {
@@ -139,23 +137,32 @@
       "status": "open"
     },
     {
+      "id": "vdbe-temp-journal-mode-scope",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_journal_mode_inner (returns the previous mode when db != MAIN_DB_ID)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::EmbeddedConnection.ExecutePragmaJournalMode",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "temp_tables_mvcc.sqltest::pragma-temp-journal-mode-mvcc-is-ignored"
+      ],
+      "notes": "Closed 2026-08-08. Turso accepts the requested journal mode but leaves every non-main database unchanged and returns its prior mode. Ahtola's connection-local temp catalog has no managed pager, so it had exposed the implementation-specific value 'memory'. It now reports its WAL-compatible temp mode and leaves it unchanged when PRAGMA temp.journal_mode=MVCC is issued, matching Turso's observable contract without claiming to enable MVCC.",
+      "status": "closed"
+    },
+    {
       "id": "vdbe-fk-enforcement-opcodes",
       "layer": "vdbe",
       "kind": "divergent",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::FkCounter, FkIfZero, FkCheck (deferred-FK counters and immediate FK validation as opcodes)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (FK checks inside write/delegate paths; defer_foreign_keys works per mvcc audit)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (FK checks and narrow compiled self-cascade DELETE lowering); src/Ahtola.Core/Execution/VdbeProgram.cs (Program instruction)",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
-        "foreign_keys.sqltest::fk-column-constraint-multi-parent",
-        "foreign_keys.sqltest::fk-self-ipk-text-child-coerces-rowid-ok",
-        "foreign_keys.sqltest::fk-deferred-update-self-ref-rowid-affinity-one-stmt",
-        "foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates",
-        "foreign_keys.sqltest::fk-alter-table-add-column-enforced",
         "gencol.sqltest::fk-gencol-unique-idx-update-cascade",
         "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
       ],
-      "notes": "FK enforcement exists but lives in the write-target delegates, not opcodes. defer_foreign_keys and immediate checking work for common shapes; the divergence is structural. Edge coverage (FK actions through compiled DML, cross-database checks) tracked in compilation entries.",
+      "notes": "FK enforcement mostly lives in write-target delegates, not opcodes. Closed 2026-08-08: self-referential parent matching applies parent-key affinity before comparing, so TEXT child values correctly match INTEGER PRIMARY KEY rowids during immediate inserts and deferred in-place updates. Closed 2026-08-08: trigger-free, single self-referential ON DELETE CASCADE tables now lower through Program with a deferred recursive subprogram and dynamic write targets, so the recursive FK EXPLAIN terminates and execution sees each parent deletion before its action runs. Broader FK action compilation, deferred-FK counters, generated/unique parent keys, and cross-database checks remain open. Note: fk-column-constraint-multi-parent was detached from this entry 2026-08-07 — it is a parse-time column-level FK arity check, not runtime FK enforcement; see parser-fk-column-level-multi-parent-rejection (closed).",
       "status": "open"
     },
     {
@@ -163,11 +170,11 @@
       "layer": "vdbe",
       "kind": "missing",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Program, Gosub, Return, BeginSubrtn (trigger/FK sub-program invocation and subroutine call/return)",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs (VdbeSubprogram, ProgramInstruction); src/Ahtola.Core/Execution/ResumableStatement.cs (nested runtime execution)",
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [],
-      "notes": "No subprogram or subroutine machinery: triggers cannot fire from compiled DML because there is no Program opcode to invoke a sub-program with its own register frame, and no Gosub/Return for shared code blocks. Ahtola programs are straight-line with explicit targets; subroutines are inlined at compile time. Prerequisite for any trigger support.",
+      "notes": "The Program primitive invokes a child VDBE program with a separate register frame, fixed parent-register bindings, cached resumable child state, suppressed child rows, and a deferred form for recursive references. It now lowers the narrow trigger-free, single self-referential ON DELETE CASCADE shape through dynamic child write targets; Gosub/Return/BeginSubrtn, trigger lowering, and broader FK-action lowering are still absent. Further work must preserve Turso's trigger/FK change-counter, error, and statement-rollback timing.",
       "status": "open"
     },
     {
@@ -214,11 +221,7 @@
       "ahtola_ref": "none",
       "severity": "s3-perf",
       "effort": "M",
-      "conformance_links": [
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition",
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
-      ],
+      "conformance_links": [],
       "notes": "Turso can build a transient auto-index when no usable index exists for a join. Combined with the missing cost-based join order (compilation entry), Ahtola's joins are O(N*M) nested loops with materialized right sides.",
       "status": "open"
     },
@@ -261,13 +264,13 @@
     {
       "id": "vdbe-rowset-test",
       "layer": "vdbe",
-      "kind": "missing",
+      "kind": "partial",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::RowSetTest (dedup probe: jump if rowid already in set)",
-      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::RowSetInsertInstruction, RowSetRewindInstruction, RowSetNextInstruction",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::RowSetTestInstruction; src/Ahtola.Core/Execution/ResumableStatement.cs::IntegerRowSet",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Ahtola's RowSet trio maps Turso's RowSetAdd/RowSetRead (insert + drain) but lacks RowSetTest, the membership probe used to deduplicate rowids from OR'd index scans. Without it, multi-index OR plans cannot dedup — consistent with the compilation-layer finding that OR-index-union plans are absent.",
+      "notes": "Fixed in part 2026-08-05: Ahtola now implements the Turso-compatible RowSetTest integer membership opcode, including batch-aware prior-batch probing, batch 0 insertion, batch -1 probe-only behavior, validation, EXPLAIN output, and reset/dispose cleanup. It deliberately remains separate from Ahtola's tuple row sets for compound queries. The entry stays open because no Ahtola program builder emits it yet: multi-index OR planning/lowering and its index-union cursor machinery are still absent.",
       "status": "open"
     },
     {
@@ -366,27 +369,25 @@
       "id": "vdbe-column-default-short-record",
       "layer": "vdbe",
       "kind": "partial",
-      "turso_ref": "turso-src/core/vdbe/execute.rs::op_column (lines 1903-1925: record with fewer columns than schema -> column DEFAULT value operand; null_flag -> NULL)",
-      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::ColumnInstruction (~line 1329: 'Retrieval of a missing column yields NULL')",
+      "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Column { default } / execute.rs::op_column",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedFileStore.cs::ReadTableRow (~lines 1175-1205); src/Ahtola.Tests/ManagedAddColumnShortRowTests.cs",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Turso's Column carries the column's DEFAULT as an operand so rows physically written before ALTER TABLE ADD COLUMN read back the default. Ahtola's ColumnInstruction documents NULL for a missing column and has no default operand. alter.sqltest passes except FK cases, so the pager decode likely pads or the shapes tested do not hit short records with defaults — VERIFY: `ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'x'` then SELECT c on pre-existing rows through the pager path. Also no NullRow opcode (LEFT JOIN null-fill is done by join delegates instead — structural, fine).",
-      "status": "open"
+      "notes": "Closed 2026-08-08. Turso's Column instruction supplies its constant default P4 for a short pre-ALTER record. Ahtola performs the equivalent once while materializing a file-backed row: ReadTableRow detects fewer stored fields than the current non-generated schema and fills each missing trailing field from EmbeddedColumn.DefaultValue (or NULL). ManagedAddColumnShortRowTests covers SQLite-authored database reads with NULL and constant defaults, several sequential additions, NOT NULL defaults, WITHOUT ROWID tables, and managed writes before validating the resulting file with ordinary SQLite.",
+      "status": "closed"
     },
     {
       "id": "vdbe-checkpoint-opcode",
       "layer": "vdbe",
-      "kind": "missing",
+      "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/execute.rs::op_checkpoint (line 563: PASSIVE/FULL/RESTART/TRUNCATE modes)",
-      "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalWriterCheckpointCoordinator.cs (internal checkpoint machinery; no SQL/opcode entry point)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecutePragmaWalCheckpoint",
       "severity": "s2-capability",
       "effort": "S",
-      "conformance_links": [
-        "temp_tables.sqltest::pragma-temp-wal-checkpoint-without-temp-db-matches-sqlite"
-      ],
-      "notes": "Checkpoint coordination exists internally (storage layer) but there is no Checkpoint opcode, so `PRAGMA wal_checkpoint(...)` has no execution path — directly causes the three wal_checkpoint conformance failures (stacked on the parser-layer pragma catch-all gap).",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. ExecutePragmaWalCheckpoint accepts PASSIVE/FULL/RESTART/TRUNCATE and returns the SQLite/Turso busy, log, and checkpointed row shape. The managed engine commits inline, so main checkpoints report 0|0|0; temp has no WAL and correctly reports 0|-1|-1. The temp-schema corpus case passes. This is behavioral parity through the evaluator path rather than a separate VDBE Checkpoint instruction.",
+      "status": "closed"
     },
     {
       "id": "vdbe-integrity-check-opcode",
@@ -512,13 +513,13 @@
       "id": "vdbe-aggregate-overflow-semantics",
       "layer": "vdbe",
       "kind": "divergent",
-      "turso_ref": "turso-src/core/vdbe/execute.rs op_agg_step (line ~6647): Sum/Avg/Total overflow and large-float accumulation semantics",
-      "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs AggStep/AggFinal arms (lines ~660-700)",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::{apply_kbn_step,apply_kbn_step_int,update_agg_payload,finalize_agg_payload}; core/vdbe/execute.rs::handle_text_sum",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::{NumericAggregateAccumulator,EvaluateSum,BuildAccumulatorAggregate}; src/Ahtola.Core/Execution/ResumableStatement.cs::{AggStepInstruction,AggFinalizeInstruction}",
       "severity": "s1-correctness",
       "effort": "S",
       "conformance_links": [],
-      "notes": "SUM/TOTAL/AVG over very large REAL values: Ahtola diverges from SQLite/Turso on infinity/overflow results for float aggregates. Verify Kahan/compensated summation and int->real promotion behavior against op_agg_step. (Previously linked keys cleared by earlier wave work: sum-large-float-infinity, total-large-float-infinity, avg-large-float-infinity.)",
-      "status": "open"
+      "notes": "Closed 2026-08-08. SUM/TOTAL/AVG now share a Kahan-Babuska-Neumaier accumulator in evaluator and compiled VDBE paths. Numeric::Integer SUM overflow faults from AggStep before later source rows execute; TOTAL and AVG promote to compensated REAL accumulation. The separate text-conversion path still promotes a text integer overflow, and NaN/infinite cancellation reaches SQL NULL. NumericAggregateParityTests covers compensated precision, infinities, empty inputs, and text/numeric coercion; TursoAggregateStepParityTests proves overflow timing with a side-effecting scalar. No active expected-failure key was linked.",
+      "status": "closed"
     },
     {
       "id": "compile-no-cost-based-join-ordering",
@@ -629,6 +630,21 @@
       "status": "open"
     },
     {
+      "id": "compile-empty-aggregate-correlated-subquery-scope",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/aggregation.rs (empty ungrouped aggregates put source cursors into NullRow state before evaluating scalar expressions)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteSelect / CreateEmptyAggregateRepresentative",
+      "severity": "s1-correctness",
+      "effort": "M",
+      "conformance_links": [
+        "subquery/memory.sqltest::subquery-correlated-exists-in-select-with-aggregate-empty-table",
+        "subquery/memory.sqltest::correlated-exists-in-ungrouped-aggregate-empty-main-table"
+      ],
+      "notes": "Closed 2026-08-08. Empty ungrouped aggregates previously supplied no representative source row, so scalar expressions evaluated alongside COUNT(*) lost their qualified source binding and correlated EXISTS failed with 'no such column'. CreateEmptyAggregateRepresentative now retains the source schema and parent correlation while providing NULL values, mirroring Turso's NullRow cursor behavior.",
+      "status": "closed"
+    },
+    {
       "id": "compile-select-compiler-single-table-fast-paths-only",
       "layer": "compilation",
       "kind": "divergent",
@@ -645,14 +661,14 @@
       "layer": "compilation",
       "kind": "missing",
       "turso_ref": "turso-src/core/translate/upsert.rs::emit_upsert (upsert target resolution independent of INSERT source shape)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation/DmlStatementCompiler.cs (UPSERT handling)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::PerformUpsertEvaluated; src/Ahtola.Core/EmbeddedDatabase.Triggers.cs::PerformRowTriggeredUpsert",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
         "upsert.sqltest::upsert-select-single"
       ],
-      "notes": "Ahtola's UPSERT compiler rejects any INSERT...SELECT or CTE-sourced INSERT with an ON CONFLICT clause: \"Managed UPSERT supports VALUES rows only and does not support INSERT ... SELECT or CTE sources.\" Turso's upsert.rs resolves the conflict target and emits the DO UPDATE/DO NOTHING body independently of whether the INSERT source is VALUES or SELECT.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. Both the ordinary and row-triggered UPSERT evaluators materialize INSERT ... SELECT source rows through ExecuteQuery, then pass those values through the same BuildInsertRow, conflict-target, DO UPDATE/DO NOTHING, RETURNING, and trigger paths as VALUES input. This mirrors Turso's source-shape-independent target resolution. ManagedBoundedUpsertRuntimeSliceTests covers SELECT and CTE sources with mixed update/insert rows and RETURNING; upsert.sqltest::upsert-select-single now passes.",
+      "status": "closed"
     },
     {
       "id": "compile-on-conflict-rollback-update-unsupported",
@@ -666,24 +682,20 @@
         "on_conflict_constraint_def.sqltest::update-pk-rollback",
         "on_conflict_constraint_def.sqltest::update-rollback-terminates-transaction"
       ],
-      "notes": "Ahtola throws \"Managed UPDATE cannot apply schema-level ON CONFLICT ROLLBACK until the pending row-update engine supports partial publication, transaction rollback, and replacement\" -- a documented, intentional carve-out, but it means schema-level `ON CONFLICT ROLLBACK` constraint resolution during UPDATE is unimplemented, unlike Turso which applies the same resolution machinery to both INSERT and UPDATE.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. The evaluated UPDATE path now turns a constraint-selected ROLLBACK policy into EmbeddedConflictRollbackException, exactly as it already did for an explicit UPDATE OR ROLLBACK. EmbeddedConnection's transaction boundary restores the BEGIN snapshot, clears its savepoints, and returns the original constraint error. The two mapped ON CONFLICT constraint-definition cases now pass; ManagedInsertOrConflictResolutionSliceTests also verifies that a prior UPDATE is reverted and COMMIT reports no active transaction.",
+      "status": "closed"
     },
     {
       "id": "compile-trigger-new-not-visible-in-upsert-clause",
       "layer": "compilation",
-      "kind": "missing",
+      "kind": "parity",
       "turso_ref": "turso-src/core/translate/trigger.rs, upsert.rs (NEW/OLD pseudo-tables visible inside a trigger body's own UPSERT statement)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation/DmlStatementCompiler.cs (UPSERT), EmbeddedDatabase.Triggers.cs (NEW/OLD row binding)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateUpsertUpdateExpressions, ValidateUpsertUpdateExpression",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [
-        "trigger_on_conflict.sqltest::trigger-upsert-new-column",
-        "trigger_on_conflict.sqltest::trigger-upsert-new-in-where",
-        "trigger_on_conflict.sqltest::trigger-upsert-new-in-where-no-update"
-      ],
-      "notes": "When a trigger body contains an INSERT ... ON CONFLICT DO UPDATE SET x = NEW.col statement, Ahtola fails with \"no such table: NEW\" -- the trigger's NEW/OLD pseudo-table binding is not threaded into the nested UPSERT statement's compilation scope, though it works for plain INSERT/UPDATE/DELETE bodies.",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. The managed UPSERT expression validator now preserves NEW/OLD pseudo-row qualifiers inside trigger bodies, including DO UPDATE assignments and WHERE clauses. The full trigger_on_conflict.sqltest corpus passes, covering all three former links.",
+      "status": "closed"
     },
     {
       "id": "compile-order-by-aggregate-misuse-not-rejected",
@@ -735,17 +747,18 @@
         "window/dense_rank.sqltest::dense-rank-float-precision-not-peers",
         "window/dense_rank.sqltest::dense-rank-infinities",
         "window/dense_rank.sqltest::dense-rank-storage-class-ordering",
+        "window/dense_rank.sqltest::dense-rank-column-declared-collation",
         "nulls-first-last.sqltest::window-two-different-nulls-orderings"
       ],
-      "notes": "Closed 2026-08-03 via three coordinated window emission/comparison fixes in EmbeddedDatabase.cs. (1) Window emission order: a windowed SELECT without a top-level ORDER BY now emits in the first window's sort-key order (PARTITION BY all ASC ++ ORDER BY verbatim) instead of scan order, matching SQLite's first-window emission rule; partition-only windows emit in partition order through a sorter (BufferedWindowProgramBuilder OpenSorter) rather than scan order. (2) Collation-aware peer comparison: BuildWindowOrderComparer/CompareWindowOrderKeys now apply each ORDER BY term's effective declared collation via GetEffectiveCollation, so peer-group (tie) detection matches SQLite's collation semantics for NOCASE, cross-type numeric, float-precision, and storage-class cases. (3) Empty-OVER() numbering: bare OVER() window functions are numbered in the window emission order (the first sort-key-carrying window), not scan order, even when a statement ORDER BY re-sorts the output (values ride with rows). Cleared 30 conformance keys (dense_rank, first_last_value, memory-collate, ntile, lag/lead, rank, multi-window-ordering empty-over). Full lane 3765/3765 green; WindowSqlRoutingTests updated to partition-order emission per sqlite3 ground truth. dense-rank-column-declared-collation remains expected-failing (also maps to func-agg-arg-collation-typeof-spotcheck).",
+      "notes": "Closed 2026-08-03 via three coordinated window emission/comparison fixes in EmbeddedDatabase.cs. (1) Window emission order: a windowed SELECT without a top-level ORDER BY composes every distinct window specification's sort key in declaration order (PARTITION BY all ASC ++ ORDER BY verbatim), matching Turso's nested window-subquery planning. Outer layers define the primary order while inner layers resolve their ties; partition-only windows emit in partition order through a sorter (BufferedWindowProgramBuilder OpenSorter) rather than scan order. (2) Collation-aware peer comparison: BuildWindowOrderComparer/CompareWindowOrderKeys now apply each ORDER BY term's effective declared collation via GetEffectiveCollation, so peer-group (tie) detection matches SQLite's collation semantics for NOCASE, cross-type numeric, float-precision, and storage-class cases. (3) Empty-OVER() numbering: bare OVER() window functions are numbered in the statement's composed window emission order rather than scan order, even when a statement ORDER BY re-sorts the output (values ride with rows). Cleared 31 conformance keys (dense_rank, first_last_value, memory-collate, ntile, lag/lead, rank, multi-window-ordering empty-over). WindowSqlRoutingTests covers the multiple-window declared-collation ordering shape against sqlite3 ground truth.",
       "status": "closed"
     },
     {
       "id": "compile-save-all-cursors-window-selfjoin-timeout",
       "layer": "compilation",
       "kind": "divergent",
-      "turso_ref": "turso-src/core/translate/window.rs, optimizer/join.rs (bounded-cost self-join + window evaluation)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation/WindowProgramBuilder.cs, BufferedWindowProgramBuilder.cs, VdbeJoinPlan (nested-loop self-join)",
+      "turso_ref": "turso-src/core/translate/window.rs::emit_aggregation_step + emit_return_buffered_rows (advance aggregate state per input row, capture its value once per peer group)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ComputeWindowFunctions (shared default RANGE peer-frame aggregate value); src/Ahtola.Tests/WindowSqlRoutingTests.cs::DefaultRangeAggregateReusesPeerFrameAcrossJoinRows",
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [
@@ -753,8 +766,8 @@
         "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
         "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
       ],
-      "notes": "Triple self-join plus window function queries time out (exceed the 30s managed execution budget) in Ahtola, consistent with the lack of index-driven joins and cost-based join ordering (see compile-nway-join-not-index-driven, compile-no-cost-based-join-ordering): a triple self-join is O(n^3) without index seeks, whereas Turso's optimizer would choose index-backed access methods per join.",
-      "status": "open"
+      "notes": "Closed 2026-08-06. The three joins correctly materialize 24,000 rows, but the managed evaluator rebuilt and re-aggregated each identical default RANGE UNBOUNDED PRECEDING ... CURRENT ROW peer frame for every output row. ComputeWindowFunctions now shares frame positions and intrinsic aggregate values per peer group, mirroring Turso's window bytecode: emit_aggregation_step advances aggregate state once per input row and emit_return_buffered_rows captures AggValue once per peer-group flush. User-defined aggregates remain per-row to preserve callback timing. Cleared all three save-all-cursors triple-self-join keys.",
+      "status": "closed"
     },
     {
       "id": "compile-schema-sql-always-quotes-identifiers",
@@ -837,15 +850,29 @@
       "conformance_links": [
         "alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel"
       ],
-      "notes": "ALTER TABLE ... DROP COLUMN on a table with an unrelated expression index fails with \"non-deterministic functions are prohibited in index expressions\" in Ahtola where Turso/SQLite succeed -- the drop-column path appears to re-run full expression-index determinism validation against indexes it doesn't need to touch, rejecting otherwise-valid schema mutations. The unrelated sibling case (alter-table-drop-column-expr-index-unreferenced) was cleared 2026-08-03 by compile-reindex-statement's registry-driven determinism work; the sentinel variant remains open.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. The retained date(c) expression index survives an unrelated DROP COLUMN and subsequent UPDATE. The earlier deterministic date/time index-expression closure made revalidation during table reconstruction accept date(c); this entry had become stale after that work. Added managed-vs-SQLite coverage for the surviving index and its post-drop mutation.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-alter-add-column-collation-validation",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/alter.rs::AlterTableBody::AddColumn (Column::try_from validates declared column metadata before mutation)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteAlterTableAddColumn",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "alter_table.sqltest::alter-add-column-invalid-collation"
+      ],
+      "notes": "Closed 2026-08-08. ALTER TABLE ... ADD COLUMN now validates a declared COLLATE name against the built-in and registered collation registry before constructing the candidate table, reporting SQLite's 'no such collation sequence' error instead of accepting an unusable schema.",
+      "status": "closed"
     },
     {
       "id": "compile-alter-rename-trigger-body-not-rebound",
       "layer": "compilation",
       "kind": "missing",
       "turso_ref": "turso-src/core/translate/alter.rs (RenameTable/RenameColumn rewrites trigger body table references), trigger.rs",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/AlterTableSqlRewriter.cs (RenameTableReferences), src/Ahtola.Core/EmbeddedDatabase.cs (ExecuteAlterTableRename view/trigger rebind)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/AlterTableSqlRewriter.cs (RenameTable, RenameTableReferences), src/Ahtola.Core/EmbeddedDatabase.cs (ExecuteAlterTableRename qualified-CHECK/view/trigger rebind)",
       "severity": "s1-correctness",
       "effort": "M",
       "conformance_links": [
@@ -857,9 +884,10 @@
         "alter_table.sqltest::alter-table-rename-trigger-self-insert-sql-rewritten",
         "alter_table.sqltest::alter-table-rename-trigger-self-insert-blob-text-binding",
         "alter_table.sqltest::alter-table-rename-trigger-self-insert-wide-row",
-        "alter_table.sqltest::alter-table-rename-then-rename-column-with-trigger"
+        "alter_table.sqltest::alter-table-rename-then-rename-column-with-trigger",
+        "check_constraint.sqltest::check_constraint_rename_table_qualified_ref"
       ],
-      "notes": "CLOSED 2026-08-05: ALTER TABLE RENAME now rewrites trigger and view bodies. AlterTableSqlRewriter.RenameTableReferences performs span-based renaming of every reference to the old table name (ON-clause qualifier, DML targets, FROM/JOIN sources, qualified column refs, subqueries, CTEs, upsert, window/ORDER BY) over the stored CREATE text; ExecuteAlterTableRename reparses the rewritten text, rebinds TriggerDefinition.TableName (bare name) plus When/Body/UpdateOfColumns and ViewDefinition.Query, validates against a candidate catalog via ValidateDependentSchema, and persists the rewritten Sql so sqlite_schema.sql/tbl_name stay consistent. Expected-failures 401->392 (all 9 mapped keys cleared, 0 added).",
+      "notes": "CLOSED 2026-08-05: ALTER TABLE RENAME now rewrites trigger and view bodies. AlterTableSqlRewriter.RenameTableReferences performs span-based renaming of every reference to the old table name (ON-clause qualifier, DML targets, FROM/JOIN sources, qualified column refs, subqueries, CTEs, upsert, window/ORDER BY) over the stored CREATE text; ExecuteAlterTableRename reparses the rewritten text, rebinds TriggerDefinition.TableName (bare name) plus When/Body/UpdateOfColumns and ViewDefinition.Query, validates against a candidate catalog via ValidateDependentSchema, and persists the rewritten Sql so sqlite_schema.sql/tbl_name stay consistent. Expected-failures 401->392 (all 9 mapped keys cleared, 0 added). Closed 2026-08-08: RenameTable now also rewrites self-qualified column references in stored CHECK expressions, while EmbeddedTable reparses their runtime ASTs before swapping the candidate catalog, so both schema text and enforcement follow the renamed table.",
       "status": "closed"
     },
     {
@@ -900,12 +928,12 @@
       "layer": "compilation",
       "kind": "missing",
       "turso_ref": "turso-src/core/translate/expr.rs / SQLite dialect grammar (accepts special float literal spellings like 1e400 that overflow to infinity)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs, SqlParser.cs (numeric literal grammar)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs::ReadNumber; src/Ahtola.Core/Parsing/SqlParser.cs::ParsePrimary",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Queries using an overflowing float literal to produce +/-Infinity fail to parse (\"Expected RightParen\") rather than being accepted and yielding an IEEE-754 infinity value the way SQLite's tokenizer permits; this is a parser-level gap that surfaces as a compilation-stage rejection of otherwise-valid aggregate queries. (Previously linked keys cleared by earlier wave work: sum-large-float-infinity, total-large-float-infinity, avg-large-float-infinity.)",
-      "status": "open"
+      "notes": "Closed 2026-08-08. ReadNumber classifies exponent-bearing literals as Real, and ParsePrimary converts them through double.Parse using the invariant culture, yielding IEEE-754 infinity when the exponent overflows. The full agg-functions/sum-large-float.sqltest corpus file passes its sum/total/avg infinity cases; the previously linked keys are no longer active expected failures.",
+      "status": "closed"
     },
     {
       "id": "compile-group-by-expression-index-no-covering-optimization",
@@ -967,14 +995,50 @@
     {
       "id": "compile-views-not-updatable",
       "layer": "compilation",
-      "kind": "missing",
-      "turso_ref": "turso-src/core/translate/view.rs (view.rs handles simple-view UPDATE/DELETE/INSERT pass-through when no INSTEAD OF trigger exists, per SQLite's updatable-view rules)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteInsteadOfInsert (line ~5858) requires an explicit INSTEAD OF trigger",
+      "kind": "parity",
+      "turso_ref": "turso-src/core/translate/update.rs::prepare_update_plan (regular views are absent from Schema::get_table and UPDATE errors 'no such table'); insert.rs::prepare_insert_plan and delete.rs::translate_delete follow the same table-only lookup; trigger.rs rejects INSTEAD OF triggers as unsupported",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.Triggers.cs::PerformInsteadOfInsert/Update/Delete (regular views reject DML without a trigger; Ahtola's SQLite-compatible INSTEAD OF trigger support is an intentional extension)",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Ahtola only allows DML against a view when an explicit INSTEAD OF trigger is defined for it (ExecuteInsteadOfInsert throws \"cannot create INSTEAD OF trigger on table\" errors are the only DML-on-view path found). SQLite/Turso additionally support automatically-updatable simple views (a view over a single table with no aggregates/DISTINCT/compound/subqueries) without requiring an INSTEAD OF trigger.",
-      "status": "open"
+      "notes": "Closed 2026-08-08 after source revalidation. Turso does not implement automatically-updatable views: regular views have no B-tree and its INSERT, UPDATE, and DELETE translators resolve targets through Schema::get_table, which excludes regular views. Turso also explicitly rejects INSTEAD OF triggers. Ahtola correctly rejects DML against a view without an INSTEAD OF trigger; its SQLite-compatible trigger support is intentionally broader and does not leave a Turso capability gap. The prior entry conflated a non-existent SQLite/Turso feature with Ahtola's existing extension.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-group-by-outer-reference-scope",
+      "layer": "compilation",
+      "kind": "parity",
+      "turso_ref": "turso-src/core/translate/select.rs::prepare_select_plan and subquery.rs::plan_subqueries_with_outer_query_access (GROUP BY subqueries may correlate to their own query block, but name resolution does not admit a direct or skipped-scope outer reference)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateQuerySchema/ValidateExpressionSchema",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-in-subquery",
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-function-call",
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-oid",
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-group-by-rowid-alias-underscore",
+        "subquery/memory.sqltest::subquery-correlated-outer-ref-in-nested-group-by-subquery"
+      ],
+      "notes": "Closed 2026-08-08. GROUP BY schema validation now bounds a group expression's correlation chain at the grouped SELECT source while preserving local references from nested scalar subqueries. This rejects a direct outer reference and a reference that skips an intervening query block, including function-wrapped and rowid-alias forms, with the SQLite/Turso no-such-column diagnostic.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-compound-set-representative-value",
+      "layer": "compilation",
+      "kind": "parity",
+      "turso_ref": "turso-src/core/translate/compound_select.rs::emit_compound_select (UNION arms insert into one ephemeral B-tree in source order)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ApplyUnion/AddDistinctRows and src/Ahtola.Core/Execution/ResumableStatement.cs::StepResumable(RowSetInsertInstruction)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "select/memory.sqltest::collate-compound-1",
+        "select/memory.sqltest::collate-compound-5",
+        "select/memory.sqltest::collate-compound-7",
+        "select/memory.sqltest::collate-compound-13",
+        "select/memory.sqltest::collate-compound-14"
+      ],
+      "notes": "Closed 2026-08-08. Ahtola now replaces a prior representative when a later UNION arm inserts a value equal under the compound collation, mirroring Turso's shared temporary B-tree. The same replacement rule applies to VDBE row-set captures, so compiled and evaluator set operations retain the later arm's observable text value.",
+      "status": "closed"
     },
     {
       "id": "compile-compound-select-result-ordering",
@@ -989,8 +1053,8 @@
         "select/memory.sqltest::select-except-union",
         "compound-select-orderby.sqltest::three-way-union-order-by"
       ],
-      "notes": "Compound SELECT arms return rows in wrong order when LIMIT/ORDER BY wraps the compound; Ahtola evaluates arms independently without SQLite merge/ordering contract. The union-order-by-expr-no-match key was cleared by Wave F2.10 Batch 2 (ORDER BY no-match wording parity, see compile-order-by-ordinal-range-error-parity); the remaining links are row-ordering gaps.",
-      "status": "open"
+      "notes": "Closed: Ahtola now materializes UNION, INTERSECT, and EXCEPT sets in the left-precedence collation key order of SQLite/Turso temporary B-trees before applying a compound ORDER BY, LIMIT, or OFFSET. UNION ALL retains arm order. This also cleared the stale collate-compound-10 and collate-compound-11 expectations. The union-order-by-expr-no-match key was cleared by Wave F2.10 Batch 2 (ORDER BY no-match wording parity, see compile-order-by-ordinal-range-error-parity).",
+      "status": "closed"
     },
     {
       "id": "compile-select-alias-visibility",
@@ -1018,7 +1082,7 @@
       "layer": "compilation",
       "kind": "partial",
       "turso_ref": "turso-src/core/translate/index.rs (CREATE INDEX ... WHERE partial indexes, planner use, RENAME rewriting of partial WHERE clauses)",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/IndexSemantics.cs::ValidateExpression (same-table qualified predicates accepted)",
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [
@@ -1029,11 +1093,9 @@
         "partial_idx.sqltest::plan-partial-index-not-used-when-where-not-implied",
         "partial_idx.sqltest::plan-partial-index-equality-predicate",
         "partial_idx.sqltest::plan-partial-index-range-predicate",
-        "partial_idx.sqltest::plan-partial-index-range-not-implied",
-        "partial_idx.sqltest::partial-index-qualified-column-in-function",
-        "partial_idx.sqltest::partial-index-doubly-qualified-column-in-function"
+        "partial_idx.sqltest::plan-partial-index-range-not-implied"
       ],
-      "notes": "The ALTER/RENAME COLUMN sql-rewrite cluster (rename-column-updates-partial-index-where-clause-sql and siblings) was closed 2026-08-04 by compile-schema-sql-always-quotes-identifiers: stored Sql now preserves original text and RENAME COLUMN rewrites partial-index WHERE clauses in place. What remains is the planner side — partial indexes are not yet chosen for qualifying WHERE clauses (the plan-partial-index-* cluster) — plus qualified-column-in-function handling.",
+      "notes": "The ALTER/RENAME COLUMN sql-rewrite cluster (rename-column-updates-partial-index-where-clause-sql and siblings) was closed 2026-08-04 by compile-schema-sql-always-quotes-identifiers: stored Sql now preserves original text and RENAME COLUMN rewrites partial-index WHERE clauses in place. Same-table two- and three-part references inside partial-index predicates were closed 2026-08-04 by parser-doubly-qualified-column-reference and IndexExpressionSemantics validation. What remains is the planner side — partial indexes are not yet chosen for qualifying WHERE clauses (the plan-partial-index-* cluster).",
       "status": "open"
     },
     {
@@ -1074,7 +1136,7 @@
       "layer": "compilation",
       "kind": "partial",
       "turso_ref": "turso-src/core/translate/attach.rs + schema resolution (ATTACH/DETACH, cross-database object references, temp-vs-main resolution)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (Managed ATTACH: file-backed primary only; cross-database statements rejected)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (Managed ATTACH routing and attached-target UPDATE with a main-schema predicate read)",
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [
@@ -1088,15 +1150,15 @@
         "alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db",
         "reindex.sqltest::reindex-attached-qualified-targets"
       ],
-      "notes": "Managed ATTACH requires file-backed primary and forbids cross-database statements entirely; temp/main mixed statements are rejected as cross-database. Blocks the entire 41-case trigger_attach_regression file plus pragma attached-database cases.",
+      "notes": "Managed ATTACH requires a file-backed primary except for connection-owned :memory: attachments. Most cross-database statements remain rejected because their independent catalogs cannot be committed atomically. Closed 2026-08-08: an attached-table UPDATE with no FROM, RETURNING, ORDER BY, LIMIT, OFFSET, or index directive can read main-schema tables through its predicate while mutating only the attached catalog. Temp-trigger INSERT...SELECT statements may also mutate one non-temp target catalog while reading one foreign persistent schema snapshot; this closes update_attached_db_index.sqltest::update-attached-db-rowid-with-where-subquery and the two temp-trigger attached-read alter_table cases without widening multi-database writes. Temp/main mixed statements and broader attached reads remain separate work.",
       "status": "open"
     },
     {
       "id": "compile-cte-dml-and-materialization-restrictions",
       "layer": "compilation",
       "kind": "partial",
-      "turso_ref": "turso-src/core/translate/cte.rs (CTEs in UPDATE/DELETE, unused-CTE tolerance, materialization hints)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation (Managed CTE DML requires every CTE to contribute to the statement)",
+      "turso_ref": "turso-src/core/translate/planner.rs::plan_cte + plan_ctes_as_outer_refs (lazy CTE planning, DML outer references, deferred explicit-column validation)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::GetRequiredCommonTableExpressionNames + CTE execution/metadata paths",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
@@ -1104,8 +1166,8 @@
         "cte.sqltest::cte-update-direct-ref-nonkeyed",
         "cte.sqltest::cte-unreferenced-column-mismatch-delete"
       ],
-      "notes": "CTE use inside DML is artificially restricted (\"every CTE must contribute\"); expression-CTE materialization semantics diverge. (Previously linked keys cleared by earlier wave work: cte-limit-inside, range-scan-text-vs-int-affinity.)",
-      "status": "open"
+      "notes": "Closed: execution and metadata now materialize only the dependency closure reached by the SELECT or DML body. Unused CTEs therefore defer invalid explicit-column validation, while direct CTE column references in DML retain SQLite's missing-column error. (Previously linked keys cleared by earlier wave work: cte-limit-inside, range-scan-text-vs-int-affinity.)",
+      "status": "closed"
     },
     {
       "id": "compile-collation-propagation-through-subquery",
@@ -1204,20 +1266,19 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Expr::Column / DoublyQualified qualifier chain",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePrimary (Identifier + Dot branch, line ~2514-2528)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePrimary (two- and three-part identifier branches); src/Ahtola.Core/IndexSemantics.cs::ValidateExpression",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
-        "delete.sqltest::doubly-qualified-delete",
-        "partial_idx.sqltest::partial-index-doubly-qualified-column-in-function",
-        "gencol.sqltest::gencol_error_doubly_qualified",
-        "gencol.sqltest::gencol_error_nested_doubly_qualified",
         "trigger_attach_regression.sqltest::trigger-cross-db-join",
         "trigger_attach_regression.sqltest::trigger-doubly-qualified-expr-runtime-error",
         "trigger_attach_regression.sqltest::trigger-doubly-qualified-when-runtime-error",
-        "alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message"
+        "alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message",
+        "upsert.sqltest::upsert-qualified-target",
+        "upsert.sqltest::upsert-current-qualified_1",
+        "upsert.sqltest::upsert-doubly-qualified-target"
       ],
-      "notes": "SQLite/Turso expressions accept a 3-part `schema.table.column` reference anywhere a column can appear (e.g. `main.t1.val`), even though most call sites then reject it semantically (generated columns forbid the '.' operator; triggers forbid cross-db column refs). Ahtola's expression primary parser consumes at most one Dot after the leading identifier (SqlParser.cs 2514-2528: `if (Consume(TokenKind.Dot)) { ... return qualified; }` with no loop for a second dot), so any 3-part reference is a hard parse error (typically surfacing as 'Expected RightParen'/'Expected Semicolon' at the second dot) instead of a semantic error with a specific message. This blocks both the 'valid at parse time, invalid at bind time' cases (gencol_error_doubly_qualified expects a specific runtime message, not a parse failure) and legitimate 3-part refs like `WHERE main.test.col = 2`.",
+      "notes": "SQLite/Turso expressions accept a 3-part `schema.table.column` reference anywhere a column can appear (e.g. `main.t1.val`), even though most call sites then reject it semantically (generated columns forbid the '.' operator; triggers forbid cross-db column refs). Fixed 2026-08-04: ParsePrimary preserves the schema separately while resolving through the table qualifier, so `main.test.col` executes in DML and generated-column validation receives the qualified AST instead of a parse error. Same-table qualified partial-index predicates are accepted by IndexExpressionSemantics. UPSERT target lowering now similarly recognizes qualified column terms as their underlying target columns while preserving a mismatch diagnostic for a different table qualifier. Remaining cited cases require ATTACH/cross-database trigger semantics and exact runtime diagnostic parity rather than expression parsing.",
       "status": "open"
     },
     {
@@ -1268,9 +1329,10 @@
         "pragma/index_xinfo.sqltest::pragma-index-xinfo-equals-syntax",
         "pragma/table_list.sqltest::pragma-table-list-single-table",
         "pragma/table_list.sqltest::pragma-table-list-equals-syntax",
-        "pragma/table_list.sqltest::pragma-table-list-attached-database"
+        "pragma/table_list.sqltest::pragma-table-list-includes-temp-schema",
+        "pragma/table_list.sqltest::pragma-table-list-unqualified-includes-main-and-temp-matches"
       ],
-      "notes": "Closed 2026-08-06 (wave F2.8). (1) ParsePragmaObjectName now accepts both `PRAGMA x(t1)` and `PRAGMA x=t1` (schema-qualification validated against the pragma prefix, 'PRAGMA database qualifiers do not match'). (2) `PRAGMA table_list` accepts the optional filter argument via a dedicated ParsePragmaTableListFilter (strips schema qualification — the schema is carried by the pragma prefix), threaded as PragmaTableListStatement.Filter through the dispatch/catalog/instance/TVF routes and applied as an exact OrdinalIgnoreCase name match to every emitted row, sqlite_schema header included. (3) Bonus: PRAGMA foreign_key_list's argument became optional (null or nonexistent table -> empty result, SQLite semantics), closing pragma-foreign-key-list-empty-results. All 7 linked keys pass except pragma-table-list-attached-database, which redistributed to the ATTACH gap (memory primary cannot ATTACH; the parse layer is fixed — it now fails only with 'Managed ATTACH requires a file-backed managed primary database'). The explicit-main-vs-temp and the three view/strict/nonexistent table_list keys also cleared.",
+      "notes": "Closed 2026-08-06 (wave F2.8). (1) ParsePragmaObjectName now accepts both `PRAGMA x(t1)` and `PRAGMA x=t1` (schema-qualification validated against the pragma prefix, 'PRAGMA database qualifiers do not match'). (2) `PRAGMA table_list` accepts the optional filter argument via a dedicated ParsePragmaTableListFilter (strips schema qualification — the schema is carried by the pragma prefix), threaded as PragmaTableListStatement.Filter through the dispatch/catalog/instance/TVF routes and applied as an exact OrdinalIgnoreCase name match to every emitted row, sqlite_schema header included. (3) The `pragma_table_list` table-valued function now receives the owning connection's schema list, so unqualified calls enumerate main and temp schemas while qualified calls stay scoped to their requested schema. (4) Bonus: PRAGMA foreign_key_list's argument became optional (null or nonexistent table -> empty result, SQLite semantics), closing pragma-foreign-key-list-empty-results. All mapped keys pass. The attached-database case is tracked under ATTACH because the parser succeeds and execution then rejects an in-memory primary database. The explicit-main-vs-temp and the three view/strict/nonexistent table_list keys also cleared.",
       "status": "closed"
     },
     {
@@ -1296,10 +1358,9 @@
       "conformance_links": [
         "mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors",
         "mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors",
-        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors",
-        "temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc"
+        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors"
       ],
-      "notes": "Turso's MVCC engine adds `BEGIN CONCURRENT` as a fourth transaction-mode keyword alongside DEFERRED/IMMEDIATE/EXCLUSIVE. Ahtola's TransactionMode enum and BEGIN parsing (SqlParser.cs 110-124) only recognize the three stock SQLite keywords, so `BEGIN CONCURRENT` leaves CONCURRENT unconsumed and the statement fails with a generic 'Expected End' instead of the specific semantic error the conformance tests expect (e.g. 'cannot start a transaction within a transaction').",
+      "notes": "Turso's MVCC engine adds `BEGIN CONCURRENT` as a fourth transaction-mode keyword alongside DEFERRED/IMMEDIATE/EXCLUSIVE. Ahtola now parses it and, when no transaction is active, returns Turso's explicit 'Concurrent transaction mode is only supported when MVCC is enabled' diagnostic rather than a generic parse error (closing temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc). The remaining three cases require an actual MVCC journal mode: their first BEGIN CONCURRENT must succeed so the second BEGIN reports nested-transaction state. Ahtola has no MVCC journal implementation yet, so those cases remain open.",
       "status": "open"
     },
     {
@@ -1307,36 +1368,36 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Stmt::Begin { name: Option<Name> } / Stmt::Commit { name: Option<Name> }",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::BeginStatement/CommitStatement (no Name field); src/Ahtola.Core/Parsing/SqlParser.cs lines 110-129",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::BeginStatement/CommitStatement/RollbackStatement::Name; src/Ahtola.Core/Parsing/SqlParser.cs::ParseOptionalTransactionName",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
         "bracket-quoting.sqltest::bracket-transaction-name"
       ],
-      "notes": "SQLite's grammar for BEGIN/COMMIT/END admits an optional transaction name after the TRANSACTION keyword (`trans_opt ::= | TRANSACTION | TRANSACTION nm`), which is accepted and ignored. Ahtola's parser calls `ConsumeKeyword(\"TRANSACTION\")` for BEGIN and COMMIT/END but never attempts to consume a trailing name, so `BEGIN TRANSACTION [txn];` fails with 'Expected End' instead of parsing (and discarding) the name like SQLite does. BeginStatement/CommitStatement also have no Name property to carry it even if parsed.",
-      "status": "open"
+      "notes": "Closed 2026-08-04. SQLite's grammar for BEGIN/COMMIT/END admits an optional transaction name after the TRANSACTION keyword (`trans_opt ::= | TRANSACTION | TRANSACTION nm`), which is accepted and ignored. Ahtola now retains the name on all transaction-control AST nodes and accepts identifier, bracket-quoted, and single-quoted names after TRANSACTION. `ROLLBACK TRANSACTION TO [SAVEPOINT] name` remains correctly parsed as a nameless transaction option followed by a savepoint rollback. The bracket-transaction-name conformance case was removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "parser-upsert-chained-conflict-clauses",
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Upsert { next: Option<Box<Upsert>> } (chained ON CONFLICT clauses)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::UpsertClause (single instance, no chaining); src/Ahtola.Core/Parsing/SqlAst.cs::InsertStatement.Upsert : UpsertClause?",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::UpsertClause.Next and Clauses; src/Ahtola.Core/Parsing/SqlParser.cs::ParseUpsert; src/Ahtola.Core/EmbeddedDatabase.cs::PerformUpsertEvaluated",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
         "upsert.sqltest::upsert-multilple-conflict-targets",
         "upsert.sqltest::upsert-targets-chain"
       ],
-      "notes": "SQLite 3.35+ (and turso-parser's Upsert.next linked-list field) allow chaining multiple ON CONFLICT clauses on one INSERT: `INSERT ... ON CONFLICT(x) DO NOTHING ON CONFLICT(y) DO UPDATE SET ...`, evaluated in order until one matches. Ahtola's InsertStatement carries at most one `UpsertClause?`, so the parser can only ever recognize a single ON CONFLICT clause; a second chained clause is left dangling and fails with 'Expected End'.",
-      "status": "open"
+      "notes": "Closed 2026-08-05. Ahtola now models Turso's linked `Upsert.next` chain, parses every ON CONFLICT clause, validates targetless clauses as final-only, and resolves each target before selecting the first matching action per candidate row. Normal and trigger-aware paths preserve clause-specific DO NOTHING/DO UPDATE plans and trigger selection.",
+      "status": "closed"
     },
     {
       "id": "parser-raise-message-expression",
       "layer": "parser",
       "kind": "divergent",
       "turso_ref": "turso-src/sqlite/parser/src/ast.rs::Expr::Raise(ResolveType, Option<Box<Expr>>) (message is an arbitrary expression)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseRaiseExpression (lines 2626-2651)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseRaiseExpression; src/Ahtola.Core/Parsing/SqlAst.cs::RaiseExpression",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
@@ -1346,22 +1407,22 @@
         "trigger.sqltest::trigger-raise-fail-expr",
         "trigger.sqltest::trigger-raise-rollback-expr"
       ],
-      "notes": "turso-parser's `Expr::Raise` stores the message as `Option<Box<Expr>>` — any expression, e.g. `RAISE(ABORT, 'bad: ' || NEW.a)`. Ahtola's ParseRaiseExpression hard-requires `Expect(TokenKind.Comma)` then `_lexer.Current.Kind != TokenKind.String` throws 'RAISE() error messages must be string literals.' — string concatenation or any non-literal message expression is rejected. Additionally Ahtola has no shorthand `RAISE('message')` single-argument form (implicit ABORT) that some of the corpus's trigger tests use; only `IGNORE`, or `{ROLLBACK|ABORT|FAIL}, message` are accepted (lines 2630-2642).",
-      "status": "open"
+      "notes": "Closed 2026-08-04 during baseline reconciliation. Ahtola already mirrors Turso's `Expr::Raise` shape: ParseRaiseExpression accepts arbitrary message expressions, evaluates them only when the trigger fires, and supports `RAISE('message')` as implicit ABORT alongside ROLLBACK/ABORT/FAIL/IGNORE. The five historical conformance links no longer occur in the regenerated baseline.",
+      "status": "closed"
     },
     {
       "id": "parser-alter-table-alter-column",
       "layer": "parser",
       "kind": "missing",
-      "turso_ref": "turso-src/sqlite/parser/src/ast.rs::AlterTableBody (Turso extension variant for ALTER COLUMN, beyond stock SQLite's Add/Rename/RenameColumn/DropColumn)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::AlterTableAddColumnStatement / AlterTableRenameStatement / AlterTableRenameColumnStatement / AlterTableDropColumnStatement (no AlterColumn form); src/Ahtola.Core/Parsing/SqlParser.cs 'Expected ADD, DROP, or RENAME after ALTER TABLE.'",
+      "turso_ref": "turso-src/core/translate/alter.rs::translate_alter_table (ALTER COLUMN replacement-column handling, physical-layout rewrite, and AUTOINCREMENT sequence cleanup)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs::AlterTableAlterColumnStatement; src/Ahtola.Core/Parsing/SqlParser.cs::ParseAlterTable; src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteAlterTableAlterColumn / EmbeddedTable.CreateWithAlteredColumn",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
         "autoincr.sqltest::autoinc-alter-column-clears-sequence-row"
       ],
-      "notes": "`ALTER TABLE t ALTER COLUMN a TO a2 TEXT` (rename + retype a column in one statement) is a Turso extension beyond stock SQLite's ADD COLUMN / RENAME [TO] / RENAME COLUMN / DROP COLUMN. Ahtola's ALTER TABLE dispatch only recognizes those four stock forms and throws 'Expected ADD, DROP, or RENAME after ALTER TABLE.' for ALTER COLUMN. Flagged s2 (capability gap vs. Turso) rather than s4 because the conformance corpus (derived from Turso's own test suite) exercises it, but note it is not part of SQLite's own grammar.",
-      "status": "open"
+      "notes": "Closed 2026-08-05. Ahtola parses and atomically rebuilds supported `ALTER TABLE ... ALTER COLUMN <old> TO <new> <definition>` operations, preserving rows, row order, explicit indexes, table constraints, foreign-key parent-column metadata, and token-aware dependent view/trigger rewrites. It regenerates a consistent CREATE TABLE statement and removes sqlite_sequence state when an AUTOINCREMENT rowid alias is replaced by a non-alias. Replacing with PRIMARY KEY, UNIQUE, generated, or REFERENCES constraints is explicitly rejected because those changes require physical-layout or foreign-key data migration beyond the supported operation.",
+      "status": "closed"
     },
     {
       "id": "parser-numeric-literal-digit-separators",
@@ -1390,7 +1451,7 @@
       "layer": "parser",
       "kind": "divergent",
       "turso_ref": "turso-src/sqlite/parser/src/parser.rs (grammar quirk: a trailing `CONSTRAINT name` with no following constraint keyword is accepted as a no-op)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (column/table constraint dispatch) — throws 'Expected a constraint after CONSTRAINT {name}.'",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseColumnDefinition",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [
@@ -1398,8 +1459,8 @@
         "create_table.sqltest::create_table_trailing_named_column_constraint",
         "create_table.sqltest::create_table_trailing_named_column_constraint_primary_key_enforced"
       ],
-      "notes": "SQLite's own LALR grammar happens to accept a dangling `CONSTRAINT c` at the very end of a column/ADD COLUMN definition with no constraint keyword following it (an accepted quirk, not documented behavior worth relying on, but real SQLite does not error). Ahtola's constraint-name dispatch always requires a recognized constraint keyword (PRIMARY KEY/UNIQUE/CHECK/DEFAULT/COLLATE/REFERENCES/NOT NULL/GENERATED) after `CONSTRAINT name` and throws otherwise. Low-priority SQLite-compat quirk, not a capability most real schemas rely on.",
-      "status": "open"
+      "notes": "Closed 2026-08-04. SQLite/Turso accepts a dangling `CONSTRAINT c` at the end of a column or ADD COLUMN definition as a no-op: it does not create a real named constraint. Ahtola now leaves the pending name unbound when the definition ends while continuing to reject an unsupported token following the name. All three linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "parser-nulls-clause-rejection-error-message",
@@ -1418,8 +1479,8 @@
         "create_table.sqltest::create_table_unique_desc_nulls_first_rejected",
         "upsert.sqltest::upsert-conflict-target-nulls-first-rejected"
       ],
-      "notes": "Both engines reject NULLS FIRST/LAST inside CREATE INDEX column lists, table-level PRIMARY KEY(...)/UNIQUE(...) column lists, and upsert conflict targets — but SQLite's error message specifically mentions 'NULLS' because its grammar parses the clause first and rejects it semantically, whereas Ahtola's grammar for these indexed-column contexts never recognizes the NULLS keyword at all, so it fails earlier with a generic 'Unexpected token in index expression'/'Expected RightParen'. Net behavior (rejection) matches; only the diagnostic text differs, which is why every conformance-suite expectation here is an 'error text doesn't match pattern NULLS' mismatch rather than a false-success.",
-      "status": "open"
+      "notes": "Closed 2026-08-04. Ahtola now recognizes NULLS FIRST/LAST after an indexed-column direction in CREATE INDEX, table PRIMARY KEY/UNIQUE constraints, and UPSERT conflict targets, then rejects the unsupported ordering with a diagnostic containing `NULLS`. All seven linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "parser-turso-only-ddl-extensions-absent",
@@ -1487,29 +1548,24 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser (parenthesized subquery as JOIN operand, joins between subqueries)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing (Expected RightParen at JOIN of subqueries)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::{ParseTableSource,ParseSimpleTableSource}; src/Ahtola.Core/Parsing/SqlAst.cs::{DerivedTableSource,JoinTableSource}",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Parser rejects JOIN operands that are parenthesized subqueries/unions (Expected RightParen). Blocks the 11-case subquery/expressions file. (Previously linked keys cleared by earlier wave work: subquery-join-two-subqueries, subquery-left-join-two-subqueries, subquery-cross-join-subqueries, subquery-natural-join-subqueries, subquery-from-union, subquery-from-union-all.)",
-      "status": "open"
+      "notes": "Closed 2026-08-08. ParseSimpleTableSource now represents parenthesized query operands as DerivedTableSource and recursively parses parenthesized join clauses before the outer JOIN condition is consumed. This supports joins between subqueries, LEFT/CROSS/NATURAL forms, and UNION/UNION ALL derived sources. The linked subquery/expressions.sqltest corpus file passes as a focused managed conformance run; its previously linked cases are no longer active expected failures.",
+      "status": "closed"
     },
     {
       "id": "parser-error-message-parity",
       "layer": "parser",
-      "kind": "divergent",
+      "kind": "parity",
       "turso_ref": "turso-src/sqlite/parser + core error strings (NATURAL join message, RAISE shorthand)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing + Compilation messages",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseRaiseExpression; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateRaise",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [
-        "join/memory.sqltest::join-3-1",
-        "join/memory.sqltest::join-3-2",
-        "trigger.sqltest::trigger-raise-shorthand",
-        "default_value.sqltest::default-value-column-name"
-      ],
-      "notes": "Compile-time error wording diverges from SQLite patterns (tests regex-match messages). Umbrella for wording-only mismatches; see also vdbe-halt-error-model for runtime messages. (Previously linked keys cleared by earlier wave work: window-row-number-in-check-constraint. Cleared 2026-08-06 by Wave F2.10 Batch 4 / compile-select-prepare-time-column-resolution: ambiguous-self-join and ambiguous-column-error-message-format. Cleared 2026-08-07 by Wave F2.10 Batch 5 / compile-view-create-validation-deferred-to-query-time: view-mutual-circle-detection; view-rejects-aggregate-order-by reclassified to compile-ordered-aggregates-intentional-extension.)",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. The parser accepts RAISE('message') as ABORT shorthand and EvaluateRaise produces the message at trigger execution. The full trigger corpus passes. Earlier wording alignments for NATURAL JOIN, default values, ambiguous columns, views, and window expressions remain documented in prior closure history.",
+      "status": "closed"
     },
     {
       "id": "compile-view-create-validation-deferred-to-query-time",
@@ -1545,28 +1601,43 @@
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite/parser (NOT BETWEEN / NOT GLOB / NOT LIKE operand grammar incl. parenthesized and subquery bounds)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseComparison",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
         "not_between.sqltest::not-between-subquery-bound-orderby-offset"
       ],
-      "notes": "NOT-prefixed operators reject some operand forms (parenthesized subquery bounds, typed operands). (Previously linked keys cleared by earlier wave work: glob-null-other-types.)",
-      "status": "open"
+      "notes": "Closed 2026-08-04. BETWEEN operands now parse at comparison precedence, allowing a lower or upper bound such as `UPPER('x') NOT IN (SELECT ...)` without consuming the BETWEEN separator. The linked ORDER BY/LIMIT/OFFSET scalar-subquery conformance case was removed from the live expected-failure baseline. (Previously linked keys cleared by earlier wave work: glob-null-other-types.)",
+      "status": "closed"
     },
     {
       "id": "parser-bracket-quoted-identifiers",
       "layer": "parser",
       "kind": "missing",
       "turso_ref": "turso-src/sqlite parser lexer (MS-style [identifier] quoting accepted for compatibility)",
-      "ahtola_ref": "src/Ahtola.Core/Parsing lexer",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlLexer.cs::ReadBracketIdentifier",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [
         "bracket-quoting.sqltest::bracket-default-identifier"
       ],
-      "notes": "Square-bracket quoted identifiers not lexed.",
-      "status": "open"
+      "notes": "Closed 2026-08-04. Ahtola's lexer accepts bracket-quoted identifiers, including whitespace-containing names, and the parser routes them through every identifier position. The linked DEFAULT case was blocked by the separate bare-identifier default-value rule, now fixed under parser-default-bare-identifiers. The remaining bracket ANALYZE test is an execution/planner statistics gap, not a quoting grammar gap.",
+      "status": "closed"
+    },
+    {
+      "id": "parser-default-bare-identifiers",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/schema.rs::translate_ident_to_string_literal",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParseColumnDefinition (DEFAULT clause)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "default_value.sqltest::default-value-identifier",
+        "default_value.sqltest::default-value-ident-to-str"
+      ],
+      "notes": "Closed 2026-08-04. Turso/SQLite converts an unparenthesized identifier in a DEFAULT clause to a text literal, including bracket- and double-quoted identifiers. Ahtola now makes the same conversion before literal-default extraction, while preserving parenthesized and qualified identifiers as expressions that receive normal constant-expression validation. The two linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "func-jsonb-scalar-family",
@@ -1578,34 +1649,38 @@
       "effort": "L",
       "conformance_links": [
         "json/json-insert-replace-odd-args.sqltest::jsonb-insert-path-only-errors",
-        "json/json-insert-replace-odd-args.sqltest::jsonb-replace-path-only-errors"
+        "json/json-insert-replace-odd-args.sqltest::jsonb-replace-path-only-errors",
+        "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_does_not_stringify_value"
       ],
-      "notes": "Ahtola's SqliteBuiltinFunctions.Names has no JSONB, JSONB_ARRAY, JSONB_EXTRACT, JSONB_OBJECT, JSONB_PATCH, JSONB_REMOVE, JSONB_REPLACE, JSONB_INSERT, or JSONB_SET; grepping src/Ahtola.Core for 'Jsonb'/'JSONB' returns zero hits. Only the JSON (text) family exists. This is the entire binary-JSON encoding family from turso-src/core/json/jsonb.rs, not just the two aggregates called out separately. Every call raises 'no such function: JSONB_*'.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. Ahtola now encodes and decodes SQLite JSONB headers (inline, 8-bit, 16-bit, and 32-bit payload sizes) over its shared JSON tree, preserving binary results for JSONB, JSONB_ARRAY, JSONB_EXTRACT container results, JSONB_OBJECT, and JSONB mutation/patch functions. Text JSON functions accept the generated JSONB blobs, and JSON constructors embed valid JSONB values rather than quoting them. The linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "func-jsonb-aggregates",
       "layer": "functions",
       "kind": "missing",
       "turso_ref": "turso-src/core/function.rs::AggFunc::JsonbGroupArray, AggFunc::JsonbGroupObject",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs::EvaluateJsonGroupArray/EvaluateJsonGroupObject; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateAggregateFunction",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [],
-      "notes": "SqliteBuiltinFunctions.Names lists JSON_GROUP_ARRAY/JSON_GROUP_OBJECT but not JSONB_GROUP_ARRAY/JSONB_GROUP_OBJECT. Expected-failures file confirms 'no such function: JSONB_GROUP_OBJECT' and 'no such function: JSONB_ARRAY' (the latter used inside a jsonb_group_object test). Depends on func-jsonb-scalar-family (same underlying Jsonb value representation) being ported first.",
-      "status": "open"
+      "conformance_links": [
+        "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_integer_label",
+        "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_real_label"
+      ],
+      "notes": "Closed 2026-08-08. JSONB_GROUP_ARRAY and JSONB_GROUP_OBJECT share the text aggregate's value and numeric-label coercion rules, then serialize their result as SQLite JSONB. They are registered as aggregate and window functions, preserving their text JSON counterparts' arity diagnostics. The linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "func-array-agg-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::AggFunc::ArrayAgg (\"array_agg\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::AggFunc::ArrayAgg; turso-src/core/vdbe/execute.rs::{init_agg_payload,update_agg_payload,finalize_agg_payload}; turso-src/core/types.rs::ImmutableRecord::from_values",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs::EvaluateArrayAgg; src/Ahtola.Core/EmbeddedDatabase.cs::{IsBuiltInAggregate,EvaluateBuiltInAggregate,ValidateWindowFunction,IsAggregateWindowFunction}; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Turso registers array_agg as a built-in aggregate (turso-src/core/function.rs line ~1611). Not present in SqliteBuiltinFunctions.Names or EmbeddedDatabase.AggregateFunctions.cs. Not stock SQLite (Postgres-style), so low urgency for SQLite-compat conformance, but is a real capability gap vs. Turso's registry. No conformance corpus hits found, so effort/impact is small; grouped separately from JSONB because it does not depend on the Jsonb value type.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. array_agg() now preserves every input (including NULL) in Turso's ImmutableRecord/SQLite record BLOB format and returns NULL for empty input. It is registered through ordinary aggregate, window aggregate, and persisted-schema paths, preserving FILTER and DISTINCT behavior supplied by the shared aggregate machinery. TursoArrayAggParityTests cover mixed values, record decoding, empty input, modifiers, window frames, persisted views, and arity diagnostics. No vendored sqltest case covers this Turso extension.",
+      "status": "closed"
     },
     {
       "id": "func-array-postgres-family",
@@ -1671,73 +1746,152 @@
       "id": "func-octet-length-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::OctetLength (\"octet_length\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/vdbe/value.rs::Value::exec_octet_length",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateOctetLength; src/Ahtola.Core/SqliteBuiltinFunctions.cs",
       "severity": "s1-correctness",
       "effort": "S",
       "conformance_links": [],
-      "notes": "octet_length is absent from SqliteBuiltinFunctions.Names and from EmbeddedDatabase.StringFunctions.cs / EmbeddedDatabase.cs (no case-insensitive hit for 'octet' anywhere except unrelated byte-iteration variables named 'octet'). SQLite/Turso's octet_length returns UTF-8 byte length (distinct from LENGTH's codepoint count for multi-byte text, e.g. 'ąłóżźć' is 6 codepoints but 12 UTF-8 bytes). These cases are exercised in scalar-functions.sqltest but are NOT listed in managed-sqltest-expected-failures.txt, suggesting either the corpus file/test isn't wired into the managed run or the gap is silently mis-reported as unexpected-pass/fail elsewhere -- worth a dedicated look when closing this gap.",
-      "status": "open"
+      "notes": "Closed 2026-08-04: registered octet_length and implemented the Turso storage-class rules: UTF-8 byte count for text, raw bytes for blobs, canonical text representation for numeric values, and NULL propagation. Focused regressions cover multibyte text, blobs, integer, and real inputs. The scalar-functions corpus file remains excluded from the managed conformance runner, so this closure does not change its expected-failure baseline.",
+      "status": "closed"
+    },
+    {
+      "id": "func-glob-like-embedded-nul-truncation",
+      "layer": "functions",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/value.rs::sqlite_text_prefix (line 179), exec_glob (line 1227), exec_like (line 1185)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::SqliteTextPrefix, IsGlobMatch, IsLikeMatch",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "glob/memory.sqltest::glob-embedded-nul-1",
+        "glob/memory.sqltest::glob-embedded-nul-2"
+      ],
+      "notes": "SQLite treats text as NUL-terminated C strings, so GLOB/LIKE must stop at the first embedded NUL in both the pattern and the matched text. Turso's exec_glob/exec_like call sqlite_text_prefix on both operands before pattern_compare, so '?'/'_/'*' never match a NUL character. Ahtola's IsGlobMatch/IsLikeMatch matched over the full .NET string including NUL, so 'a\\0b' GLOB 'a?b' wrongly returned 1. Fixed 2026-08-04: added SqliteTextPrefix (mirrors sqlite_text_prefix) and applied it to both operands at the entry of IsGlobMatch and IsLikeMatch, so the matchers now operate on the NUL-truncated prefixes. Both tracked glob-embedded-nul cases removed from the expected-failure baseline; focused GLOB/LIKE NUL regressions added.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-window-non-window-function-diagnostic",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/planner.rs:335,387 (\"{} may not be used as a window function\")",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateWindowFunction",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "window/filter-over.sqltest::filter-over-scalar-function-rejected"
+      ],
+      "notes": "Turso rejects a scalar function used with an OVER clause with the diagnostic \"<name> may not be used as a window function\" (planner.rs:335/387). Ahtola's ValidateWindowFunction emitted \"<name> is not a supported window function\", which did not match the conformance corpus pattern. Fixed 2026-08-04: aligned the error message with Turso's wording so the filter-over-scalar-function-rejected case matches. The tracked case removed from the expected-failure baseline.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-insert-column-count-diagnostic",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/insert.rs + SQLite expr.c \"table %s has %d columns but %d values were supplied\"",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::InsertValues, BuildInsertRow; src/Ahtola.Core/EmbeddedDatabase.Triggers.cs::ExecuteInsertStatement (trigger row insertion)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "insert.sqltest::insert-1-3",
+        "insert.sqltest::insert-1-3b",
+        "insert.sqltest::insert-column-count-mismatch-values",
+        "insert.sqltest::insert-column-count-mismatch-select"
+      ],
+      "notes": "Ahtola emitted a generic \"table has a different number of columns\" for INSERT VALUES/SELECT and trigger-row insertion when the supplied value count did not match the target column count, which did not match the SQLite/Turso pattern \"table {name} has {N} columns but {M} values were supplied\". The conformance runner regex-matches error messages (unanchored, case-insensitive), so only the wording was wrong. Fixed 2026-08-04: all three insertion sites (InsertValues, BuildInsertRow for INSERT...SELECT, and the trigger-row insertion loop in EmbeddedDatabase.Triggers.cs) now emit the SQLite-compatible column-count message with the table name, target column count, and supplied value count. The four tracked insert cases removed from the expected-failure baseline.",
+      "status": "closed"
+    },
+    {
+      "id": "parser-default-value-column-name-diagnostic",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "SQLite expr.c \"default value of column [%s] is not constant\" (defining column name in square brackets)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateConstraintExpression (ValidateSchemaExpressions passes definingColumn)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "default_value.sqltest::default-value-column-name"
+      ],
+      "notes": "Ahtola emitted \"default value of column is not constant: {referenced-name}\" (colon separator, naming the offending referenced column) instead of the SQLite/Turso pattern \"default value of column [{defining-column}] is not constant\" (square brackets around the DEFINING column with the DEFAULT clause). The conformance runner regex-matches messages (unanchored, case-insensitive). Fixed 2026-08-04: ValidateConstraintExpression now takes a definingColumn parameter threaded from ValidateSchemaExpressions (which has the defining column name), and the non-constant error emits the defining column in brackets. Updated the two managed unit tests (ManagedConstraintSemanticsTests, ManagedDefaultValuesTests) that asserted the old colon-form message. default-value-column-name removed from the expected-failure baseline (210 -> 209 entries).",
+      "status": "closed"
+    },
+    {
+      "id": "compile-alter-drop-column-defers-trigger-target-validation",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "SQLite alter.c (sqlite3AlterDropColumn re-resolves dependent schema) — only expression column references (WHERE/WHEN/SET-value/INSERT-VALUES/INSERT-SELECT) fail at ALTER time; SET-target and INSERT-column-list names are deferred to trigger execution time",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateTriggerInsert, ValidateTriggerUpdate (called from ValidateTriggerSchema via ValidateDependentSchema)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "alter_table.sqltest::fail-drop-column-cross-table-trigger-update-where-expr",
+        "alter_table.sqltest::drop-column-cross-table-trigger-insert-col-list-deferred",
+        "alter_table.sqltest::drop-column-cross-table-trigger-set-target-deferred",
+        "alter_table.sqltest::drop-column-other-table-trigger-insert-col-deferred",
+        "alter_table.sqltest::drop-column-owning-table-trigger-insert-col-deferred",
+        "alter_table.sqltest::drop-column-owning-table-trigger-update-set-deferred"
+      ],
+      "notes": "Ahtola validated UPDATE SET-target column names and INSERT column-list column names at ALTER DROP COLUMN time (via table.GetColumnIndex), emitting \"table has no column named {x}\". SQLite defers those name resolutions to trigger execution time, so a trigger whose SET-target or INSERT-column-list names a just-dropped column must SUCCEED at ALTER time (only expression references to the dropped column fail). Fixed 2026-08-04: ValidateTriggerInsert no longer calls GetColumnIndex on the INSERT column list (keeps the bare-row column-count check and all value-expression validation), and ValidateTriggerUpdate no longer calls GetColumnIndex on the SET target (keeps SET-value and WHERE expression validation). fail-drop-column-cross-table-trigger-update-where-expr now reaches the WHERE resolver and emits \"no such column: m\". Six alter_table cases removed from the expected-failure baseline (209 -> 203 entries).",
+      "status": "closed"
     },
     {
       "id": "func-unistr-family-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Unistr (\"unistr\"), ScalarFunc::UnistrQuote (\"unistr_quote\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::{ScalarFunc::Unistr,ScalarFunc::UnistrQuote}; turso-src/core/vdbe/value.rs::{Value::exec_unistr,Value::exec_unistr_quote}",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::{EvaluateUnistr,EvaluateUnistrQuote}; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "unistr()/unistr_quote() (Postgres-style Unicode escape decoding/encoding) are absent from SqliteBuiltinFunctions.Names and EmbeddedDatabase.StringFunctions.cs; the only 'unistr' hit in EmbeddedDatabase.cs is an unrelated string literal used when quoting schema text for round-tripping, not an implementation. All corpus tests for these are tagged '@skip-if sqlite ...' (real SQLite doesn't ship them either) so they run only against the managed engine; ~20 unistr* tests + unistr-quote* tests are candidates. Not present in the current expected-failures file, meaning either these tests are excluded from the managed corpus run or silently failing outside the tracked gap list -- verify wiring when addressing.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. unistr() implements Turso's four escape forms (bare hexadecimal, \\u, \\+, and \\U), literal backslash escaping, and UTF-8-safe rejection of surrogate/out-of-range code points. unistr_quote() emits Turso's executable unistr('...') literal for control-containing text, preserves ordinary quote() output otherwise, and truncates at embedded NUL. Both are registered for persisted-schema recovery. TursoUnistrParityTests covers valid escapes, invalid diagnostics, quoting, NUL behavior, and reopening a view. The 33 related scalar-functions.sqltest cases remain unavailable because that mixed-configuration file is explicitly unsupported by the one-database-per-file managed harness.",
+      "status": "closed"
     },
     {
       "id": "func-soundex-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Soundex (\"soundex\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Soundex; turso-src/core/vdbe/value.rs::Value::exec_soundex",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::EvaluateSoundex; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [],
-      "notes": "soundex() is registered in Turso but is optional in stock SQLite too (needs SQLITE_SOUNDEX); the corpus test itself is commented out. Low priority: not required for SQLite conformance, but a real capability gap vs. Turso's always-on registry. No hit for 'soundex'/'Soundex' anywhere in src/Ahtola.Core.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. soundex() now matches Turso's always-on ASCII-only implementation: it preserves the first uppercase letter, ignores H/W without resetting the previous code, resets on vowels/Y, and returns ?000 for NULL, non-text, empty, or non-ASCII/non-letter text. It is registered for persisted-schema recovery. TursoSoundexParityTests ports Turso's upstream vectors and edge cases. The vendored SQLite corpus leaves its optional soundex test commented out.",
+      "status": "closed"
     },
     {
       "id": "func-gcd-lcm-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Gcd (\"gcd\"), ScalarFunc::Lcm (\"lcm\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::{ScalarFunc::Gcd,ScalarFunc::Lcm}; turso-src/core/functions/math.rs::{exec_gcd,exec_lcm,gcd_inner,value_as_i64}",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.MathFunctions.cs::{EvaluateGreatestCommonDivisor,EvaluateLeastCommonMultiple,TryGetGreatestCommonDivisor}; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [],
-      "notes": "gcd()/lcm() (Turso/SQLite-3.41+-style math helpers) have no hits anywhere in src/Ahtola.Core or Ahtola.Core/EmbeddedDatabase.MathFunctions.cs. Not covered by the vendored sqltest corpus (no gcd(/lcm( occurrences found).",
-      "status": "open"
+      "notes": "Closed 2026-08-08. gcd()/lcm() now use Turso's signed 64-bit coercion and Euclidean algorithm, yielding non-negative results, NULL for non-integral/non-finite/NULL values, and immediate integer-overflow errors for unrepresentable MIN-value magnitudes or LCM products. Both are registered for persisted-schema recovery. TursoIntegerMathParityTests ports Turso's basic, NULL, coercion, and overflow vectors. No vendored sqltest case covers these extensions.",
+      "status": "closed"
     },
     {
       "id": "func-repeat-lpad-rpad-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Repeat (\"repeat\"), Lpad (\"lpad\"), Rpad (\"rpad\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::{Repeat,Lpad,Rpad}; turso-src/core/functions/string.rs::{exec_repeat,exec_lpad,exec_rpad,pad}",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::{EvaluateRepeat,EvaluatePad,TryGetTursoStringFunctionLength}; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "repeat()/lpad()/rpad() string-padding helpers are absent from SqliteBuiltinFunctions.Names and EmbeddedDatabase.StringFunctions.cs. Not part of stock SQLite but present in Turso's registry (and common in other SQL dialects); no corpus coverage found in the vendored sqltest suite, so this is a pure registry gap rather than a conformance failure today.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. Ported Turso's character-counting repeat()/lpad()/rpad() semantics: NULL propagation, negative/zero lengths, integer/real/text/blob length coercion, default and cycling fill, right-side truncation, and Unicode scalar handling. Added the functions to the persisted-schema builtin registry and covered their return values, coercion, NULL behavior, and arity errors in TursoStringFunctionParityTests. No vendored sqltest corpus case exists, so the expected-failure baseline is unchanged.",
+      "status": "closed"
     },
     {
       "id": "func-string-reverse-missing",
       "layer": "functions",
       "kind": "missing",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::StringReverse (\"string_reverse\")",
-      "ahtola_ref": "none",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::StringReverse; turso-src/core/vdbe/execute.rs::ScalarFunc::StringReverse",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::EvaluateStringReverse; src/Ahtola.Core/EmbeddedDatabase.cs::EvaluateScalarFunction; src/Ahtola.Core/SqliteBuiltinFunctions.cs::Names",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [],
-      "notes": "string_reverse() is registered in Turso but has no counterpart in Ahtola.Core and no corpus coverage. Extension-level gap, not SQLite-standard.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. string_reverse() and Turso's reverse() alias now reverse Unicode scalar values after ordinary SQL text coercion, return NULL for NULL, and preserve supplementary Unicode scalars. The implementation is registered for persisted-schema recovery. TursoStringReverseParityTests cover scalar ordering, aliasing, coercion, NULL, arity diagnostics, and reopening a view. No vendored sqltest case covers this Turso extension.",
+      "status": "closed"
     },
     {
       "id": "func-numeric-boolean-ip-helpers-missing",
@@ -1755,13 +1909,13 @@
       "id": "func-substr-utf16-vs-codepoint-divergence",
       "layer": "functions",
       "kind": "divergent",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Substr/Substring (dispatches to Rust functions/string.rs, which index by Unicode scalar value / char, i.e. codepoints)",
+      "turso_ref": "turso-src/core/vdbe/value.rs::Value::exec_substring (counts Rust chars before resolving UTF-8 boundaries)",
       "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::EvaluateSubstring",
       "severity": "s1-correctness",
       "effort": "S",
       "conformance_links": [],
-      "notes": "EvaluateSubstring computes `length` via .NET string.Length and slices with string.Substring using UTF-16 code-unit offsets, not Unicode codepoints. For text containing supplementary-plane characters (e.g. emoji, U+10000+), a single SQLite/Turso 'character' occupies one UTF-16 surrogate pair in .NET, so length/start/end all overcount and substr() can split a surrogate pair, producing corrupted (unpaired-surrogate) output or wrong offsets. Contrast with LENGTH (EmbeddedDatabase.cs::EvaluateLength, uses `EnumerateRunes().Count()`) and INSTR (EvaluateInstr, converts to a Rune-counted index) which are already correctly codepoint-aware in this same file/area -- SUBSTR/SUBSTRING is the outlier that was not ported to Rune-based indexing. No dedicated conformance case was found exercising astral-plane substr(), which is likely why this has not surfaced as a corpus failure yet.",
-      "status": "open"
+      "notes": "Closed 2026-08-04: EvaluateSubstring now resolves text positions and lengths over .NET Rune values, then rebuilds the selected text range without splitting surrogate pairs. Regression coverage includes positive and negative indexing around an emoji and the SUBSTRING alias.",
+      "status": "closed"
     },
     {
       "id": "func-real-text-formatting-intentional-divergence",
@@ -1780,15 +1934,15 @@
       "layer": "functions",
       "kind": "missing",
       "turso_ref": "turso-src/core/function.rs::ScalarFunc::TestNondetCounter (\"test_nondet_counter\"), behind #[cfg(feature = \"test_helper\")]",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Tests/Sqltest/SqltestManagedRunner.cs::_testNondeterministicCounter",
       "severity": "s3-perf",
       "effort": "S",
       "conformance_links": [
         "window/filter-over.sqltest::filter-over-repeated-nondeterministic-call",
         "window/filter-over.sqltest::filter-over-mixed-deterministic-and-nondeterministic-dedup"
       ],
-      "notes": "test_nondet_counter() is a Turso test-only helper (feature-gated) used by the vendored sqltest corpus to probe nondeterministic-function dedup/caching behavior in window FILTER clauses. Ahtola has no equivalent test-helper function, so these two corpus cases fail with 'no such function: TEST_NONDET_COUNTER'. Low-effort to add as a test-only builtin, but it's test-infrastructure rather than a real user-facing function gap.",
-      "status": "open"
+      "notes": "Closed 2026-08-05. The managed sqltest runner now registers test_nondet_counter() as a zero-argument callback backed by a process-global Interlocked counter, mirroring Turso's test_helper-only atomic i64 implementation without adding a shipped user-facing builtin. Registered callbacks are already treated as nondeterministic by the engine, and both window FILTER cases confirm their repeated occurrences remain independent.",
+      "status": "closed"
     },
     {
       "id": "func-json-group-object-numeric-label-affinity",
@@ -1802,8 +1956,8 @@
         "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_text_numeric_label_unchanged",
         "agg-functions/jsonb-group-object-numeric-labels.sqltest::jsonb_group_object_numeric_column_labels"
       ],
-      "notes": "The numeric-label test file targets JSONB_GROUP_OBJECT (missing, see func-jsonb-aggregates), but its title implies numeric object-key stringification/affinity semantics (does a REAL/INTEGER label get its SqliteRealText/canonical-integer text form, or a re-parsed/re-rounded form?) that should be spot-checked against the existing JSON_GROUP_OBJECT implementation once JSONB support lands, since the same key-stringification code path is likely shared between the JSON and JSONB group-object aggregates.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. JSONB_GROUP_OBJECT now shares JSON_GROUP_OBJECT's numeric-label coercion path before encoding the object as JSONB, matching the integer, REAL, text-numeric, and column-affinity cases in the linked corpus. The linked conformance cases were removed from the live expected-failure baseline.",
+      "status": "closed"
     },
     {
       "id": "func-extension-uuid-family",
@@ -1833,20 +1987,20 @@
       "id": "func-agg-arg-collation-typeof-spotcheck",
       "layer": "functions",
       "kind": "divergent",
-      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Typeof; turso-src/core/types.rs affinity rules used by SUM/TOTAL/AVG",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs; src/Ahtola.Core/SqlValue.cs",
+      "turso_ref": "turso-src/core/function.rs::ScalarFunc::Typeof; turso-src/core/vdbe/execute.rs::{handle_text_sum,update_agg_payload,finalize_agg_payload}; turso-src/core/types.rs numeric affinity",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::{NumericAggregateAccumulator,EvaluateSum}; src/Ahtola.Core/EmbeddedDatabase.AggregateFunctions.cs; src/Ahtola.Core/SqlValue.cs",
       "severity": "s1-correctness",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Requested spot-check area: typeof() results and numeric affinity coercion inside SUM/TOTAL/AVG when mixing TEXT-that-looks-numeric, REAL, and INTEGER inputs. No concrete conformance-file citation was found pinpointing a live divergence in the current expected-failures list (the two 'no such function' JSONB entries and the TEST_NONDET_COUNTER entries are the only agg/scalar related lines), so this entry records the spot-check as inconclusive/needs-follow-up rather than a confirmed bug; keep open for a follow-up pass once JSONB and octet_length gaps are closed and the corpus can be re-run to look for newly-surfaced numeric-affinity failures.",
-      "status": "open"
+      "notes": "Closed 2026-08-08. The aggregate affinity audit found no remaining divergence after the shared Turso-compatible NumericAggregateAccumulator port. NumericAffinityParityTests exercises strict numeric-affinity inputs, TEXT numeric prefixes, BLOBs, result types, and SUM/TOTAL/AVG coercion; NumericAggregateParityTests covers compensated REAL accumulation, TYPEOF outputs, NULL/Infinity behavior, exact integer totals, and Turso's distinct native-integer versus text-overflow paths. TursoAggregateStepParityTests verifies the compiled AggStep overflow timing. The 49-test focused audit passed with no new expected-failure key.",
+      "status": "closed"
     },
     {
       "id": "func-math-result-type-divergence",
       "layer": "functions",
       "kind": "divergent",
       "turso_ref": "turso-src/core/functions/math (ceil/ceiling/floor/trunc result-type contract: integer-preserving for integer input)",
-      "ahtola_ref": "src/Ahtola.Core/SqliteBuiltinFunctions.cs",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.MathFunctions.cs::EvaluateIntegralMath",
       "severity": "s1-correctness",
       "effort": "S",
       "conformance_links": [
@@ -1856,22 +2010,37 @@
         "math/memory.sqltest::trunc-int",
         "numeric-text-overflow.sqltest::ceil-text-i64-max-stays-integer"
       ],
-      "notes": "Math rounding functions return REAL (1.0) where SQLite returns integer text (1); ceil over text i64-max also loses integer affinity and precision.",
-      "status": "open"
+      "notes": "Closed 2026-08-04: EvaluateIntegralMath now returns strict numeric INTEGER operands unchanged before a lossy double conversion. This preserves ceil/ceiling/floor/trunc result affinity and the full Int64 range for numeric text; focused scalar regressions cover all five linked cases.",
+      "status": "closed"
     },
     {
       "id": "func-char-coercion",
       "layer": "functions",
       "kind": "divergent",
       "turso_ref": "turso-src/core/functions (char() of non-integer yields empty string per SQLite)",
-      "ahtola_ref": "src/Ahtola.Core/SqliteBuiltinFunctions.cs",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.StringFunctions.cs::EvaluateChar",
       "severity": "s1-correctness",
       "effort": "S",
       "conformance_links": [
         "char.sqltest::char-non-integer"
       ],
-      "notes": "char() with non-integer argument returns a space instead of empty string.",
-      "status": "open"
+      "notes": "Closed 2026-08-04: EvaluateChar now emits code points only for INTEGER values, preserves NULL as NUL, and omits REAL, TEXT, and BLOB arguments like Turso Value::exec_char. Regressions cover an all-text call and mixed argument kinds.",
+      "status": "closed"
+    },
+    {
+      "id": "func-json-mutator-arity-diagnostic",
+      "layer": "functions",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::JsonFunc::JsonInsert/JsonReplace and json/json-insert-replace-odd-args.sqltest",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::SqliteJson.JsonModify",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "json/json-insert-replace-odd-args.sqltest::json-insert-path-only-errors",
+        "json/json-insert-replace-odd-args.sqltest::json-replace-path-only-errors"
+      ],
+      "notes": "Closed 2026-08-04: JsonModify now returns the JSON-specific odd-argument diagnostic for json_set/json_insert/json_replace rather than a generic function-arity message. The JSON mutation regression suite covers the insert and replace cases.",
+      "status": "closed"
     },
     {
       "id": "storage-no-btree-balancing",
@@ -2158,17 +2327,12 @@
       "layer": "mvcc",
       "kind": "missing",
       "turso_ref": "turso-src/core/vdbe/execute.rs::TransactionMode::Concurrent, begin_mvcc_tx, line ~3819 'Concurrent transaction mode is only supported when MVCC is enabled'",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (no CONCURRENT keyword production)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs; src/Ahtola.Core/EmbeddedDatabase.cs::BeginTransaction",
       "severity": "s2-capability",
       "effort": "M",
-      "conformance_links": [
-        "mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors",
-        "mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors",
-        "mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors",
-        "temp_tables_mvcc.sqltest::begin-concurrent-still-fails-after-temp-journal-mode-mvcc"
-      ],
-      "notes": "Turso recognizes BEGIN CONCURRENT as a transaction-mode keyword and, even when MVCC is disabled, produces the specific error 'Concurrent transaction mode is only supported when MVCC is enabled' (execute.rs ~3819-3822) rather than a parse failure. Ahtola's parser has no CONCURRENT production at all, so the same SQL text fails earlier and differently ('Expected End. At SQL offset 6'), which is itself a conformance divergence independent of whether MVCC is ever implemented: four expected-failure lines exist purely because the error message/shape differs, not because of missing MVCC semantics. A cheap partial fix (M effort) is to at least parse BEGIN CONCURRENT and raise the same not-supported message Turso gives when MVCC is off, improving message-compatibility without implementing the feature.",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. Ahtola now parses BEGIN CONCURRENT and returns Turso's explicit MVCC-disabled diagnostic when no transaction is active. The three remaining nested-BEGIN corpus cases are owned by parser-begin-concurrent-mode: their first BEGIN CONCURRENT must succeed in a real MVCC journal mode, which Ahtola does not implement.",
+      "status": "closed"
     },
     {
       "id": "mvcc-clock-and-timestamp-ordering",
@@ -2270,19 +2434,13 @@
       "id": "mvcc-savepoint-cache-size-pragma-gap",
       "layer": "mvcc",
       "kind": "partial",
-      "turso_ref": "turso-src/core/vdbe/execute.rs (Savepoint opcode arm, load_insn!(Savepoint { op, name }, insn))",
-      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (SAVEPOINT keyword parsing), src/Ahtola.Core/Execution/VdbeTransaction.cs::Savepoint/Release/RollbackTo",
+      "turso_ref": "turso-src/core/translate/pragma.rs::update_cache_size, turso-src/core/vdbe/execute.rs (Savepoint opcode arm, load_insn!(Savepoint { op, name }, insn))",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecutePragmaCacheSize, NormalizeCacheSize; src/Ahtola.Core/Execution/VdbeTransaction.cs::Savepoint/Release/RollbackTo",
       "severity": "s2-capability",
       "effort": "S",
-      "conformance_links": [
-        "savepoint.sqltest::savepoint-rollback-overflow-issue-6352",
-        "savepoint.sqltest::savepoint-rollback-overflow-nested-issue-6352",
-        "savepoint.sqltest::savepoint-rollback-overflow-repeated-issue-6352",
-        "savepoint.sqltest::savepoint-rollback-overflow-grow-issue-6352",
-        "savepoint.sqltest::savepoint-rollback-cache-spill-issue-6351"
-      ],
-      "notes": "Ahtola's core SAVEPOINT/RELEASE/ROLLBACK TO grammar and nested-frame semantics are implemented and unit-tested (VdbeTransactionContextSavepointNameMatchingTests.cs, TransactionOpcodeExecutionTests.cs) and match SQLite's case-insensitive topmost-match rule. However, five conformance cases that exercise savepoint rollback under overflow/cache-spill conditions (upstream issues #6351/#6352) all fail for an unrelated reason: `PRAGMA cache_size` is unsupported ('Unsupported PRAGMA cache_size. At SQL offset 18'), so the test setup itself cannot run, masking whether the underlying savepoint-rollback-under-cache-pressure behavior is even correct. This is filed under mvcc/transactions rather than the pragma layer because the observable symptom is 'savepoint tests fail', but the root cause is a PRAGMA gap; closing PRAGMA cache_size support would unblock verifying real savepoint behavior here.",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-05. Ahtola already accepts and reads back PRAGMA cache_size as a connection-scoped hint, including Turso-aligned negative-KiB and minimum-size normalization. The managed pager does not evict at that hint yet, but the setting is advisory. The full savepoint.sqltest corpus, including the five issue #6351/#6352 overflow and cache-spill regressions, now passes and no expected-failure line remains.",
+      "status": "closed"
     },
     {
       "id": "mvcc-deferred-fk-across-statement-boundaries",
@@ -2304,11 +2462,9 @@
       "ahtola_ref": "not located; see src/Ahtola.Core/EmbeddedDatabase.cs schema-versioning code",
       "severity": "s3-perf",
       "effort": "M",
-      "conformance_links": [
-        "rollback.sqltest::schema-change-rollback-2-2"
-      ],
-      "notes": "Turso's Transaction opcode checks a schema cookie on every BEGIN (and separately manages an MVCC schema generation counter, conn.mvcc_begin_schema_generation, so concurrent-mode connections re-prepare statements when the schema changed underneath them). Of the five original rollback.sqltest links, four (schema-alter-rollback, schema-alter-rollback-and-repeat, schema-create-index-rollback, schema-drop-table-rollback) turned out to be cosmetic schema-SQL quoting divergences and were closed 2026-08-04 by compile-schema-sql-always-quotes-identifiers — DDL rollback itself works. What remains is schema-change-rollback-2-2: an actual before/after mismatch suggesting a DDL rollback does not fully restore prior schema state, still a genuine transaction-rollback-boundary symptom needing joint triage with the schema/DDL layer.",
-      "status": "open"
+      "conformance_links": [],
+      "notes": "Closed 2026-08-08. Turso rebuilds its schema by rewinding and scanning the sqlite_schema B-tree, which naturally yields schema record order. Managed GetSchemaTableRows was instead sorting table names alphabetically, making a correctly rolled-back table appear after a subsequently created one. It now preserves the catalog's creation order, and the complete rollback.sqltest schema-rollback cluster passes. Turso's Transaction opcode still checks a schema cookie on every BEGIN (and separately manages an MVCC schema generation counter, conn.mvcc_begin_schema_generation, so concurrent-mode connections re-prepare statements when the schema changed underneath them); that wider cross-connection concern is tracked separately.",
+      "status": "closed"
     },
     {
       "id": "mvcc-statement-level-rollback-on-constraint-violation",
@@ -2322,8 +2478,8 @@
         "on_conflict_constraint_def.sqltest::update-pk-rollback",
         "on_conflict_constraint_def.sqltest::update-rollback-terminates-transaction"
       ],
-      "notes": "SQLite's schema-level ON CONFLICT ROLLBACK resolution aborts and rolls back the *entire enclosing transaction*, not just the statement, distinguishing it from the default ABORT behavior (statement-only undo) — this is a transaction-boundary semantic squarely in this layer's scope. Ahtola's own error message confirms the gap directly: 'Managed UPDATE cannot apply schema-level ON CONFLICT ROLLBACK until the pending row-update engine supports partial publication, transaction rollback, and replacement.' This means Ahtola's UPDATE path cannot currently terminate an entire transaction as a side effect of a single row's constraint violation, a capability gap distinct from (and layered on top of) the SAVEPOINT/BEGIN/COMMIT mechanics that do work.",
-      "status": "open"
+      "notes": "Closed 2026-08-08 with compile-on-conflict-rollback-update-unsupported. SQLite's schema-level ON CONFLICT ROLLBACK aborts and rolls back the entire enclosing transaction, unlike default ABORT's statement-only undo. Ahtola now carries the constraint-selected policy through the evaluated UPDATE path as EmbeddedConflictRollbackException; the existing connection transaction boundary restores the BEGIN snapshot and clears the transaction and savepoints. The two linked constraint-definition cases pass.",
+      "status": "closed"
     },
     {
       "id": "sync-no-embedded-sync-engine-port",
@@ -2696,18 +2852,67 @@
       "status": "closed"
     },
     {
+      "id": "compile-order-by-unique-rowid-suffix",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/optimizer/order.rs::access_path_makes_consumed_prefix_unique (a consumed table-scan rowid term creates a unique order prefix)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (TruncateOrderByAfterUniqueRowid)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "orderby/memory.sqltest::orderby_rowid_truncation",
+        "orderby/memory.sqltest::orderby_rowid_truncation_explicit_rowid"
+      ],
+      "notes": "Closed 2026-08-05. The evaluator eagerly computed every ORDER BY term, including an invalid multi-column IN subquery suffix after an INTEGER PRIMARY KEY or rowid sort key that already defines a unique order. It now removes only suffix terms after a simple named rowid-table source's INTEGER PRIMARY KEY alias or unshadowed rowid pseudo-column, matching Turso's unique-prefix planner rule while retaining evaluation for non-unique order keys.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-grouped-star-projection",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/result_row.rs::emit_select_result (emits each result column after aggregation)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (EvaluateGroupedProjectionRow + TryAppendProjectionStarValues)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "groupby/constant-expr.sqltest::group-by-order-by-constant-float",
+        "groupby/constant-expr.sqltest::group-by-order-by-constant-string",
+        "groupby/constant-expr.sqltest::group-by-order-by-null",
+        "groupby/constant-expr.sqltest::group-by-view-constant-order-by"
+      ],
+      "notes": "Closed 2026-08-05. The grouped evaluator called the scalar expression evaluator for a SELECT * projection and failed with an unsupported StarExpression error whenever execution fell back from the compiled path. Grouped projection evaluation now shares normal star expansion, including qualified-star resolution and the expanded result-column collations used by DISTINCT.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-window-ntile-integer-prefix-coercion",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/function.rs::WindowFunc::Ntile (one runtime argument)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (window ntile bucket evaluation via CoerceSqliteInteger)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "window/ntile.sqltest::ntile-n-text-prefix-coerces",
+        "window/ntile.sqltest::ntile-n-scientific-text-is-integer-prefix",
+        "window/ntile.sqltest::ntile-n-blob-read-as-text"
+      ],
+      "notes": "Closed 2026-08-05. ntile used the general numeric converter, which rejected textual numeric prefixes, treated scientific text as a real number, and ignored blobs. Its bucket count now shares the SQLite integer-prefix conversion used for sqlite_sequence values: it reads text/blob bytes through the signed decimal prefix and truncates real values.",
+      "status": "closed"
+    },
+    {
       "id": "compile-duplicate-primary-key-rejection",
       "layer": "compilation",
       "kind": "partial",
       "turso_ref": "turso-src/core/schema.rs:4369-4373,4593-4598 (rejects a table with more than one PRIMARY KEY regardless of whether the keys are declared column-inline or table-level)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (ResolvePrimaryKeyColumns columnLevel.Count > 1 rejection)",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (ParseColumnDefinition duplicate-inline-PK check) + src/Ahtola.Core/EmbeddedDatabase.cs (ResolvePrimaryKeyColumns columnLevel.Count > 1 rejection)",
       "severity": "s1-correctness",
       "effort": "S",
       "conformance_links": [
         "on_conflict_constraint_def.sqltest::ddl-reject-multiple-pk-columns",
-        "create_table.sqltest::create_table_multiple_column_primary_keys"
+        "create_table.sqltest::create_table_multiple_column_primary_keys",
+        "create_table.sqltest::create_table_duplicate_primary_key_clause"
       ],
-      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 3). Ahtola rejected a second table-level PRIMARY KEY at parse and an inline+table-level combination at execution, but silently accepted two column-inline PRIMARY KEYs (CREATE TABLE t(a PRIMARY KEY, b PRIMARY KEY)), producing a table with an ambiguous primary key. ResolvePrimaryKeyColumns now throws 'table has more than one primary key' when more than one column-level PRIMARY KEY is collected, matching SQLite/Turso (the message is intentionally nameless like the two pre-existing Ahtola sites, since sqltest matching is substring-based). Oracle 261->256 across the batch: the 2 PK keys here plus the 3 string-literal keys on compile-index-string-literal-column-resolution, 0 added.",
+      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 3). Ahtola rejected a second table-level PRIMARY KEY at parse and an inline+table-level combination at execution, but silently accepted two column-inline PRIMARY KEYs (CREATE TABLE t(a PRIMARY KEY, b PRIMARY KEY)), producing a table with an ambiguous primary key. ResolvePrimaryKeyColumns now throws 'table has more than one primary key' when more than one column-level PRIMARY KEY is collected, matching SQLite/Turso (the message is intentionally nameless like the two pre-existing Ahtola sites, since sqltest matching is substring-based). Extended 2026-08-07: the same-column inline case (CREATE TABLE t(a primary key primary key)) was still silently accepted because the column-constraint parser set primaryKey=true idempotently; ParseColumnDefinition now throws 'table has more than one primary key' when a second inline PRIMARY KEY is parsed on the same column, closing create_table_duplicate_primary_key_clause. Oracle 261->256 across the batch: the 2 PK keys here plus the 3 string-literal keys on compile-index-string-literal-column-resolution, 0 added.",
       "status": "closed"
     },
     {
@@ -2740,10 +2945,169 @@
         "select/memory.sqltest::rowid-select-from-clause-subquery",
         "select/memory.sqltest::ambiguous-self-join",
         "select/memory.sqltest::ambiguous-column-error-message-format",
+        "select/memory.sqltest::duplicate-alias-ambiguous-column",
         "cte.sqltest::cte-unreferenced-qualified-column-orderby-exists"
       ],
-      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 4). Two coupled fixes that bring Ahtola's SELECT column-resolution error timing and star-ambiguity detection to Turso parity. (1) Prepare-time validation: Ahtola previously resolved columns lazily at STEP time, so a SELECT that referenced an unresolvable column (rowid over a view or a FROM-clause derived table that does not expose rowid, or a CTE column not in scope) prepared successfully and only failed — or silently succeeded — during stepping. A new ValidateQuerySchema pass now runs at prepare time (after ResolveSelectBindings, before execution) mirroring Turso's translate-time binding, erroring 'no such column: ...' for view-rowid-select / view-rowid-order-by-index / rowid-select-from-clause-subquery / cte-unreferenced-qualified-column-orderby-exists. The hook is guarded by !context.InsideTrigger (trigger bodies are validated at CREATE TRIGGER and NEW/OLD bind through context.TriggerRow). ValidateExpressionSchema's ColumnExpression case now uses TryGetValue and treats an unresolvable name whose BooleanKeyword is set as a legal TRUE/FALSE literal (SQLite keywords -> 1/0), matching EvaluateColumn's runtime fallback so bare TRUE/FALSE still pass validation. (2) Origin-aware star ambiguity: OutputColumn gained a trailing Origin token (the leaf source object, compared with ReferenceEqualityComparer so two self-joined value-equal source nodes stay distinct). ThrowIfAmbiguousStarExpansion now reports 'ambiguous column name: {qualifier}.{name}' only when a column name is contributed by two or more distinct leaf sources; duplicates inside a single source are legal, and USING/NATURAL-coalesced columns (which appear once in the flattened output) remain legal. This cleared the ambiguous-self-join key and the ambiguous-column-error-message-format wording key as a bonus. Oracle 256->250 across the batch (5 target keys + 1 bonus, 0 added); regressions surfaced during iteration (bare TRUE/FALSE validation, single-derived-table duplicate-column false positive) fixed before landing.",
+      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 4). Two coupled fixes that bring Ahtola's SELECT column-resolution error timing and star-ambiguity detection to Turso parity. (1) Prepare-time validation: Ahtola previously resolved columns lazily at STEP time, so a SELECT that referenced an unresolvable column (rowid over a view or a FROM-clause derived table that does not expose rowid, or a CTE column not in scope) prepared successfully and only failed — or silently succeeded — during stepping. A new ValidateQuerySchema pass now runs at prepare time (after ResolveSelectBindings, before execution) mirroring Turso's translate-time binding, erroring 'no such column: ...' for view-rowid-select / view-rowid-order-by-index / rowid-select-from-clause-subquery / cte-unreferenced-qualified-column-orderby-exists. The hook is guarded by !context.InsideTrigger (trigger bodies are validated at CREATE TRIGGER and NEW/OLD bind through context.TriggerRow). ValidateExpressionSchema's ColumnExpression case now uses TryGetValue and treats an unresolvable name whose BooleanKeyword is set as a legal TRUE/FALSE literal (SQLite keywords -> 1/0), matching EvaluateColumn's runtime fallback so bare TRUE/FALSE still pass validation. (2) Origin-aware star ambiguity: OutputColumn gained a trailing Origin token (the leaf source object, compared with ReferenceEqualityComparer so two self-joined value-equal source nodes stay distinct). ThrowIfAmbiguousStarExpansion now reports 'ambiguous column name: {qualifier}.{name}' only when a column name is contributed by two or more distinct leaf sources; duplicates inside a single source are legal, and USING/NATURAL-coalesced columns (which appear once in the flattened output) remain legal. This cleared the ambiguous-self-join key and the ambiguous-column-error-message-format wording key as a bonus. Oracle 256->250 across the batch (5 target keys + 1 bonus, 0 added); regressions surfaced during iteration (bare TRUE/FALSE validation, single-derived-table duplicate-column false positive) fixed before landing. Extended 2026-08-08: source rows now retain qualified names duplicated by separate join leaves, so a duplicate table alias reports 'ambiguous column name: A.f1' during prepare-time validation rather than continuing to the later unqualified f1 diagnostic.",
       "status": "closed"
-    }
-  ]
+    },
+    {
+      "id": "parser-rename-column-qualified-trigger-error-message",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/plan/invariants.rs (RenameColumn rewrites dependent schema objects; unresolved schema-qualified column refs in trigger bodies raise no such column preserving the database qualifier) + turso-src/core/sql/ast.rs ColumnName schema field",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/RenameColumnRewriter.cs (ResolveColumnReference now formats the full schema-qualified name via FormatQualifiedName instead of column.Name, which drops the schema; column-list sites using bare oldName are unchanged)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [
+        "alter-rename-column-qualified-trigger-error.sqltest::rename-column-trigger-when-doubly-qualified-ref-error-message"
+      ],
+      "notes": "Closed 2026-08-07. ALTER TABLE ... RENAME COLUMN rewrites trigger bodies through RenameColumnRewriter.RewriteSchemaObject, whose ResolveColumnReference threw no such column: {column.Name} for an unresolved reference. ColumnExpression.Name excludes the schema (set to qualifier.column by the three-part parser), so main.t.b was reported as t.b, dropping the database qualifier the conformance pattern requires. Added FormatQualifiedName(column) (schema + . + name when Schema is set) and used it at both reject sites. Column-list validation sites (lines using bare oldName) were correct and left unchanged. Oracle 203->202.",
+      "status": "closed"
+    },
+    {
+      "id": "compile-unknown-schema-column-reference-database-diagnostic",
+      "layer": "compilation",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/translate/emitter/mod.rs:694-712 resolve_database_id (a column/table reference qualified by a database that is not main/temp and not attached raises no such database: {name}, not no such column)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (SourceRow.CreateUnresolvedColumnException distinguishes an unknown database qualifier -> no such database: {schema} from a missing column in a known schema -> no such column: {schema-qualified name}; used by SourceRow.GetValue and EvaluateColumn; ValidateExpressionSchema ColumnExpression case routes through probe.GetValue)",
+      "severity": "s2-capability",
+      "effort": "S",
+      "conformance_links": [],
+      "notes": "Closed 2026-08-07. A schema-qualified column reference whose database is neither main nor temp nor attached (e.g. unknown.test.col) previously fell through SourceRow.TryGetValue (which returns false for an unknown schema) to a generic no such column: {name} that dropped the schema. Turso resolves the database first and emits no such database: {name} for an unknown database, a distinct error. Added SourceRow.CreateUnresolvedColumnException and routed the two EvaluateColumn reject sites and SourceRow.GetValue through it; known-schema missing columns still report the schema-qualified no such column (preserving the rename-column closure). Backed by ThreePartColumnReferenceTests.UnknownSchemaColumnReferenceDoesNotResolveAgainstMain (updated to assert the Turso diagnostic). No conformance key closed; the only conformance no such database case is vacuum_into (skipped, VACUUM not yet supported).",
+      "status": "closed"
+    },
+    {
+      "id": "parser-fk-column-level-multi-parent-rejection",
+      "layer": "parser",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/schema.rs:4650-4656 (column-level ForeignKey constraint: if clause.columns.len() > 1, bail 'foreign key on {name} should reference only one column of table {tbl}')",
+      "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (ParseColumnDefinition REFERENCES branch: ParseForeignKeyReference then check ParentColumns.Count > 1)",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "foreign_keys.sqltest::fk-column-constraint-multi-parent"
+      ],
+      "notes": "Closed 2026-08-07. A column-level REFERENCES clause (e.g. CREATE TABLE s(a REFERENCES t(a, c))) silently accepted multiple parent columns; only the table-level FOREIGN KEY form enforced parent/child arity. SQLite/Turso reject a column-level FK naming more than one parent column. ParseColumnDefinition now throws 'foreign key on {child} should reference only one column of table {parent}' when the parsed column-level FK references more than one parent column, matching Turso. Backed by ManagedDdlBoundaryTests.ManagedEngineRejectsColumnLevelForeignKeyWithMultipleParentColumns. The link was previously misattached to vdbe-fk-enforcement-opcodes (a runtime FK enforcement gap); detached because this is a parse-time arity check, not runtime enforcement. Conformance baseline 201 -> 200; full suite 3798/0/50.",
+      "status": "closed"
+   },
+   {
+     "id": "compile-upsert-do-update-out-of-scope-column-diagnostic",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/upsert.rs::emit_upsert (DO UPDATE SET/WHERE expressions bind only the target table and the EXCLUDED pseudo-row; a column qualified by any other table is an unresolvable column -> SQLite 'no such column: {qualifier}.{col}')",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateUpsertUpdateExpression (out-of-scope qualifier branch)",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "upsert.sqltest::upsert-unresolved-table-reference",
+       "upsert.sqltest::upsert-unresolved-table-in-where"
+     ],
+     "notes": "Closed 2026-08-07. An UPSERT DO UPDATE SET value or WHERE predicate referencing a table other than the target or EXCLUDED (e.g. SET val = other.val where other is a real but out-of-scope table) produced 'no such table: {qualifier}' instead of SQLite/Turso's 'no such column: {qualifier}.{col}'. ValidateUpsertUpdateExpression now throws 'no such column: {column.Name}' for an out-of-scope qualifier, matching SQLite/Turso. The validator recurses through assignments and the WHERE expression (BinaryExpression and all composite expr cases), so both the SET and WHERE cases are covered. Backed by ManagedUpsertCheckConstraintTests differential harness (AssertBothEnginesAgree vs real Microsoft.Data.Sqlite). Conformance baseline 201 -> 199; both linked cases removed, 0 added.",
+     "status": "closed"
+   },
+   {
+     "id": "parser-rename-column-update-from-trigger-body",
+     "layer": "parser",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/alter.rs (RenameColumn rewrites dependent schema objects; UPDATE...FROM introduces additional table sources whose columns may be referenced in SET/WHERE and must be rewritten when the FROM table is the rename target)",
+     "ahtola_ref": "src/Ahtola.Core/Parsing/RenameColumnRewriter.cs::WalkUpdate (now binds update.From into scope via BindSource before walking assignment values, WHERE, ORDER BY, and LIMIT/OFFSET)",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "alter_table.sqltest::alter-rename-col-schema-update-cmd-from"
+     ],
+     "notes": "Closed 2026-08-07. ALTER TABLE ... RENAME COLUMN rewrites trigger bodies through RenameColumnRewriter.WalkUpdate, which walked assignments, WHERE, RETURNING, and ORDER BY but never bound update.From (the UPDATE...FROM clause) into scope. A qualified reference like SET z = src.b FROM src therefore resolved src as Unresolved and threw 'no such column: src.b' instead of rewriting b to c. WalkUpdate now calls BindSource(update.From, scope) after creating the target table scope, mirroring WalkSelect's handling of select.Source, and also walks Limit/Offset. ResolveColumns returns the pre-rename column shape for the target table, so src.b matches and IsRenameTarget flags the binding for rewrite to src.c. Backed by ManagedDdlBoundaryTests.ManagedEngineRewritesUpdateFromTriggerBodyOnRenameColumn. Conformance baseline 199 -> 198; full suite 3801/0/47.",
+     "status": "closed"
+   },
+   {
+     "id": "parser-rename-column-view-dependencies",
+     "layer": "parser",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/util.rs::rename_column_view::rewrite_view_sql_for_column_rename_inner (recursively rewrites dependent view output names and table-function arguments) and turso-src/core/translate/alter.rs::translate_alter_table",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteAlterTableRenameColumn / GetJoinRows and src/Ahtola.Core/Parsing/RenameColumnRewriter.cs::BindSource",
+     "severity": "s1-correctness",
+     "effort": "M",
+     "conformance_links": [
+       "alter_table.sqltest::alter-table-rename-column-view-on-view",
+       "alter_table.sqltest::alter-table-rename-column-view-tablecall-branch"
+     ],
+     "notes": "Closed 2026-08-08. The rename rewriter treated every view as an unknown source, so an implicit output column renamed in v1 did not propagate to a dependent v2. ExecuteAlterTableRenameColumn now resolves pre-rename view output shapes, tracks views whose implicit output oldName becomes newName, and repeats schema-object rewriting until that dependency closure stabilizes. Explicit CREATE VIEW column lists are deliberately not propagated because their output names are declared. BindSource now preserves rename-target identity through an alias, and table-valued-function arguments are walked in the joined source scope. The latter exposed a companion execution bug: GetJoinRows materialized an argument-bearing table-valued function once outside the left-row loop, so t.c was unresolved; it now evaluates that right source for each left row and schema validation uses the matching left-side row shape. Backed by ManagedAlterTableRenameColumnTests.RenameColumnPropagatesImplicitViewColumnsAndTableFunctionArguments. Expected-failure baseline 160 -> 158.",
+     "status": "closed"
+   },
+   {
+     "id": "compile-upsert-do-update-trigger-new-column-reference",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/emitter/mod.rs - UPSERT DO UPDATE expressions may reference NEW.column/OLD.column inside a trigger body (resolved against the trigger row frame at runtime)",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ValidateUpsertUpdateExpression (ColumnExpression branch) now allows NEW/OLD qualifiers when allowTriggerQualifiers (context.InsideTrigger) is set; both call sites (PerformUpsertEvaluated in EmbeddedDatabase.cs, PerformRowTriggeredUpsert in EmbeddedDatabase.Triggers.cs) pass context.InsideTrigger",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "trigger_on_conflict.sqltest::trigger-upsert-new-column",
+       "trigger_on_conflict.sqltest::trigger-upsert-new-in-where",
+       "trigger_on_conflict.sqltest::trigger-upsert-new-in-where-no-update"
+     ],
+     "notes": "Closed 2026-08-07. ValidateUpsertUpdateExpression rejected any qualifier other than excluded/target table, so a trigger-body UPSERT DO UPDATE SET/WHERE referencing NEW.column errored with 'no such column: NEW.delta'. Added allowTriggerQualifiers=context.InsideTrigger to ValidateUpsertUpdateExpressions/ValidateUpsertUpdateExpression (with default false); the ColumnExpression branch now returns for NEW/OLD (case-insensitive) when inside a trigger, and TriggerRowFrame.GetValue resolves the column at runtime (erroring with 'no such column' if the NEW/OLD row lacks it). The recursive validator propagates the flag through all composite expression cases, covering both SET and WHERE. Backed by ManagedTriggerRowSemanticsTests.TriggerBodyUpsert* (differential AssertMatchesSqlite vs real Microsoft.Data.Sqlite). Conformance baseline 198 -> 195; all three linked cases removed, 0 added; full suite 3804/0/47.",
+     "status": "closed"
+   },
+   {
+     "id": "compile-index-expression-deterministic-datetime",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/schema.rs::is_deterministic_schema_function_call - date/time functions are deterministic only when they cannot read the wall clock or the local timezone (no 'now' time value, no 'localtime'/'utc' modifiers)",
+     "ahtola_ref": "src/Ahtola.Core/IndexSemantics.cs::IndexExpressionSemantics.IsDeterministicBuiltin now delegates to EmbeddedTable.IsDeterministicSchemaFunction (shared with generated-column validation, EmbeddedDatabase.cs), which routes the date/time family through IsDeterministicDateTimeCall",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "create_index.sqltest::create-index-strftime-with-column",
+       "create_index.sqltest::create-index-date-literal",
+       "alter_table.sqltest::alter-table-drop-column-preserves-expression-index-sentinel"
+     ],
+     "notes": "Closed 2026-08-07. IndexExpressionSemantics.IsDeterministicBuiltin called SqliteBuiltinFunctions.IsDeterministic(name) directly, which marks the entire date/time family (date/time/datetime/unixepoch/julianday/strftime/timediff) as non-deterministic because they CAN read 'now'. That rejected deterministic calls such as strftime('%Y-%m-%d %H:00:00', \"created\") and date('2020-01-02') in index expressions. Extracted the existing generated-column check (IsDeterministicGenerationFunction / IsDeterministicDateTimeCall / IsCurrentTimeLiteral / IsUnsafeDateTimeModifier) into a shared internal EmbeddedTable.IsDeterministicSchemaFunction and routed the index-expression validator through it. strftime(format, column) and date(literal) now pass; strftime(format, 'now') and date() with no args still fail (non-deterministic), matching create-index-strftime-now-remains-rejected. Backed by DurableIndexSemanticsTests.IndexExpression* (accept deterministic strftime-with-column, accept deterministic date-literal, reject strftime-with-'now'). Conformance baseline 195 -> 192; all three linked cases removed, 0 added; full suite 3807/0/47.",
+     "status": "closed"
+   },
+   {
+     "id": "vdbe-unbound-parameter-default-null",
+     "layer": "vdbe",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/vdbe/mod.rs::ProgramState::{bind_at, clear_bindings, get_parameter} (parameter slots are extended with Value::Null and an absent slot reads as Value::Null)",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::EmbeddedStatement.ExecuteIfNeeded, ReadParameter, and BuildValuesBinding",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "select/memory.sqltest::where-variable-predicate"
+     ],
+     "notes": "Closed 2026-08-08. EmbeddedStatement rejected execution whenever any declared parameter had not been explicitly bound, and ReadParameter also threw for a sparse supplied parameter array. Turso's ProgramState instead clears bindings to an empty vector and get_parameter returns Value::Null for any absent slot. Ahtola now leaves core statement parameters initialized as SqlValue.Null, removes the pre-execution unbound-parameter gate, and maps out-of-range evaluator and routed VALUES slots to SqlValue.Null. Explicit ADO.NET provider parameter validation is intentionally unchanged.",
+     "status": "closed"
+   },
+   {
+     "id": "compile-row-trigger-update-assignment-subquery-snapshot",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/emitter/update.rs::emit_non_from_clause_subqueries_for_eval_at(EvalAt::BeforeLoop) (uncorrelated UPDATE assignment subqueries are evaluated before the row-trigger loop)",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.Triggers.cs::PerformRowTriggeredUpdate and src/Ahtola.Core/EmbeddedDatabase.cs::ExecuteSubquery",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "before-update-trigger-correlated-subquery.sqltest::before-update-trigger-uncorrelated-subquery"
+     ],
+     "notes": "Closed 2026-08-08. A row-triggered UPDATE publishes each changed row before evaluating the next row, which invalidated the statement memo for an uncorrelated SET subquery and caused later rows to observe prior assignments. PerformRowTriggeredUpdate now preserves a memo snapshot only while evaluating SET expressions. ExecuteSubquery therefore reuses the first pre-trigger result for later target rows, while correlated subqueries remain non-memoized and trigger-body queries retain their live per-row execution. ManagedTriggerRowSemanticsTests.UncorrelatedUpdateAssignmentSubqueryUsesThePreTriggerStatementSnapshot verifies parity with SQLite.",
+     "status": "closed"
+   },
+   {
+     "id": "compile-alter-add-column-foreign-key",
+     "layer": "compilation",
+     "kind": "divergent",
+     "turso_ref": "turso-src/core/translate/alter.rs::AlterTableBody::AddColumn (adds the column foreign-key definition to the table before emitting Insn::AddColumn)",
+     "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::EmbeddedTable.AddColumn and RefreshForeignKeys",
+     "severity": "s1-correctness",
+     "effort": "S",
+     "conformance_links": [
+       "foreign_keys.sqltest::fk-alter-table-add-column-enforced"
+     ],
+     "notes": "Closed 2026-08-08. ALTER TABLE ADD COLUMN previously rejected every column-level REFERENCES clause even though the table constructor and DML foreign-key validator already supported the resulting metadata. AddColumn now refreshes the live foreign-key projection after adding the column, so both the current table and its reconstructed catalog retain the new constraint. ManagedForeignKeyFileCatalogDurabilityTests.AddedColumnForeignKeyEnforcesBeforeAndAfterReopen covers valid, NULL, invalid, and reopened child values.",
+     "status": "closed"
+   }
+ ]
 }

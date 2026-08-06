@@ -175,7 +175,8 @@ internal sealed class PragmaIntrospectionModule(
 
 /// <summary>
 /// <c>pragma_table_list</c>. Unlike the rest of the family the argument only filters the
-/// listing, and the module reports the schema the enclosing statement was routed to.
+/// listing. The owning connection supplies the catalog set so an unqualified call can
+/// enumerate both the main and temporary schemas.
 /// </summary>
 internal sealed class PragmaTableListModule : TableValuedFunctionModule
 {
@@ -188,20 +189,16 @@ internal sealed class PragmaTableListModule : TableValuedFunctionModule
 
     public override IReadOnlyList<SqlValue[]> Enumerate(TableValuedFunctionCall call)
     {
-        var schema = call.Schema ?? "main";
-        var result = EmbeddedDatabase.ExecuteIntrospectionPragma(
-            new PragmaTableListStatement(schema),
-            call.Context);
-        var rows = result.Rows;
-        if (call.HasArgument(0) && call.Arguments[0].Kind != SqlValueKind.Null)
-        {
-            var wanted = TableValuedFunctionRows.CoerceToText(call.Arguments[0]);
-            rows = [.. rows.Where(row =>
-                row[1].Kind == SqlValueKind.Text
-                && string.Equals(row[1].AsText(), wanted, StringComparison.OrdinalIgnoreCase))];
-        }
+        var filter = call.HasArgument(0) && call.Arguments[0].Kind != SqlValueKind.Null
+            ? TableValuedFunctionRows.CoerceToText(call.Arguments[0])
+            : null;
+        var result = call.Context.ExecuteTableList is { } executeTableList
+            ? executeTableList(call.Schema, filter)
+            : EmbeddedDatabase.ExecuteIntrospectionPragma(
+                new PragmaTableListStatement(call.Schema ?? "main", filter),
+                call.Context);
 
-        return TableValuedFunctionRows.AppendArguments(rows, call.Arguments, Schema);
+        return TableValuedFunctionRows.AppendArguments(result.Rows, call.Arguments, Schema);
     }
 }
 

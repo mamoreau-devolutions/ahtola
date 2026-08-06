@@ -30,7 +30,7 @@ public class CompoundSelectSqlRoutingTests
     }
 
     [Test]
-    public void UnionDistinctKeepsFirstOccurrenceAcrossTerms()
+    public void UnionDistinctTraversesItsMaterializedSetInKeyOrder()
     {
         using var connection = new EmbeddedDatabase().Connect();
         SeedSingleColumn(connection);
@@ -41,6 +41,25 @@ public class CompoundSelectSqlRoutingTests
                 SqlValue.Integer(2),
                 SqlValue.Integer(3),
                 SqlValue.Integer(4));
+    }
+
+    [Test]
+    public void UnionDistinctRoutesAndOrdersFullRowsBeforeAnOuterOrderByCanBreakTies()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE t(a INTEGER, b TEXT);");
+        Execute(connection, "CREATE TABLE u(a INTEGER, b TEXT);");
+        Execute(connection, "INSERT INTO t VALUES (2, 'z'), (1, 'z');");
+        Execute(connection, "INSERT INTO u VALUES (1, 'a'), (3, 'x');");
+
+        var rows = ReadRows(connection, "SELECT a, b FROM t UNION SELECT a, b FROM u;");
+        rows.Should().HaveCount(4);
+        rows[0].Should().Equal(SqlValue.Integer(1), SqlValue.Text("a"));
+        rows[1].Should().Equal(SqlValue.Integer(1), SqlValue.Text("z"));
+        rows[2].Should().Equal(SqlValue.Integer(2), SqlValue.Text("z"));
+        rows[3].Should().Equal(SqlValue.Integer(3), SqlValue.Text("x"));
+
+        Assert.DoesNotThrow(() => ReadRows(connection, "EXPLAIN SELECT a, b FROM t UNION SELECT a, b FROM u;"));
     }
 
     [Test]
@@ -56,6 +75,17 @@ public class CompoundSelectSqlRoutingTests
         rows[1].Should().Equal(SqlValue.Integer(2), SqlValue.Text("y"));
         rows[2].Should().Equal(SqlValue.Integer(3), SqlValue.Text("z"));
         rows[3].Should().Equal(SqlValue.Integer(4), SqlValue.Text("w"));
+    }
+
+    [Test]
+    public void UnionDistinctUsesTheFinalTermRepresentativeForCollatedDuplicates()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE words(value TEXT COLLATE NOCASE);");
+        Execute(connection, "INSERT INTO words VALUES ('first');");
+
+        Column0(ReadRows(connection, "SELECT value FROM words UNION SELECT 'FIRST' COLLATE BINARY;"))
+            .Should().Equal(SqlValue.Text("FIRST"));
     }
 
     [Test]
@@ -266,7 +296,7 @@ public class CompoundSelectSqlRoutingTests
     }
 
     [Test]
-    public void UnionDistinctExplainEmitsDistinctResultRowAgainstOneSharedSet()
+    public void UnionDistinctExplainMaterializesAndTraversesOneSortedSet()
     {
         using var connection = new EmbeddedDatabase().Connect();
         SeedSingleColumn(connection);
@@ -274,11 +304,11 @@ public class CompoundSelectSqlRoutingTests
         var rows = ReadRows(connection, "EXPLAIN SELECT a FROM t UNION SELECT a FROM u;");
         var opcodes = Opcodes(rows).ToList();
 
-        opcodes.Count(opcode => opcode == "DistinctResultRow").Should().Be(2);
-        opcodes.Should().NotContain("ResultRow");
-        Comments(rows).Should().OnlyContain(comment => !comment.Contains("distinct set")
-            || comment.Contains("if new to distinct set 0"));
-        Comments(rows).Where(comment => comment.Contains("distinct set")).Should().HaveCount(2);
+        opcodes.Count(opcode => opcode == "RowSetInsert").Should().Be(2);
+        opcodes.Count(opcode => opcode == "ResultRow").Should().Be(1);
+        opcodes.Should().NotContain("DistinctResultRow");
+        opcodes.Should().Contain("RowSetRewind").And.Contain("RowSetNext");
+        Comments(rows).Where(comment => comment.Contains("row set 0")).Should().HaveCount(4);
     }
 
     [Test]

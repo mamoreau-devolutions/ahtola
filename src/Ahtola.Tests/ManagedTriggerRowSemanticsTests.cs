@@ -135,7 +135,7 @@ public sealed class ManagedTriggerRowSemanticsTests
         AssertMatchesSqlite(
             [
                 "CREATE TABLE items(key TEXT PRIMARY KEY, seed INTEGER, "
-                    + "doubled INTEGER AS (seed * 2) STORED) WITHOUT ROWID",
+                    + "doubled INTEGER AS (seed * 2) VIRTUAL) WITHOUT ROWID",
                 "CREATE TABLE trace(value TEXT)",
                 "CREATE TRIGGER items_before_insert BEFORE INSERT ON items BEGIN "
                     + "INSERT INTO trace VALUES ('BI:' || NEW.key || ':' || NEW.doubled); END",
@@ -185,11 +185,10 @@ public sealed class ManagedTriggerRowSemanticsTests
     }
 
     [Test]
-    public void ReturningCapturesDirectRowBeforeAfterTriggerChanges()
+    public void ReturningReflectsSameRowAfterTriggerChangesLikeTurso()
     {
         using var database = new EmbeddedDatabase();
         using var managed = database.Connect();
-        using var sqlite = OpenSqlite();
         var setup = new[]
         {
             "CREATE TABLE data(id INTEGER PRIMARY KEY, value INTEGER)",
@@ -198,16 +197,31 @@ public sealed class ManagedTriggerRowSemanticsTests
                 + "UPDATE data SET value = NEW.value + 100 WHERE id = NEW.id; END",
         };
         foreach (var sql in setup)
-        {
             Execute(managed, sql);
-            Execute(sqlite, sql);
-        }
 
-        AssertQueriesMatch(
-            managed,
-            sqlite,
-            "UPDATE data SET value = 20 WHERE id = 1 RETURNING id, value");
-        AssertQueriesMatch(managed, sqlite, "SELECT id, value FROM data");
+        ReadRows(managed, "UPDATE data SET value = 20 WHERE id = 1 RETURNING id, value")
+            .Should()
+            .ContainSingle()
+            .Which.Should().Equal(SqlValue.Integer(1), SqlValue.Integer(120));
+        ReadRows(managed, "SELECT id, value FROM data")
+            .Should()
+            .ContainSingle()
+            .Which.Should().Equal(SqlValue.Integer(1), SqlValue.Integer(120));
+    }
+
+    [Test]
+    public void UncorrelatedUpdateAssignmentSubqueryUsesThePreTriggerStatementSnapshot()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE data(id INTEGER PRIMARY KEY, value INTEGER)",
+                "CREATE TABLE trace(value TEXT)",
+                "CREATE TRIGGER data_before BEFORE UPDATE ON data "
+                    + "BEGIN INSERT INTO trace VALUES ('before'); END",
+                "INSERT INTO data VALUES (1, 100), (2, 200), (3, 300)",
+                "UPDATE data SET value = (SELECT sum(value) FROM data) WHERE id <= 2",
+            ],
+            "SELECT id, value FROM data ORDER BY id");
     }
 
     [Test]
@@ -551,6 +565,22 @@ public sealed class ManagedTriggerRowSemanticsTests
         crossDatabase.Should().Throw<EmbeddedSqlException>();
         Execute(connection, "INSERT INTO main.data VALUES (8)");
         ReadRows(connection, "SELECT id FROM aux.trace").Should().ContainSingle();
+    }
+
+    [Test]
+    public void PersistentTriggerAllowsExplicitReferencesToItsOwnSchema()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE data(id INTEGER PRIMARY KEY)");
+        Execute(
+            connection,
+            "CREATE TRIGGER data_after AFTER INSERT ON data "
+                + "BEGIN SELECT main.data.id FROM main.data; END");
+
+        Execute(connection, "INSERT INTO data VALUES (1)");
+        ReadRows(connection, "SELECT id FROM data").Should().ContainSingle()
+            .Which[0].Should().Be(SqlValue.Integer(1));
     }
 
     [Test]
@@ -1109,7 +1139,7 @@ public sealed class ManagedTriggerRowSemanticsTests
         AssertErrorAndStateMatchesSqlite(
             [
                 "PRAGMA recursive_triggers = ON",
-                "CREATE TABLE data(id INTEGER, computed INTEGER AS (abs(id)) STORED)",
+                "CREATE TABLE data(id INTEGER, computed INTEGER AS (abs(id)) VIRTUAL)",
                 "CREATE TRIGGER data_inserted AFTER INSERT ON data WHEN NEW.id < 2000 "
                     + "BEGIN INSERT INTO data(id) VALUES (NEW.id + 1); END",
                 "BEGIN",
@@ -1314,7 +1344,7 @@ public sealed class ManagedTriggerRowSemanticsTests
         AssertErrorAndStateMatchesSqlite(
             [
                 "PRAGMA recursive_triggers = ON",
-                "CREATE TABLE data(id INTEGER, seed INTEGER, computed INTEGER AS (seed) STORED, "
+                "CREATE TABLE data(id INTEGER, seed INTEGER, computed INTEGER AS (seed) VIRTUAL, "
                     + "UNIQUE(computed))",
                 "CREATE TRIGGER data_inserted AFTER INSERT ON data WHEN NEW.id < 2000 "
                     + "BEGIN INSERT INTO data(id, seed) VALUES (NEW.id + 1, NEW.seed + 1); END",
@@ -1422,7 +1452,7 @@ public sealed class ManagedTriggerRowSemanticsTests
                 "PRAGMA recursive_triggers = ON",
                 "CREATE TABLE trace(value TEXT)",
                 "CREATE TABLE row_data(id INTEGER PRIMARY KEY, seed INTEGER, "
-                    + "doubled INTEGER AS (seed * 2) STORED)",
+                    + "doubled INTEGER AS (seed * 2) VIRTUAL)",
                 "CREATE TRIGGER row_inserted AFTER INSERT ON row_data WHEN NEW.seed < 3 BEGIN "
                     + "INSERT INTO trace VALUES ('I:' || NEW.rowid || ':' || NEW.seed || ':' || NEW.doubled); "
                     + "INSERT INTO row_data(seed) VALUES (NEW.seed + 1); END",
@@ -1433,7 +1463,7 @@ public sealed class ManagedTriggerRowSemanticsTests
                 "INSERT INTO row_data(seed) VALUES (1)",
                 "UPDATE row_data SET seed = 3 WHERE id = 1",
                 "CREATE TABLE keyed_data(key TEXT PRIMARY KEY, seed INTEGER, "
-                    + "doubled INTEGER AS (seed * 2) STORED) WITHOUT ROWID",
+                    + "doubled INTEGER AS (seed * 2) VIRTUAL) WITHOUT ROWID",
                 "CREATE TRIGGER keyed_inserted AFTER INSERT ON keyed_data WHEN NEW.seed < 3 BEGIN "
                     + "INSERT INTO trace VALUES ('W:' || NEW.key || ':' || NEW.seed || ':' || NEW.doubled); "
                     + "INSERT INTO keyed_data(key, seed) VALUES (NEW.key || NEW.seed, NEW.seed + 1); END",
@@ -2686,6 +2716,56 @@ public sealed class ManagedTriggerRowSemanticsTests
             () => Execute(connection, "ALTER TABLE window_target DROP COLUMN removable"))!
             .Message.Should().Contain("error in trigger window_after after drop column");
         ReadRows(connection, "PRAGMA table_info(window_target)").Should().HaveCount(2);
+    }
+
+    [Test]
+    public void TriggerBodyUpsertDoUpdateSetMayReferenceNewColumns()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE balances(id INTEGER PRIMARY KEY, amount INTEGER)",
+                "CREATE TABLE transactions(id INTEGER PRIMARY KEY, account_id INTEGER, delta INTEGER)",
+                "INSERT INTO balances VALUES (1, 100)",
+                "CREATE TRIGGER apply_txn AFTER INSERT ON transactions BEGIN "
+                    + "INSERT INTO balances VALUES (NEW.account_id, NEW.delta) "
+                    + "ON CONFLICT(id) DO UPDATE SET amount = amount + NEW.delta; END",
+                "INSERT INTO transactions VALUES (1, 1, 50)",
+            ],
+            "SELECT * FROM balances");
+    }
+
+    [Test]
+    public void TriggerBodyUpsertDoUpdateWhereMayReferenceNewColumns()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE balances(id INTEGER PRIMARY KEY, amount INTEGER)",
+                "CREATE TABLE transactions(id INTEGER PRIMARY KEY, account_id INTEGER, delta INTEGER)",
+                "INSERT INTO balances VALUES (1, 100)",
+                "CREATE TRIGGER apply_txn AFTER INSERT ON transactions BEGIN "
+                    + "INSERT INTO balances VALUES (NEW.account_id, NEW.delta) "
+                    + "ON CONFLICT(id) DO UPDATE SET amount = amount + NEW.delta "
+                    + "WHERE NEW.delta > 0; END",
+                "INSERT INTO transactions VALUES (1, 1, 50)",
+            ],
+            "SELECT * FROM balances");
+    }
+
+    [Test]
+    public void TriggerBodyUpsertDoUpdateWhereFiltersOutNegativeDeltaLikeSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE balances(id INTEGER PRIMARY KEY, amount INTEGER)",
+                "CREATE TABLE transactions(id INTEGER PRIMARY KEY, account_id INTEGER, delta INTEGER)",
+                "INSERT INTO balances VALUES (1, 100)",
+                "CREATE TRIGGER apply_txn AFTER INSERT ON transactions BEGIN "
+                    + "INSERT INTO balances VALUES (NEW.account_id, NEW.delta) "
+                    + "ON CONFLICT(id) DO UPDATE SET amount = amount + NEW.delta "
+                    + "WHERE NEW.delta > 0; END",
+                "INSERT INTO transactions VALUES (1, 1, -50)",
+            ],
+            "SELECT * FROM balances");
     }
 
     private static void AssertMatchesSqlite(IReadOnlyList<string> setup, string query)

@@ -271,18 +271,41 @@ public sealed class ManagedAutoIncrementTests
 
         QueryManaged(
                 connection,
-                "SELECT sql, (SELECT count(*) FROM sqlite_sequence) "
-                + "FROM sqlite_schema WHERE name = 'sqlite_sequence'")
-            .Rows.Should().Equal(["T:CREATE TABLE sqlite_sequence(name,seq)\u001fI:0"]);
+                "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+            .Rows.Should().Equal(
+            [
+                "T:__turso_internal_seq___turso_internal_autoincrement_t",
+                "T:sqlite_sequence",
+                "T:t",
+            ]);
+        QueryManaged(
+                connection,
+                "SELECT value, is_called, start, inc, min, max, cycle "
+                + "FROM __turso_internal_seq___turso_internal_autoincrement_t")
+            .Rows.Should().Equal(["I:1\u001fI:0\u001fI:1\u001fI:1\u001fI:1\u001fI:9223372036854775807\u001fI:0"]);
         Execute(connection, "INSERT INTO t(removed) VALUES ('drop-me')");
         Execute(connection, "ALTER TABLE t DROP COLUMN removed");
         QueryManaged(connection, "SELECT name, seq FROM sqlite_sequence")
             .Rows.Should().Equal(["T:t\u001fI:1"]);
+        QueryManaged(
+                connection,
+                "SELECT value, is_called FROM __turso_internal_seq___turso_internal_autoincrement_t")
+            .Rows.Should().Equal(["I:1\u001fI:1"]);
         Execute(connection, "ALTER TABLE t RENAME TO renamed");
         QueryManaged(connection, "SELECT name, seq FROM sqlite_sequence")
             .Rows.Should().Equal(["T:renamed\u001fI:1"]);
+        QueryManaged(
+                connection,
+                "SELECT name FROM sqlite_schema "
+                + "WHERE name LIKE '__turso_internal_seq___turso_internal_autoincrement_%'")
+            .Rows.Should().Equal(["T:__turso_internal_seq___turso_internal_autoincrement_renamed"]);
         Execute(connection, "DROP TABLE renamed");
         QueryManaged(connection, "SELECT count(*) FROM sqlite_sequence")
+            .Rows.Should().Equal(["I:0"]);
+        QueryManaged(
+                connection,
+                "SELECT count(*) FROM sqlite_schema "
+                + "WHERE name LIKE '__turso_internal_seq___turso_internal_autoincrement_%'")
             .Rows.Should().Equal(["I:0"]);
 
         Assert.Throws<EmbeddedSqlException>(() => Execute(connection, "DROP TABLE sqlite_sequence"))!
@@ -296,6 +319,20 @@ public sealed class ManagedAutoIncrementTests
         Assert.Throws<EmbeddedSqlException>(
                 () => Execute(connection, "CREATE INDEX sequence_name ON sqlite_sequence(name)"))!
             .Message.Should().Be("table sqlite_sequence may not be indexed");
+    }
+
+    [Test]
+    public void SequenceBackingTableNamePreservesTheTableName()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE MiXeD(id INTEGER PRIMARY KEY AUTOINCREMENT)");
+
+        QueryManaged(
+                connection,
+                "SELECT name FROM sqlite_schema "
+                + "WHERE name LIKE '__turso_internal_seq___turso_internal_autoincrement_%'")
+            .Rows.Should().Equal(["T:__turso_internal_seq___turso_internal_autoincrement_MiXeD"]);
     }
 
     [Test]

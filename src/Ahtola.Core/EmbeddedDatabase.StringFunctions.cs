@@ -44,7 +44,8 @@ public sealed partial class EmbeddedDatabase
             return SqlValue.Null;
 
         var isBlob = arguments[0].Kind == SqlValueKind.Blob;
-        var length = isBlob ? arguments[0].AsBlob().Length : ToSqlText(arguments[0]).Length;
+        var text = isBlob ? null : ToSqlText(arguments[0]);
+        var length = isBlob ? arguments[0].AsBlob().Length : text!.EnumerateRunes().LongCount();
         var start = ToSqliteInteger(arguments[1]);
         var hasExplicitLength = arguments.Count == 3;
         var requested = hasExplicitLength ? ToSqliteInteger(arguments[2]) : length;
@@ -83,7 +84,18 @@ public sealed partial class EmbeddedDatabase
         if (isBlob)
             return SqlValue.Blob(arguments[0].AsBlob().Span.Slice((int)beginIndex, (int)take).ToArray());
 
-        return SqlValue.Text(ToSqlText(arguments[0]).Substring((int)beginIndex, (int)take));
+        var builder = new StringBuilder((int)take);
+        var runeIndex = 0L;
+        foreach (var rune in text!.EnumerateRunes())
+        {
+            if (runeIndex >= endIndex)
+                break;
+            if (runeIndex >= beginIndex)
+                builder.Append(rune.ToString());
+            runeIndex++;
+        }
+
+        return SqlValue.Text(builder.ToString());
     }
 
     private static SqlValue EvaluateReplace(IReadOnlyList<SqlValue> arguments)
@@ -98,6 +110,314 @@ public sealed partial class EmbeddedDatabase
             return SqlValue.Text(source);
 
         return SqlValue.Text(source.Replace(pattern, ToSqlText(arguments[2]), StringComparison.Ordinal));
+    }
+
+    private static SqlValue EvaluateStringReverse(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("string_reverse", arguments, 1);
+        if (arguments[0].Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+
+        // Turso reverses Rust chars, which are Unicode scalar values rather than UTF-8 bytes.
+        // Rune traversal is the corresponding .NET operation and keeps supplementary characters intact.
+        var source = ToSqlText(arguments[0]);
+        var builder = new StringBuilder(source.Length);
+        foreach (var rune in source.EnumerateRunes().Reverse())
+            builder.Append(rune.ToString());
+
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static SqlValue EvaluateSoundex(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("soundex", arguments, 1);
+        if (arguments[0].Kind != SqlValueKind.Text)
+            return SqlValue.Text("?000");
+
+        var source = arguments[0].AsText();
+        if (source.Length == 0 || source.Any(character => !IsAsciiLetter(character)))
+            return SqlValue.Text("?000");
+
+        Span<char> result = stackalloc char[4];
+        result[0] = char.ToUpperInvariant(source[0]);
+        var resultLength = 1;
+        var previousCode = GetSoundexCode(source[0]);
+        foreach (var character in source.AsSpan(1))
+        {
+            if (resultLength == result.Length)
+                break;
+
+            var lowercase = char.ToLowerInvariant(character);
+            if (lowercase is 'h' or 'w')
+                continue;
+
+            var code = GetSoundexCode(lowercase);
+            if (code is not null && code != previousCode)
+            {
+                result[resultLength++] = code.Value;
+                previousCode = code;
+            }
+            else if (code is null)
+            {
+                previousCode = null;
+            }
+        }
+
+        while (resultLength < result.Length)
+            result[resultLength++] = '0';
+        return SqlValue.Text(new string(result));
+    }
+
+    private static bool IsAsciiLetter(char character)
+        => character is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
+
+    private static char? GetSoundexCode(char character)
+        => char.ToLowerInvariant(character) switch
+        {
+            'b' or 'f' or 'p' or 'v' => '1',
+            'c' or 'g' or 'j' or 'k' or 'q' or 's' or 'x' or 'z' => '2',
+            'd' or 't' => '3',
+            'l' => '4',
+            'm' or 'n' => '5',
+            'r' => '6',
+            _ => null,
+        };
+
+    private static SqlValue EvaluateUnistr(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("unistr", arguments, 1);
+        if (arguments[0].Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+
+        var source = ToSqlText(arguments[0]);
+        var builder = new StringBuilder(source.Length);
+        for (var index = 0; index < source.Length;)
+        {
+            if (source[index] != '\\')
+            {
+                builder.Append(source[index++]);
+                continue;
+            }
+
+            if (index + 1 >= source.Length)
+                throw new EmbeddedSqlException("invalid Unicode escape");
+
+            var escape = source[index + 1];
+            if (escape == '\\')
+            {
+                builder.Append('\\');
+                index += 2;
+                continue;
+            }
+
+            var digits = escape switch
+            {
+                '+' => 6,
+                'u' => 4,
+                'U' => 8,
+                _ when IsAsciiHexDigit(escape) => 4,
+                _ => 0,
+            };
+            if (digits == 0
+                || !TryParseUnicodeEscape(
+                    source.AsSpan(index + (escape is '+' or 'u' or 'U' ? 2 : 1)),
+                    digits,
+                    out var codePoint)
+                || !Rune.TryCreate(codePoint, out var rune))
+            {
+                throw new EmbeddedSqlException("invalid Unicode escape");
+            }
+
+            builder.Append(rune.ToString());
+            index += 1 + (escape is '+' or 'u' or 'U' ? 1 : 0) + digits;
+        }
+
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static SqlValue EvaluateUnistrQuote(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("unistr_quote", arguments, 1);
+        if (arguments[0].Kind != SqlValueKind.Text)
+            return EvaluateQuote(arguments);
+
+        var source = arguments[0].AsText();
+        var terminator = source.IndexOf('\0');
+        var prefix = terminator >= 0 ? source[..terminator] : source;
+        if (!prefix.Any(character => character is >= '\x01' and <= '\x1F'))
+            return EvaluateQuote([SqlValue.Text(prefix)]);
+
+        var builder = new StringBuilder(prefix.Length + "unistr('')".Length);
+        builder.Append("unistr('");
+        foreach (var character in prefix)
+        {
+            switch (character)
+            {
+                case >= '\x01' and <= '\x1F':
+                    builder.Append("\\u00");
+                    builder.Append(((int)character).ToString("x2", CultureInfo.InvariantCulture));
+                    break;
+                case '\\':
+                    builder.Append("\\\\");
+                    break;
+                case '\'':
+                    builder.Append("''");
+                    break;
+                default:
+                    builder.Append(character);
+                    break;
+            }
+        }
+
+        builder.Append("')");
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static bool TryParseUnicodeEscape(ReadOnlySpan<char> source, int length, out int codePoint)
+    {
+        if (source.Length < length)
+        {
+            codePoint = 0;
+            return false;
+        }
+
+        uint result = 0;
+        for (var index = 0; index < length; index++)
+        {
+            var digit = source[index] switch
+            {
+                >= '0' and <= '9' => source[index] - '0',
+                >= 'a' and <= 'f' => source[index] - 'a' + 10,
+                >= 'A' and <= 'F' => source[index] - 'A' + 10,
+                _ => -1,
+            };
+            if (digit < 0)
+            {
+                codePoint = 0;
+                return false;
+            }
+
+            result = (result << 4) | (uint)digit;
+        }
+
+        if (result > 0x10FFFF)
+        {
+            codePoint = 0;
+            return false;
+        }
+
+        codePoint = (int)result;
+        return true;
+    }
+
+    private static bool IsAsciiHexDigit(char character)
+        => character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
+
+    private static SqlValue EvaluateRepeat(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("repeat", arguments, 2);
+        if (HasNullArgument(arguments))
+            return SqlValue.Null;
+        if (!TryGetTursoStringFunctionLength(arguments[1], out var count))
+            return SqlValue.Null;
+        if (count <= 0)
+            return SqlValue.Text(string.Empty);
+
+        var source = ToSqlText(arguments[0]);
+        if (source.Length == 0)
+            return SqlValue.Text(string.Empty);
+        if (count > int.MaxValue / source.Length)
+            throw new EmbeddedSqlException("string or blob too big");
+
+        var builder = new StringBuilder((int)(source.Length * count));
+        for (var index = 0L; index < count; index++)
+            builder.Append(source);
+
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static SqlValue EvaluatePad(
+        IReadOnlyList<SqlValue> arguments,
+        string functionName,
+        bool padLeft)
+    {
+        RequireArgumentCount(functionName, arguments, 2, 3);
+        if (HasNullArgument(arguments))
+            return SqlValue.Null;
+        if (!TryGetTursoStringFunctionLength(arguments[1], out var requestedLength))
+            return SqlValue.Null;
+        if (requestedLength <= 0)
+            return SqlValue.Text(string.Empty);
+        if (requestedLength > int.MaxValue)
+            throw new EmbeddedSqlException("string or blob too big");
+
+        var targetLength = (int)requestedLength;
+        var source = ToSqlText(arguments[0]);
+        var sourceRunes = source.EnumerateRunes().ToArray();
+        if (sourceRunes.Length >= targetLength)
+            return SqlValue.Text(string.Concat(sourceRunes.Take(targetLength)));
+
+        var fill = arguments.Count == 3 ? ToSqlText(arguments[2]) : " ";
+        var fillRunes = fill.EnumerateRunes().ToArray();
+        if (fillRunes.Length == 0)
+            return SqlValue.Text(source);
+
+        var paddingLength = targetLength - sourceRunes.Length;
+        var builder = new StringBuilder(GetPaddedTextCapacity(source, fillRunes, paddingLength));
+        if (padLeft)
+            AppendCyclicRunes(builder, fillRunes, paddingLength);
+        builder.Append(source);
+        if (!padLeft)
+            AppendCyclicRunes(builder, fillRunes, paddingLength);
+
+        return SqlValue.Text(builder.ToString());
+    }
+
+    private static bool TryGetTursoStringFunctionLength(SqlValue value, out long length)
+    {
+        switch (value.Kind)
+        {
+            case SqlValueKind.Integer:
+                length = value.AsInteger();
+                return true;
+            case SqlValueKind.Real:
+                length = ClampRealToInteger(value.AsReal());
+                return true;
+            case SqlValueKind.Text:
+                if (long.TryParse(
+                    value.AsText(),
+                    NumberStyles.AllowLeadingSign,
+                    CultureInfo.InvariantCulture,
+                    out length))
+                {
+                    return true;
+                }
+
+                length = 0;
+                return true;
+            default:
+                length = 0;
+                return false;
+        }
+    }
+
+    private static int GetPaddedTextCapacity(string source, IReadOnlyList<Rune> fill, int paddingLength)
+    {
+        var completeCycles = paddingLength / fill.Count;
+        var remainder = paddingLength % fill.Count;
+        var fillCodeUnits = fill.Sum(rune => rune.Utf16SequenceLength);
+        var remainderCodeUnits = fill.Take(remainder).Sum(rune => rune.Utf16SequenceLength);
+        var available = int.MaxValue - source.Length - remainderCodeUnits;
+        if (available < 0 || completeCycles > available / fillCodeUnits)
+            throw new EmbeddedSqlException("string or blob too big");
+
+        return source.Length + (completeCycles * fillCodeUnits) + remainderCodeUnits;
+    }
+
+    private static void AppendCyclicRunes(StringBuilder builder, IReadOnlyList<Rune> runes, int count)
+    {
+        for (var index = 0; index < count; index++)
+            builder.Append(runes[index % runes.Count].ToString());
     }
 
     private static SqlValue EvaluateTrim(IReadOnlyList<SqlValue> arguments, string functionName, bool trimStart, bool trimEnd)
@@ -158,10 +478,20 @@ public sealed partial class EmbeddedDatabase
         var builder = new StringBuilder(arguments.Count);
         foreach (var argument in arguments)
         {
-            // SQLite reads every argument with sqlite3_value_int64, which yields 0 for NULL and
-            // for text that is not a number, so char(NULL) is a NUL character and not a skipped
-            // argument.
-            var codePoint = argument.Kind == SqlValueKind.Null ? 0 : ToSqliteInteger(argument);
+            // Turso only converts INTEGER arguments to code points. NULL remains a NUL character,
+            // while REAL, TEXT, and BLOB arguments do not contribute a character.
+            long codePoint;
+            switch (argument.Kind)
+            {
+                case SqlValueKind.Integer:
+                    codePoint = argument.AsInteger();
+                    break;
+                case SqlValueKind.Null:
+                    codePoint = 0;
+                    break;
+                default:
+                    continue;
+            }
 
             // SQLite substitutes U+FFFD for values outside the Unicode range and
             // for surrogate code points, which cannot stand alone.

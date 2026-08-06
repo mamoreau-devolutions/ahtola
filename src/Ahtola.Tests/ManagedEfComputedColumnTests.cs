@@ -7,7 +7,7 @@ namespace Ahtola.Tests;
 public class ManagedEfComputedColumnTests
 {
     [Test]
-    public async Task ManagedProviderPersistsAndRefreshesStoredComputedColumns()
+    public async Task ManagedProviderPersistsAndRefreshesVirtualComputedColumns()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
         await connection.OpenAsync();
@@ -19,7 +19,7 @@ public class ManagedEfComputedColumnTests
 
         var createScript = context.Database.GenerateCreateScript();
         createScript.Should().Contain("AS (length(\"Name\"))");
-        createScript.Should().Contain("STORED");
+        createScript.Should().NotContain("STORED");
         (await context.Database.EnsureCreatedAsync()).Should().BeTrue();
 
         var item = new ComputedColumnItem { Name = "Ada" };
@@ -43,7 +43,7 @@ public class ManagedEfComputedColumnTests
         protected override void OnModelCreating(ModelBuilder modelBuilder)
             => modelBuilder.Entity<ComputedColumnItem>()
                 .Property(item => item.NameLength)
-                .HasComputedColumnSql("length(\"Name\")", stored: true);
+                .HasComputedColumnSql("length(\"Name\")", stored: false);
     }
 
     private sealed class ComputedColumnItem

@@ -436,6 +436,35 @@ public sealed class ManagedInsertOrFullSemanticsTests
         AssertQueriesMatch(managed, sqlite, "SELECT last_insert_rowid()");
     }
 
+    [Test]
+    public void OrdinaryInsertReturningObservesEachInsertedRowid()
+    {
+        using var managedDatabase = new EmbeddedDatabase();
+        using var managed = managedDatabase.Connect();
+        using var sqlite = OpenSqlite();
+        ExecuteBoth(
+            managed,
+            sqlite,
+            """
+            CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT);
+            CREATE TABLE auto_items(id INTEGER PRIMARY KEY AUTOINCREMENT);
+            INSERT INTO items VALUES(10, 'seed');
+            """);
+
+        AssertSameOutcome(
+            managed,
+            sqlite,
+            """
+            INSERT INTO items VALUES(20, 'two'), (30, 'three')
+            RETURNING id, last_insert_rowid()
+            """);
+        AssertSameOutcome(
+            managed,
+            sqlite,
+            "INSERT INTO auto_items DEFAULT VALUES RETURNING id, last_insert_rowid()");
+        AssertQueriesMatch(managed, sqlite, "SELECT last_insert_rowid()");
+    }
+
     [TestCaseSource(nameof(ConstraintAlgorithmCases))]
     public void ConstraintAlgorithmsMatchSqlite(string algorithm, string constraint)
     {
@@ -681,7 +710,7 @@ public sealed class ManagedInsertOrFullSemanticsTests
                 id INTEGER PRIMARY KEY,
                 left_value INTEGER DEFAULT 1,
                 right_value INTEGER DEFAULT 2,
-                pair TEXT AS (left_value || ':' || right_value) STORED UNIQUE,
+                pair TEXT AS (left_value || ':' || right_value) VIRTUAL UNIQUE,
                 CHECK ((left_value, right_value) <> (0, 0))
             );
             INSERT INTO items DEFAULT VALUES;
@@ -884,7 +913,7 @@ public sealed class ManagedInsertOrFullSemanticsTests
                 tenant TEXT,
                 id INTEGER,
                 value TEXT,
-                normalized TEXT AS (lower(value)) STORED,
+                normalized TEXT AS (lower(value)) VIRTUAL,
                 active INTEGER,
                 PRIMARY KEY(tenant, id)
             ) WITHOUT ROWID;

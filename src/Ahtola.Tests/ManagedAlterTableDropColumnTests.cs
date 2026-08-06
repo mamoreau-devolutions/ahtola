@@ -25,7 +25,7 @@ public sealed class ManagedAlterTableDropColumnTests
                 keep TEXT COLLATE NOCASE CONSTRAINT keep_default DEFAULT 'fallback',
                 removed BLOB,
                 score INTEGER CONSTRAINT positive_score CHECK(score > 0),
-                doubled INTEGER GENERATED ALWAYS AS (score * 2) STORED,
+                doubled INTEGER GENERATED ALWAYS AS (score * 2) VIRTUAL,
                 CONSTRAINT unique_keep UNIQUE(keep)
             );
             CREATE INDEX data_score_desc ON data(score COLLATE NOCASE DESC);
@@ -69,7 +69,7 @@ public sealed class ManagedAlterTableDropColumnTests
                 "SELECT sql FROM sqlite_schema WHERE type='table' AND name='data';")
             .Should().Be(Scalar<string>(sqlite, "SELECT sql FROM sqlite_schema WHERE type='table' AND name='data';"))
             .And.Contain("keep TEXT COLLATE NOCASE CONSTRAINT keep_default DEFAULT 'fallback'")
-            .And.Contain("doubled INTEGER GENERATED ALWAYS AS (score * 2) STORED")
+            .And.Contain("doubled INTEGER GENERATED ALWAYS AS (score * 2) VIRTUAL")
             .And.Contain("CONSTRAINT unique_keep UNIQUE(keep)")
             .And.NotContain("removed");
         Scalar<string>(
@@ -152,6 +152,41 @@ public sealed class ManagedAlterTableDropColumnTests
         }
     }
 
+    [Test]
+    public void DropColumnPreservesRetainedDeterministicDateExpressionIndex()
+    {
+        using var managed = OpenManagedMemory();
+        using var sqlite = OpenMicrosoftMemory();
+        const string setup = """
+            CREATE TABLE t(a INTEGER, b INTEGER, c TEXT, d INTEGER);
+            CREATE INDEX i_expr ON t(a, date(c), c);
+            INSERT INTO t VALUES(1, 2, '2026-01-01', 3);
+            """;
+
+        Execute(managed, setup);
+        Execute(sqlite, setup);
+        Execute(managed, "ALTER TABLE t DROP COLUMN b; UPDATE t SET a = 5 WHERE c = '2026-01-01';");
+        Execute(sqlite, "ALTER TABLE t DROP COLUMN b; UPDATE t SET a = 5 WHERE c = '2026-01-01';");
+
+        ReadRows(managed, "SELECT a, c, d FROM t;")
+            .Should()
+            .Equal(ReadRows(sqlite, "SELECT a, c, d FROM t;"));
+    }
+
+    [Test]
+    public void AddColumnRejectsUnknownCollation()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(c1 INTEGER);");
+
+        Assert.Throws<EmbeddedSqlException>(
+                () => Execute(connection, "ALTER TABLE t ADD COLUMN c2 INTEGER COLLATE compile_options;"))!
+            .Message
+            .Should()
+            .Be("no such collation sequence: compile_options");
+    }
+
     [TestCase(
         "CREATE TABLE t(a);",
         "a",
@@ -189,7 +224,7 @@ public sealed class ManagedAlterTableDropColumnTests
         "a",
         "error in table t")]
     [TestCase(
-        "CREATE TABLE t(a, b GENERATED ALWAYS AS (a + 1) STORED, c);",
+        "CREATE TABLE t(a, b GENERATED ALWAYS AS (a + 1) VIRTUAL, c);",
         "a",
         "error in table t")]
     [TestCase(

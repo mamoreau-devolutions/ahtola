@@ -59,6 +59,46 @@ public sealed class ManagedBoundedUpsertRuntimeSliceTests
     }
 
     [Test]
+    public void UpsertFromSelectAndCteUsesTheSameConflictResolutionAsValues()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT);");
+        Execute(connection, "CREATE TABLE source(id INTEGER, value TEXT);");
+        Execute(connection, "INSERT INTO items VALUES (1, 'old');");
+        Execute(connection, "INSERT INTO source VALUES (1, 'updated'), (2, 'inserted');");
+
+        AssertRows(
+            ReadRows(
+                connection,
+                """
+                INSERT INTO items SELECT id, value FROM source WHERE true
+                ON CONFLICT(id) DO UPDATE SET value = excluded.value
+                RETURNING id, value;
+                """),
+            [SqlValue.Integer(1), SqlValue.Text("updated")],
+            [SqlValue.Integer(2), SqlValue.Text("inserted")]);
+
+        AssertRows(
+            ReadRows(
+                connection,
+                """
+                WITH source_rows(id, value) AS (VALUES(1, 'cte-update'), (3, 'cte-insert'))
+                INSERT INTO items SELECT id, value FROM source_rows WHERE true
+                ON CONFLICT(id) DO UPDATE SET value = excluded.value
+                RETURNING id, value;
+                """),
+            [SqlValue.Integer(1), SqlValue.Text("cte-update")],
+            [SqlValue.Integer(3), SqlValue.Text("cte-insert")]);
+
+        AssertRows(
+            ReadRows(connection, "SELECT id, value FROM items ORDER BY id;"),
+            [SqlValue.Integer(1), SqlValue.Text("cte-update")],
+            [SqlValue.Integer(2), SqlValue.Text("inserted")],
+            [SqlValue.Integer(3), SqlValue.Text("cte-insert")]);
+    }
+
+    [Test]
     public void UpsertUniqueConflictHonorsNoCaseAndNullsRemainDistinct()
     {
         using var database = new EmbeddedDatabase();

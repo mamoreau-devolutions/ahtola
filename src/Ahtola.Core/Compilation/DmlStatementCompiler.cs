@@ -209,6 +209,39 @@ public static class DmlStatementCompiler
         return new CompiledDml(program, [writeTarget]);
     }
 
+    /// <summary>
+    /// Builds a write loop with instructions immediately before and after each mutation. Foreign-key action
+    /// lowering uses the pre-mutation block to capture the old parent key and the post-mutation block to
+    /// invoke its child action subprogram while the parent deletion is already visible.
+    /// </summary>
+    internal static VdbeProgram BuildProgramWithMutationPrograms(
+        DmlKind kind,
+        string tableName,
+        int columnCount,
+        DmlRowFilter? filter,
+        IReadOnlyList<VdbeInstruction> beforeMutation,
+        IReadOnlyList<VdbeInstruction> afterMutation,
+        int registerCount,
+        int parameterSlotCount = 0)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(beforeMutation);
+        ArgumentNullException.ThrowIfNull(afterMutation);
+        if (kind == DmlKind.Insert && filter is not null)
+            throw new StatementCompilationException("INSERT programs do not filter rows.");
+
+        return BuildProgram(
+            kind,
+            tableName,
+            columnCount,
+            filter,
+            Array.Empty<DmlReturningExpression>(),
+            beforeMutation,
+            afterMutation,
+            registerCount,
+            parameterSlotCount);
+    }
+
     internal static CompiledDml CompileWithFilter(
         DmlKind kind,
         string tableName,
@@ -242,6 +275,27 @@ public static class DmlStatementCompiler
         int columnCount,
         DmlRowFilter? filter,
         IReadOnlyList<DmlReturningExpression> returning)
+        => BuildProgram(
+            kind,
+            tableName,
+            columnCount,
+            filter,
+            returning,
+            Array.Empty<VdbeInstruction>(),
+            Array.Empty<VdbeInstruction>(),
+            registerCount: 0,
+            parameterSlotCount: 0);
+
+    private static VdbeProgram BuildProgram(
+        DmlKind kind,
+        string tableName,
+        int columnCount,
+        DmlRowFilter? filter,
+        IReadOnlyList<DmlReturningExpression> returning,
+        IReadOnlyList<VdbeInstruction> beforeMutation,
+        IReadOnlyList<VdbeInstruction> afterMutation,
+        int registerCount,
+        int parameterSlotCount)
     {
         var cursor = new Cursor(0);
         var hasFilter = filter is not null;
@@ -251,7 +305,6 @@ public static class DmlStatementCompiler
         // jump targets can be derived from its measured length. An empty RETURNING clause emits no block
         // and needs no registers.
         var projectionBlock = new List<VdbeInstruction>();
-        var registerCount = 0;
         if (hasReturning)
         {
             var allocator = new RegisterAllocator(returning.Count);
@@ -264,8 +317,8 @@ public static class DmlStatementCompiler
 
         var loopStart = 2;
         var filterCount = hasFilter ? 1 : 0;
-        var mutateAddr = loopStart + filterCount;
-        var nextAddr = mutateAddr + 1 + projectionBlock.Count;
+        var mutateAddr = loopStart + filterCount + beforeMutation.Count;
+        var nextAddr = mutateAddr + 1 + afterMutation.Count + projectionBlock.Count;
         var commitAddr = nextAddr + 1;
 
         var instructions = new List<VdbeInstruction>(commitAddr + 3)
@@ -295,6 +348,7 @@ public static class DmlStatementCompiler
             throw new StatementCompilationException("DML filter has no predicate.");
         }
 
+        instructions.AddRange(beforeMutation);
         instructions.Add(kind switch
         {
             DmlKind.Insert => new InsertInstruction(cursor),
@@ -303,6 +357,7 @@ public static class DmlStatementCompiler
             _ => throw new StatementCompilationException($"Unsupported DML kind {kind}."),
         });
 
+        instructions.AddRange(afterMutation);
         instructions.AddRange(projectionBlock);
 
         instructions.Add(new NextInstruction(cursor, new ProgramCounter(loopStart)));
@@ -310,7 +365,11 @@ public static class DmlStatementCompiler
         instructions.Add(new CloseCursorInstruction(cursor));
         instructions.Add(new HaltInstruction());
 
-        return new VdbeProgram(registerCount, cursorCount: 1, instructions);
+        return new VdbeProgram(
+            registerCount,
+            cursorCount: 1,
+            instructions,
+            parameterSlotCount: parameterSlotCount);
     }
 
     private static VdbeProgram BuildTwoPhaseProgram(

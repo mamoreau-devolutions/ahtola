@@ -38,8 +38,11 @@ public sealed class ManagedCoreParameterContractRegressionTests
         statement.GetValue(0).AsInteger().Should().Be(7);
         statement.Reset();
 
-        Assert.Throws<EmbeddedSqlException>(() => statement.Step())!
-            .Message.Should().Be("Missing value for parameter ?1.");
+        statement.Step().Should().Be(StatementStepResult.Row);
+        statement.GetValue(0).Kind.Should().Be(SqlValueKind.Null);
+        statement.GetValue(1).Kind.Should().Be(SqlValueKind.Null);
+        statement.GetValue(2).Kind.Should().Be(SqlValueKind.Null);
+        statement.Reset();
 
         statement.Bind(1, SqlValue.Integer(8));
         statement.Bind(2, SqlValue.Text("second"));

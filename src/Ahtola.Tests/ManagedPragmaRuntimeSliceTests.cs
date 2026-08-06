@@ -346,7 +346,9 @@ public sealed class ManagedPragmaRuntimeSliceTests
             tempTableList.GetValue(1).Should().Be(SqlValue.Text("sqlite_temp_schema"));
         }
 
-        ReadValue(connection, "PRAGMA temp.journal_mode;").Should().Be(SqlValue.Text("memory"));
+        ReadValue(connection, "PRAGMA temp.journal_mode;").Should().Be(SqlValue.Text("wal"));
+        ReadValue(connection, "PRAGMA temp.journal_mode = MVCC;").Should().Be(SqlValue.Text("wal"));
+        ReadValue(connection, "PRAGMA temp.journal_mode;").Should().Be(SqlValue.Text("wal"));
         using var unknownSchema = connection.Prepare("PRAGMA missing.page_count;");
         Assert.Throws<EmbeddedSqlException>(() => unknownSchema.Step())!
             .Message.Should().Be("no such database: missing");

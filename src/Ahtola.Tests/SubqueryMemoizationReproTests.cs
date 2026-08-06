@@ -366,11 +366,46 @@ public sealed class SubqueryMemoizationReproTests
             "a single execution of the Northwind-scale repro must be bounded (the EF stall was the per-row amplification)");
     }
 
+    [Test]
+    public void CorrelatedExistsInEmptyAggregateUsesNullOuterRow()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t6(id);");
+
+        ReadRow(
+            connection,
+            "SELECT EXISTS (SELECT 1 WHERE t6.id = 1), COUNT(*) FROM t6;")
+            .Should()
+            .Equal(SqlValue.Integer(0), SqlValue.Integer(0));
+
+        ReadRow(connection, "SELECT rowid, t6.rowid, COUNT(*) FROM t6;")
+            .Should()
+            .Equal(SqlValue.Null, SqlValue.Null, SqlValue.Integer(0));
+
+        Execute(connection, "CREATE TABLE t14(a INTEGER);");
+        Execute(connection, "CREATE TABLE t14_sub(b INTEGER);");
+        Execute(connection, "INSERT INTO t14_sub VALUES (1);");
+
+        ReadRow(
+            connection,
+            "SELECT EXISTS (SELECT 1 FROM t14_sub WHERE b = t14.a), COUNT(*) FROM t14;")
+            .Should()
+            .Equal(SqlValue.Integer(0), SqlValue.Integer(0));
+    }
+
     private static SqlValue ReadScalar(EmbeddedConnection connection, string sql)
     {
         using var statement = connection.Prepare(sql);
         statement.Step().Should().Be(StatementStepResult.Row);
         return statement.GetValue(0);
+    }
+
+    private static SqlValue[] ReadRow(EmbeddedConnection connection, string sql)
+    {
+        using var statement = connection.Prepare(sql);
+        statement.Step().Should().Be(StatementStepResult.Row);
+        return Enumerable.Range(0, statement.GetColumnCount()).Select(statement.GetValue).ToArray();
     }
 
     private static void Execute(EmbeddedConnection connection, string sql)

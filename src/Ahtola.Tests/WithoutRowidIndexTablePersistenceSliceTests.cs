@@ -177,7 +177,7 @@ public sealed class WithoutRowidIndexTablePersistenceSliceTests
                         sequence INTEGER,
                         tag TEXT COLLATE RTRIM,
                         payload TEXT,
-                        doubled INTEGER GENERATED ALWAYS AS (sequence * 2) STORED,
+                        doubled INTEGER GENERATED ALWAYS AS (sequence * 2) VIRTUAL,
                         shifted INTEGER GENERATED ALWAYS AS (doubled + 1) VIRTUAL,
                         PRIMARY KEY(tenant COLLATE NOCASE, sequence DESC),
                         UNIQUE(tag)

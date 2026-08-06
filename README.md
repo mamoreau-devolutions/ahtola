@@ -91,8 +91,9 @@ Treat Ahtola as SQLite-*compatible*, not a full SQLite replacement:
   heap; nothing spills to disk. Prefer modest databases and explicit transactions
   for writes (managed writes are slower than native SQLite and the gap grows with
   table size).
-- **Planner** — no cost-based optimizer, join reordering, or `ANALYZE` stats.
-  First usable index by name wins. Prefer `ORDER BY` when order matters
+- **Planner** — no cost-based optimizer or join reordering. `ANALYZE` creates
+  and persists `sqlite_stat1` statistics, but the planner does not yet consume
+  them; the first usable index by name wins. Prefer `ORDER BY` when order matters
   (`GROUP BY` is first-encounter order).
 - **File-backed platforms** — Windows and 64-bit Linux only today. In-memory
   works everywhere; macOS / 32-bit Linux physical opens throw
@@ -107,8 +108,8 @@ Treat Ahtola as SQLite-*compatible*, not a full SQLite replacement:
   can read a DB still owned by native SQLite/Turso (e.g. winget `index.db`) without
   taking ownership.
 - **Not implemented** — virtual tables / FTS / R-Tree, loadable extensions, raw
-  `sqlite3*` handles (`Handle` is null), MVCC, `BEGIN CONCURRENT`, `ANALYZE`,
-  AEGIS encryption ciphers.
+  `sqlite3*` handles (`Handle` is null), MVCC, `BEGIN CONCURRENT`, AEGIS
+  encryption ciphers.
 - **Native / Sync companions** — not shipped. Connection-string paths that need
   them fail closed. OS P/Invoke in the pager for locks/WAL is intentional engine
   code, not a Rust SDK binding.

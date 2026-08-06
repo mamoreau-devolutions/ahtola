@@ -231,6 +231,8 @@ public enum VdbeOpcode
     RowCount = 71,
     Last = 72,
     Prev = 73,
+    RowSetTest = 74,
+    Program = 75,
 }
 
 /// <summary>
@@ -986,6 +988,13 @@ public sealed class VdbeWriteTarget
     /// <summary>Marks the scan row at a position for deletion (DELETE).</summary>
     public Action<int>? DeleteRow { get; init; }
 
+    /// <summary>
+    /// Deletes the scan row at a position and returns whether it still existed. This is used by a
+    /// snapshot-scanning cascade action, where an earlier recursive action may already have removed a row
+    /// that was present when the current action began.
+    /// </summary>
+    public Func<int, bool>? TryDeleteRow { get; init; }
+
     /// <summary>Builds and records the new row for a position, returning the values
     /// a following <c>Column</c>/<c>RowId</c> should observe (INSERT/UPDATE).</summary>
     public Func<int, VdbeRowMutation>? MutateRow { get; init; }
@@ -994,6 +1003,141 @@ public sealed class VdbeWriteTarget
     /// constraints, returning the last inserted rowid (INSERT) or
     /// <see langword="null"/> (UPDATE/DELETE).</summary>
     public required Func<long?> Commit { get; init; }
+}
+
+/// <summary>
+/// The compiled program and fixed runtime bindings invoked by a <see cref="ProgramInstruction"/>.
+/// Parameters are supplied by the caller instruction from its parent register file for each invocation.
+/// </summary>
+public sealed class VdbeSubprogram
+{
+    private readonly object _syncRoot = new();
+    private readonly Func<VdbeParameterBinding?, IReadOnlyList<VdbeWriteTarget?>>? _dynamicWriteTargets;
+    private ReadOnlyCollection<VdbeCursorSource?>? _cursorSources;
+    private ReadOnlyCollection<VdbeWriteTarget?>? _writeTargets;
+    private VdbeProgram? _program;
+
+    public VdbeSubprogram(
+        VdbeProgram program,
+        IEnumerable<VdbeCursorSource?>? cursorSources = null,
+        IEnumerable<VdbeWriteTarget?>? writeTargets = null)
+    {
+        ArgumentNullException.ThrowIfNull(program);
+        ParameterSlotCount = program.ParameterSlotCount;
+        Resolve(program, cursorSources, writeTargets);
+    }
+
+    private VdbeSubprogram(int parameterSlotCount)
+    {
+        if (parameterSlotCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(parameterSlotCount));
+
+        ParameterSlotCount = parameterSlotCount;
+    }
+
+    private VdbeSubprogram(
+        int parameterSlotCount,
+        Func<VdbeParameterBinding?, IReadOnlyList<VdbeWriteTarget?>> dynamicWriteTargets)
+        : this(parameterSlotCount)
+    {
+        _dynamicWriteTargets = dynamicWriteTargets
+            ?? throw new ArgumentNullException(nameof(dynamicWriteTargets));
+    }
+
+    /// <summary>
+    /// Creates a subprogram reference that can be resolved once after its body has been built. This is
+    /// required when a foreign-key action recursively invokes the subprogram currently being compiled.
+    /// </summary>
+    public static VdbeSubprogram CreateDeferred(int parameterSlotCount) => new(parameterSlotCount);
+
+    /// <summary>
+    /// Creates a deferred action program whose write targets are rebuilt from its bound values for every
+    /// invocation. Foreign-key cascade actions need this because each recursive call scans the live child
+    /// rows matching a different parent key.
+    /// </summary>
+    internal static VdbeSubprogram CreateDeferred(
+        int parameterSlotCount,
+        Func<VdbeParameterBinding?, IReadOnlyList<VdbeWriteTarget?>> dynamicWriteTargets)
+        => new(parameterSlotCount, dynamicWriteTargets);
+
+    /// <summary>
+    /// Resolves a deferred subprogram exactly once. The program's parameter-slot count must match the
+    /// deferred reference's declared count so every <see cref="ProgramInstruction"/> remains valid before
+    /// the recursive body is available.
+    /// </summary>
+    public void Resolve(
+        VdbeProgram program,
+        IEnumerable<VdbeCursorSource?>? cursorSources = null,
+        IEnumerable<VdbeWriteTarget?>? writeTargets = null)
+    {
+        ArgumentNullException.ThrowIfNull(program);
+        if (program.ParameterSlotCount != ParameterSlotCount)
+        {
+            throw new ArgumentException(
+                $"Expected a subprogram with {ParameterSlotCount} parameter slot(s) but received {program.ParameterSlotCount}.",
+                nameof(program));
+        }
+
+        var sources = cursorSources is null ? null : Array.AsReadOnly(cursorSources.ToArray());
+        if (sources is not null && sources.Count != program.CursorCount)
+        {
+            throw new ArgumentException(
+                $"Expected {program.CursorCount} cursor sources but received {sources.Count}.",
+                nameof(cursorSources));
+        }
+
+        var targets = writeTargets is null ? null : Array.AsReadOnly(writeTargets.ToArray());
+        if (targets is not null && targets.Count != program.CursorCount)
+        {
+            throw new ArgumentException(
+                $"Expected {program.CursorCount} write targets but received {targets.Count}.",
+                nameof(writeTargets));
+        }
+
+        lock (_syncRoot)
+        {
+            if (_program is not null)
+            {
+                throw new InvalidOperationException(
+                    "A VDBE subprogram can only be resolved once.");
+            }
+
+            _cursorSources = sources;
+            _writeTargets = targets;
+            _program = program;
+        }
+    }
+
+    public int ParameterSlotCount { get; }
+
+    public VdbeProgram Program
+    {
+        get
+        {
+            lock (_syncRoot)
+            {
+                return _program ?? throw new InvalidOperationException(
+                    "The recursive VDBE subprogram was not resolved before execution.");
+            }
+        }
+    }
+
+    public IReadOnlyList<VdbeCursorSource?>? CursorSources => _cursorSources;
+
+    public IReadOnlyList<VdbeWriteTarget?>? WriteTargets => _writeTargets;
+
+    internal bool RequiresFreshRuntime => _dynamicWriteTargets is not null;
+
+    internal ResumableStatement CreateRuntime(VdbeParameterBinding? parameterBinding)
+    {
+        lock (_syncRoot)
+        {
+            var program = _program ?? throw new InvalidOperationException(
+                "The recursive VDBE subprogram was not resolved before execution.");
+            var writeTargets = _dynamicWriteTargets?.Invoke(parameterBinding) ?? _writeTargets;
+            return new ResumableStatement(program, _cursorSources, writeTargets, parameterBinding);
+        }
+    }
 }
 
 public abstract record VdbeInstruction
@@ -1329,6 +1473,33 @@ public sealed record UpdateInstruction(Cursor Cursor) : VdbeInstruction
     public override VdbeOpcode Opcode => VdbeOpcode.Update;
 }
 
+/// <summary>
+/// Invokes a nested VDBE program. Each register in <see cref="ParameterRegisters"/> becomes the value
+/// of the equally positioned parameter slot in <see cref="Subprogram"/>; rows produced by the child are
+/// consumed internally, as required for trigger and foreign-key action programs.
+/// </summary>
+public sealed record ProgramInstruction : VdbeInstruction
+{
+    private readonly ReadOnlyCollection<Register> _parameterRegisters;
+
+    public ProgramInstruction(
+        IEnumerable<Register> parameterRegisters,
+        VdbeSubprogram subprogram)
+    {
+        ArgumentNullException.ThrowIfNull(parameterRegisters);
+        ArgumentNullException.ThrowIfNull(subprogram);
+
+        _parameterRegisters = Array.AsReadOnly(parameterRegisters.ToArray());
+        Subprogram = subprogram;
+    }
+
+    public IReadOnlyList<Register> ParameterRegisters => _parameterRegisters;
+
+    public VdbeSubprogram Subprogram { get; }
+
+    public override VdbeOpcode Opcode => VdbeOpcode.Program;
+}
+
 public sealed record CommitInstruction(Cursor Cursor) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.Commit;
@@ -1521,14 +1692,15 @@ public sealed record DistinctGateInstruction(
 /// <summary>
 /// Records the tuple held in the register block <paramref name="Values"/> into row set
 /// <paramref name="RowSetIndex"/> for later membership tests, without ever producing a result row.
-/// The set holds one representative per distinct tuple: an equal tuple already recorded through
-/// <paramref name="Equality"/> is not stored again. It is the compound set-operation primitive that
-/// materializes a non-primary term (the right-hand operand of <c>INTERSECT</c>/<c>EXCEPT</c>) into a
-/// probe set that a following <see cref="CompoundResultRowInstruction"/> tests the primary term's rows
-/// against. It reuses the same row-set resource pool as <see cref="DistinctResultRowInstruction"/>
-/// (<see cref="VdbeProgram.DistinctSetCount"/>), so <c>Reset</c>/<c>Dispose</c> clear it identically.
-/// The compiler supplies the equality delegate so membership matches the evaluator's row-equality
-/// contract (NULL==NULL together with affinity- and collation-aware comparison) exactly.
+/// The set holds one representative per distinct tuple, replacing an equal tuple through
+/// <paramref name="Equality"/> with the later row, matching a SQLite/Turso temporary B-tree insert.
+/// It is the compound set-operation primitive that materializes a non-primary term (the right-hand
+/// operand of <c>INTERSECT</c>/<c>EXCEPT</c>) into a probe set that a following
+/// <see cref="CompoundResultRowInstruction"/> tests the primary term's rows against. It reuses the same
+/// row-set resource pool as <see cref="DistinctResultRowInstruction"/> (<see cref="VdbeProgram.DistinctSetCount"/>),
+/// so <c>Reset</c>/<c>Dispose</c> clear it identically. The compiler supplies the equality delegate so
+/// membership matches the evaluator's row-equality contract (NULL==NULL together with affinity- and
+/// collation-aware comparison) exactly.
 /// </summary>
 public sealed record RowSetInsertInstruction(
     RegisterRange Values,
@@ -1540,13 +1712,15 @@ public sealed record RowSetInsertInstruction(
 
 /// <summary>
 /// Positions a row set at its first stored row and copies that row into <paramref name="Destination"/>.
-/// Empty sets jump to <paramref name="EmptyTarget"/>. Row sets preserve first-insertion order, so this
-/// begins the output pass of an <c>INTERSECT</c>/<c>EXCEPT</c> after every source term has run.
+/// Empty sets jump to <paramref name="EmptyTarget"/>. When <paramref name="Comparer"/> is present, the
+/// row set is ordered before the output pass; compound set operations use this to mirror SQLite's
+/// temporary B-tree traversal order.
 /// </summary>
 public sealed record RowSetRewindInstruction(
     int RowSetIndex,
     RegisterRange Destination,
-    ProgramCounter EmptyTarget) : VdbeInstruction
+    ProgramCounter EmptyTarget,
+    VdbeRowComparer? Comparer = null) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.RowSetRewind;
 }
@@ -1561,6 +1735,23 @@ public sealed record RowSetNextInstruction(
     ProgramCounter LoopTarget) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.RowSetNext;
+}
+
+/// <summary>
+/// Tests the integer rowid in <paramref name="ValueRegister"/> against an integer row set associated with
+/// <paramref name="RowSetRegister"/>. A match in an earlier batch jumps to <paramref name="FoundTarget"/>.
+/// Batch <c>0</c> skips the membership probe and inserts the value; a positive batch probes only values
+/// inserted by earlier batches and then inserts the value; batch <c>-1</c> probes only and never inserts.
+/// This is Turso's <c>RowSetTest</c> primitive for multi-index scans. It is intentionally separate from the
+/// tuple row sets used by compound queries.
+/// </summary>
+public sealed record RowSetTestInstruction(
+    Register RowSetRegister,
+    ProgramCounter FoundTarget,
+    Register ValueRegister,
+    int Batch) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.RowSetTest;
 }
 
 /// <summary>
@@ -2242,6 +2433,16 @@ public sealed class VdbeProgram
                 case UpdateInstruction update:
                     ValidateOpenCursor(update.Cursor, openCursors, instructionIndex);
                     break;
+                case ProgramInstruction program:
+                    if (program.ParameterRegisters.Count != program.Subprogram.ParameterSlotCount)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} passes {program.ParameterRegisters.Count} parameter register(s) to a subprogram declaring {program.Subprogram.ParameterSlotCount} slot(s).");
+                    }
+
+                    foreach (var parameterRegister in program.ParameterRegisters)
+                        ValidateRegister(parameterRegister, instructionIndex);
+                    break;
                 case CommitInstruction commit:
                     ValidateOpenCursor(commit.Cursor, openCursors, instructionIndex);
                     break;
@@ -2495,6 +2696,11 @@ public sealed class VdbeProgram
                     ValidateDistinctSet(rowSetNext.RowSetIndex, instructionIndex);
                     ValidateRegisterRange(rowSetNext.Destination, instructionIndex);
                     ValidateJumpTarget(rowSetNext.LoopTarget, instructionIndex);
+                    break;
+                case RowSetTestInstruction rowSetTest:
+                    ValidateRegister(rowSetTest.RowSetRegister, instructionIndex);
+                    ValidateJumpTarget(rowSetTest.FoundTarget, instructionIndex);
+                    ValidateRegister(rowSetTest.ValueRegister, instructionIndex);
                     break;
                 case CompoundResultRowInstruction compoundRow:
                     ValidateRegisterRange(compoundRow.Values, instructionIndex);

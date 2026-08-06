@@ -124,6 +124,48 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void TempTriggerMayInsertIntoMainFromAnAttachedRead()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "ATTACH ':memory:' AS aux");
+        Execute(connection, "CREATE TABLE audit(value INTEGER)");
+        Execute(connection, "CREATE TABLE aux.audit(id INTEGER PRIMARY KEY, value INTEGER)");
+        Execute(connection, "CREATE TEMP TABLE driver(id INTEGER)");
+        Execute(connection, "INSERT INTO aux.audit VALUES (1, 900)");
+        Execute(
+            connection,
+            "CREATE TEMP TRIGGER copy_attached AFTER INSERT ON temp.driver BEGIN "
+                + "INSERT INTO audit SELECT value FROM aux.audit WHERE id = NEW.id; END");
+
+        Execute(connection, "INSERT INTO temp.driver VALUES (1)");
+
+        ReadRows(connection, "SELECT value FROM audit")
+            .Should().ContainSingle().Which[0].Should().Be(SqlValue.Integer(900));
+    }
+
+    [Test]
+    public void TempTriggerOnMainMayInsertIntoMainFromAnAttachedRead()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "ATTACH ':memory:' AS aux");
+        Execute(connection, "CREATE TABLE driver(id INTEGER)");
+        Execute(connection, "CREATE TABLE audit(value INTEGER)");
+        Execute(connection, "CREATE TABLE aux.source(id INTEGER PRIMARY KEY, value INTEGER)");
+        Execute(connection, "INSERT INTO aux.source VALUES (1, 901)");
+        Execute(
+            connection,
+            "CREATE TEMP TRIGGER copy_attached AFTER INSERT ON main.driver BEGIN "
+                + "INSERT INTO audit SELECT value FROM aux.source WHERE id = NEW.id; END");
+
+        Execute(connection, "INSERT INTO driver VALUES (1)");
+
+        ReadRows(connection, "SELECT value FROM audit")
+            .Should().ContainSingle().Which[0].Should().Be(SqlValue.Integer(901));
+    }
+
+    [Test]
     public void FailedStatementDiscardsTheTempTriggersCrossSchemaWrites()
     {
         using var database = new EmbeddedDatabase();
@@ -257,6 +299,232 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void RenamingMainTableRewritesTempTriggerBodiesLikeSqlite()
+    {
+        using var database = new EmbeddedDatabase();
+        using var managed = database.Connect();
+        using var sqlite = OpenSqlite();
+        var setup = new[]
+        {
+            "CREATE TABLE rename_src_main (x)",
+            "INSERT INTO rename_src_main VALUES (1)",
+            "CREATE TEMP TABLE temp_rename_driver (y)",
+            "INSERT INTO temp.temp_rename_driver VALUES (10)",
+            "CREATE TRIGGER trig_temp_table_rename AFTER UPDATE ON temp.temp_rename_driver BEGIN "
+                + "DELETE FROM rename_src_main WHERE x; END",
+        };
+        foreach (var sql in setup)
+        {
+            Execute(managed, sql);
+            Execute(sqlite, sql);
+        }
+
+        Execute(managed, "ALTER TABLE rename_src_main RENAME TO rename_dst_main");
+        Execute(sqlite, "ALTER TABLE rename_src_main RENAME TO rename_dst_main");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT instr(sql, 'rename_dst_main') > 0, instr(sql, 'rename_src_main') = 0 "
+                + "FROM temp.sqlite_schema WHERE name = 'trig_temp_table_rename'");
+
+        Execute(managed, "UPDATE temp.temp_rename_driver SET y = 11");
+        Execute(sqlite, "UPDATE temp.temp_rename_driver SET y = 11");
+        AssertQueriesMatch(managed, sqlite, "SELECT count(*) FROM rename_dst_main");
+    }
+
+    [Test]
+    public void FailedMainTableRenameDoesNotPublishATempTriggerRewrite()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE rename_src_main (x)");
+        Execute(connection, "INSERT INTO rename_src_main VALUES (1)");
+        Execute(connection, "CREATE TABLE rename_dst_main (x)");
+        Execute(connection, "CREATE TEMP TABLE temp_rename_driver (y)");
+        Execute(connection, "INSERT INTO temp.temp_rename_driver VALUES (0)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_temp_table_rename AFTER UPDATE ON temp.temp_rename_driver BEGIN "
+                + "DELETE FROM rename_src_main WHERE x; END");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE rename_src_main RENAME TO rename_dst_main"));
+
+        ReadRows(
+            connection,
+            "SELECT instr(sql, 'rename_src_main') > 0, instr(sql, 'rename_dst_main') = 0 "
+                + "FROM temp.sqlite_schema WHERE name = 'trig_temp_table_rename'")
+            .Should()
+            .ContainSingle()
+            .Which
+            .Should()
+            .Equal(SqlValue.Integer(1), SqlValue.Integer(1));
+
+        Execute(connection, "UPDATE temp.temp_rename_driver SET y = 1");
+        ReadRows(connection, "SELECT count(*) FROM rename_src_main").Should().ContainSingle()
+            .Which[0].AsInteger().Should().Be(0);
+    }
+
+    [Test]
+    public void RenamingMainColumnRewritesTempTriggerBodiesLikeSqlite()
+    {
+        using var database = new EmbeddedDatabase();
+        using var managed = database.Connect();
+        using var sqlite = OpenSqlite();
+        var setup = new[]
+        {
+            "CREATE TABLE src_temp_main (a INTEGER PRIMARY KEY, b)",
+            "CREATE TABLE log_temp_main (v)",
+            "CREATE TEMP TABLE temp_driver_main (x)",
+            "INSERT INTO src_temp_main VALUES (1, 500)",
+            "CREATE TRIGGER trig_temp_main AFTER INSERT ON temp.temp_driver_main BEGIN "
+                + "INSERT INTO log_temp_main SELECT b FROM src_temp_main WHERE a = new.x; END",
+        };
+        foreach (var sql in setup)
+        {
+            Execute(managed, sql);
+            Execute(sqlite, sql);
+        }
+
+        Execute(managed, "ALTER TABLE src_temp_main RENAME COLUMN b TO c");
+        Execute(sqlite, "ALTER TABLE src_temp_main RENAME COLUMN b TO c");
+        Execute(managed, "INSERT INTO temp.temp_driver_main VALUES (1)");
+        Execute(sqlite, "INSERT INTO temp.temp_driver_main VALUES (1)");
+
+        AssertQueriesMatch(managed, sqlite, "SELECT v FROM log_temp_main");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT instr(sql, 'src_temp_main') > 0, instr(sql, ' b ') = 0 "
+                + "FROM temp.sqlite_schema WHERE name = 'trig_temp_main'");
+    }
+
+    [Test]
+    public void RenamingTempTableRejectsTriggerReferencingDroppedMainTable()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE missing_main_tbl (x)");
+        Execute(connection, "CREATE TEMP TABLE temp_rename_src (a)");
+        Execute(connection, "CREATE TEMP TABLE temp_trigger_driver (b)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_invalid_temp_rename AFTER UPDATE ON temp.temp_trigger_driver BEGIN "
+                + "SELECT * FROM missing_main_tbl; END");
+        Execute(connection, "DROP TABLE missing_main_tbl");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE temp.temp_rename_src RENAME TO temp_rename_dst"))!
+            .Message.Should().Be("error in trigger trig_invalid_temp_rename: no such table: missing_main_tbl");
+
+        ReadRows(
+            connection,
+            "SELECT name FROM temp.sqlite_schema WHERE type = 'table' ORDER BY name")
+            .Select(row => row[0].AsText())
+            .Should()
+            .Equal("temp_rename_src", "temp_trigger_driver");
+    }
+
+    [Test]
+    public void RenamingTempTableColumnRejectsInvalidTriggerRewrite()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TEMP TABLE t(a,b)");
+        Execute(
+            connection,
+            "CREATE TRIGGER tr AFTER INSERT ON temp.t BEGIN "
+                + "INSERT INTO t VALUES(new.a,new.b); END");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE t RENAME COLUMN b TO c"))!
+            .Message.Should().Be("error in trigger tr after rename: no such column: new.c");
+
+        ReadRows(connection, "SELECT sql FROM temp.sqlite_schema WHERE name = 'tr'")
+            .Should()
+            .ContainSingle()
+            .Which[0]
+            .AsText()
+            .Should()
+            .Contain("new.b");
+    }
+
+    [Test]
+    public void RenamingMainColumnRejectsInvalidUnqualifiedTempTriggerReference()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TEMP TABLE temp_exists_driver (n)");
+        Execute(connection, "CREATE TABLE src_temp_exists (c1, c2, b)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_temp_exists AFTER INSERT ON temp.temp_exists_driver BEGIN "
+                + "SELECT 1 NOT IN ("
+                + "NOT EXISTS (SELECT * FROM src_temp_exists WHERE c1 "
+                + "ORDER BY b ASC, CASE WHEN b THEN 'x' WHEN b THEN 1 END)"
+                + "); END");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE src_temp_exists RENAME COLUMN b TO bb"))!
+            .Message.Should().Be("error in trigger trig_temp_exists after rename: no such column: b");
+
+        ReadRows(connection, "SELECT sql FROM temp.sqlite_schema WHERE name = 'trig_temp_exists'")
+            .Should()
+            .ContainSingle()
+            .Which[0]
+            .AsText()
+            .Should()
+            .Contain("ORDER BY b ASC");
+    }
+
+    [Test]
+    public void DroppingMainColumnRejectsTempTriggerReferencingDroppedColumn()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE src_drop_temp (a, b)");
+        Execute(connection, "CREATE TEMP TABLE temp_drop_driver (x)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_temp_drop AFTER INSERT ON temp.temp_drop_driver BEGIN "
+                + "SELECT b FROM src_drop_temp; END");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE src_drop_temp DROP COLUMN b"))!
+            .Message.Should().Be("error in trigger trig_temp_drop after drop column: no such column: b");
+
+        ReadRows(connection, "SELECT name FROM pragma_table_info('src_drop_temp') ORDER BY cid")
+            .Select(row => row[0].AsText())
+            .Should()
+            .Equal("a", "b");
+    }
+
+    [Test]
+    public void DroppingMainColumnRejectsPreExistingInvalidTempTrigger()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE missing_main_tbl_drop (x)");
+        Execute(connection, "CREATE TABLE main_drop_src (a, b)");
+        Execute(connection, "CREATE TEMP TABLE temp_drop_driver_missing (x)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_invalid_temp_drop AFTER UPDATE ON temp.temp_drop_driver_missing BEGIN "
+                + "SELECT * FROM missing_main_tbl_drop; END");
+        Execute(connection, "DROP TABLE missing_main_tbl_drop");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE main_drop_src DROP COLUMN a"))!
+            .Message.Should().Be(
+                "error in trigger trig_invalid_temp_drop: no such table: missing_main_tbl_drop");
+
+        ReadRows(connection, "SELECT name FROM pragma_table_info('main_drop_src') ORDER BY cid")
+            .Select(row => row[0].AsText())
+            .Should()
+            .Equal("a", "b");
+    }
+
+    [Test]
     public void TempViewBodyOutsideTheTempSchemaIsRejectedUpFront()
     {
         using var database = new EmbeddedDatabase();
@@ -297,6 +565,63 @@ public sealed class ManagedTempSchemaObjectTests
         Execute(managed, "CREATE TEMP VIEW temp.accepted AS SELECT 1 AS x");
         Execute(sqlite, "CREATE TEMP VIEW temp.accepted AS SELECT 1 AS x");
         AssertQueriesMatch(managed, sqlite, "SELECT name, sql FROM sqlite_temp_schema ORDER BY name");
+    }
+
+    [Test]
+    public void ReadOnlyQueriesCanJoinMainAndTempSnapshots()
+    {
+        using var database = new EmbeddedDatabase();
+        using var managed = database.Connect();
+        using var sqlite = OpenSqlite();
+        var setup = new[]
+        {
+            "CREATE TABLE join_t(x INTEGER)",
+            "INSERT INTO main.join_t VALUES (1)",
+            "CREATE TEMP TABLE join_t(x INTEGER)",
+            "INSERT INTO temp.join_t VALUES (2)",
+            "CREATE TABLE main_t(id INTEGER PRIMARY KEY)",
+            "CREATE TEMP TABLE temp_t(id INTEGER PRIMARY KEY)",
+        };
+        foreach (var sql in setup)
+        {
+            Execute(managed, sql);
+            Execute(sqlite, sql);
+        }
+
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT m.x, t.x FROM main.join_t AS m, temp.join_t AS t");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT main.join_t.x, temp.join_t.x FROM main.join_t, temp.join_t");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT m.x, (SELECT t.x FROM temp.join_t AS t) FROM main.join_t AS m");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT group_concat(m.x ORDER BY (SELECT t.x FROM temp.join_t AS t)) FROM main.join_t AS m");
+
+        foreach (var sql in new[]
+                 {
+                     "BEGIN IMMEDIATE",
+                     "INSERT INTO main_t VALUES (1), (2)",
+                     "INSERT INTO temp_t VALUES (10), (20)",
+                 })
+        {
+            Execute(managed, sql);
+            Execute(sqlite, sql);
+        }
+
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT m.id, t.id FROM main_t AS m, temp_t AS t ORDER BY m.id, t.id");
+        Execute(managed, "COMMIT");
+        Execute(sqlite, "COMMIT");
     }
 
     private static MsData.SqliteConnection OpenSqlite()

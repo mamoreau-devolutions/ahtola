@@ -695,7 +695,7 @@ public sealed partial class EmbeddedDatabase
                 original,
                 oldRowId,
                 parameters,
-                context,
+                context with { PreserveSubqueryMemoSnapshot = true },
                 validateCheckConstraints: false,
                 enforceGeneratedNotNull: false,
                 evaluationRow: evaluationRow);
@@ -771,17 +771,22 @@ public sealed partial class EmbeddedDatabase
             }
             rowsAffected++;
             context.TriggerState!.Changed = true;
+            _ = FireRowTriggers(afterTriggers, frame, context);
+            position = FindTriggerRowPosition(table, identity);
+            var returningRow = position >= 0 ? table.Rows[position] : updated;
+            var returningRowId = position >= 0 && table.HasRowid
+                ? table.RowIds[position]
+                : newRowId;
             AppendReturningRow(
                 statement.Returning,
                 statement.TableName,
                 table,
-                updated,
-                newRowId,
+                returningRow,
+                returningRowId,
                 parameters,
                 context,
                 returningRows,
                 ref returningColumns);
-            _ = FireRowTriggers(afterTriggers, frame, context);
         }
 
         if (statement.Returning is not null && returningColumns is null)
@@ -1293,18 +1298,9 @@ public sealed partial class EmbeddedDatabase
     {
         if (statement.Upsert is null)
             throw new InvalidOperationException("UPSERT execution requires an UPSERT clause.");
-        if (statement.Source is not null || context.CommonTableExpressions.Count != 0)
-        {
-            throw new EmbeddedSqlException(
-                "Managed UPSERT supports VALUES rows only and does not support INSERT ... SELECT or CTE sources.");
-        }
         if (!context.Tables.TryGetValue(statement.TableName, out var table))
             throw new EmbeddedSqlException($"no such table: {statement.TableName}");
 
-        var conflictTarget = ResolveUpsertConflictTarget(
-            statement.TableName,
-            table,
-            statement.Upsert);
         var insertPlan = PrepareInsert(statement, table, context);
         MarkTriggerStatementRollbackRequirement(
             context,
@@ -1315,38 +1311,72 @@ public sealed partial class EmbeddedDatabase
         {
             insertState.RequiresStatementRollback = true;
         }
-        var updateAction = statement.Upsert.Action as DoUpdateUpsertAction;
         var doUpdateContext = context with
         {
             ConflictAlgorithmOverride = InsertConflictAlgorithm.Abort,
         };
-        if (updateAction is null && statement.Upsert.Action is not DoNothingUpsertAction)
-            throw new InvalidOperationException("Unknown UPSERT action.");
-        var updatedColumns = updateAction?.Assignments
-            .Select(assignment => assignment.Column)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        UpdatePlan? updatePlan = null;
-        if (updateAction is not null)
+        var upserts = statement.Upsert.Clauses()
+            .Select(upsert =>
+            {
+                var update = upsert.Action as DoUpdateUpsertAction;
+                if (update is null && upsert.Action is not DoNothingUpsertAction)
+                    throw new InvalidOperationException("Unknown UPSERT action.");
+
+                UpdatePlan? plan = null;
+                if (update is not null)
+                {
+                    var updatedColumns = update.Assignments
+                        .Select(assignment => assignment.Column)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var updateStatement = new UpdateStatement(
+                        statement.TableName,
+                        update.Assignments,
+                        Where: null);
+                    plan = PrepareUpdate(updateStatement, table, doUpdateContext);
+                    MarkTriggerStatementRollbackRequirement(
+                        doUpdateContext,
+                        table,
+                        TriggerMutationKind.Update,
+                        plan);
+                    ValidateUpsertUpdateExpressions(
+                        statement.TableName,
+                        update.Assignments,
+                        update.Where,
+                        allowTriggerQualifiers: context.InsideTrigger);
+                    ValidateForeignKeyActionTriggerPrograms(
+                        doUpdateContext,
+                        statement.TableName,
+                        TriggerEvent.Update,
+                        updatedColumns);
+                    ValidateTriggerPrograms(
+                        doUpdateContext,
+                        statement.TableName,
+                        TriggerEvent.Update,
+                        GetRowTriggers(
+                            context,
+                            statement.TableName,
+                            TriggerTiming.Before,
+                            TriggerEvent.Update,
+                            updatedColumns).Concat(GetRowTriggers(
+                                context,
+                                statement.TableName,
+                                TriggerTiming.After,
+                                TriggerEvent.Update,
+                                updatedColumns)));
+                }
+
+                return new ResolvedUpsertClause(
+                    upsert,
+                    ResolveUpsertConflictTarget(statement.TableName, table, upsert),
+                    plan);
+            })
+            .ToArray();
+        if (upserts.Length == 0)
+            throw new InvalidOperationException("UPSERT execution requires an UPSERT clause.");
+        if (upserts.Take(upserts.Length - 1).Any(upsert => upsert.Clause.Target.Count == 0))
         {
-            var updateStatement = new UpdateStatement(
-                statement.TableName,
-                updateAction.Assignments,
-                Where: null);
-            updatePlan = PrepareUpdate(updateStatement, table, doUpdateContext);
-            MarkTriggerStatementRollbackRequirement(
-                doUpdateContext,
-                table,
-                TriggerMutationKind.Update,
-                updatePlan);
-            ValidateUpsertUpdateExpressions(
-                statement.TableName,
-                updateAction.Assignments,
-                updateAction.Where);
-            ValidateForeignKeyActionTriggerPrograms(
-                doUpdateContext,
-                statement.TableName,
-                TriggerEvent.Update,
-                updatedColumns);
+            throw new EmbeddedSqlException(
+                "ON CONFLICT clause without a conflict target must be the last clause in the UPSERT chain.");
         }
 
         var beforeInsert = GetRowTriggers(
@@ -1359,40 +1389,18 @@ public sealed partial class EmbeddedDatabase
             statement.TableName,
             TriggerTiming.After,
             TriggerEvent.Insert);
-        var beforeUpdate = updatedColumns is null
-            ? []
-            : GetRowTriggers(
-                context,
-                statement.TableName,
-                TriggerTiming.Before,
-                TriggerEvent.Update,
-                updatedColumns);
-        var afterUpdate = updatedColumns is null
-            ? []
-            : GetRowTriggers(
-                context,
-                statement.TableName,
-                TriggerTiming.After,
-                TriggerEvent.Update,
-                updatedColumns);
         ValidateTriggerPrograms(
             context,
             statement.TableName,
             TriggerEvent.Insert,
             beforeInsert.Concat(afterInsert));
-        if (updatedColumns is not null)
-        {
-            ValidateTriggerPrograms(
-                doUpdateContext,
-                statement.TableName,
-                TriggerEvent.Update,
-                beforeUpdate.Concat(afterUpdate));
-        }
-        var inputRows = statement.Rows
-            .Select(expressions => expressions
-                .Select(expression => Evaluate(expression, parameters, row: null, context))
-                .ToArray())
-            .ToArray();
+        IReadOnlyList<SqlValue[]> inputRows = statement.Source is null
+            ? statement.Rows
+                .Select(expressions => expressions
+                    .Select(expression => Evaluate(expression, parameters, row: null, context))
+                    .ToArray())
+                .ToArray()
+            : ExecuteQuery(statement.Source, parameters, context, outerRow: null).Rows;
         var returningRows = new List<SqlValue[]>();
         string[]? returningColumns = null;
         var rowsAffected = 0;
@@ -1463,13 +1471,24 @@ public sealed partial class EmbeddedDatabase
                 }
                 continue;
             }
-            var conflictPosition = FindUpsertConflictPosition(
-                table,
-                conflictTarget,
-                candidate,
-                candidateRowId,
-                table.Rows,
-                table.RowIds);
+            ResolvedUpsertClause? selectedUpsert = null;
+            var conflictPosition = -1;
+            foreach (var upsert in upserts)
+            {
+                var position = FindUpsertConflictPosition(
+                    table,
+                    upsert.Target,
+                    candidate,
+                    candidateRowId,
+                    table.Rows,
+                    table.RowIds);
+                if (position < 0)
+                    continue;
+
+                selectedUpsert = upsert;
+                conflictPosition = position;
+                break;
+            }
             if (conflictPosition < 0)
             {
                 var inserted = false;
@@ -1528,11 +1547,28 @@ public sealed partial class EmbeddedDatabase
                 continue;
             }
 
+            var updateAction = selectedUpsert!.Clause.Action as DoUpdateUpsertAction;
+            var updatePlan = selectedUpsert.UpdatePlan;
             if (updateAction is null)
             {
                 ResetInsertPlan(table, insertPlan);
                 continue;
             }
+            var updatedColumns = updateAction.Assignments
+                .Select(assignment => assignment.Column)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var beforeUpdate = GetRowTriggers(
+                context,
+                statement.TableName,
+                TriggerTiming.Before,
+                TriggerEvent.Update,
+                updatedColumns);
+            var afterUpdate = GetRowTriggers(
+                context,
+                statement.TableName,
+                TriggerTiming.After,
+                TriggerEvent.Update,
+                updatedColumns);
 
             var original = table.Rows[conflictPosition].ToArray();
             var originalRowId = table.HasRowid ? table.RowIds[conflictPosition] : conflictPosition + 1;
@@ -1720,7 +1756,8 @@ public sealed partial class EmbeddedDatabase
         foreach (var input in inputs)
         {
             if (input.Count != targetIndices.Length)
-                throw new EmbeddedSqlException("table has a different number of columns");
+                throw new EmbeddedSqlException(
+                    $"table {statement.TableName} has {targetIndices.Length} columns but {input.Count} values were supplied");
             var values = Enumerable.Repeat(SqlValue.Null, columns.Length).ToArray();
             var assignedColumns = new HashSet<int>();
             for (var index = 0; index < input.Count; index++)
@@ -1973,12 +2010,12 @@ public sealed partial class EmbeddedDatabase
                 {
                     case InsertStatement insert when context.Tables.TryGetValue(insert.TableName, out var insertTable):
                         _ = PrepareInsert(insert, insertTable, context);
-                        if (insert.Upsert is not null)
+                        foreach (var upsert in insert.Upsert?.Clauses() ?? [])
                         {
                             _ = ResolveUpsertConflictTarget(
                                 insert.TableName,
                                 insertTable,
-                                insert.Upsert);
+                                upsert);
                         }
                         break;
                     case InsertStatement insert when context.Views?.ContainsKey(insert.TableName) == true:
@@ -2021,13 +2058,7 @@ public sealed partial class EmbeddedDatabase
                     ValidateTriggerQuerySources(context, insert.Source, commonTableExpressions);
                 foreach (var expression in insert.Rows.SelectMany(row => row))
                     ValidateTriggerExpressionSources(context, expression, commonTableExpressions);
-                if (insert.Upsert?.Action is DoUpdateUpsertAction upsertUpdate)
-                {
-                    foreach (var assignment in upsertUpdate.Assignments)
-                        ValidateTriggerExpressionSources(context, assignment.Value, commonTableExpressions);
-                    ValidateTriggerExpressionSources(context, upsertUpdate.Where, commonTableExpressions);
-                }
-                if (insert.Upsert is { } upsert)
+                foreach (var upsert in insert.Upsert?.Clauses() ?? [])
                 {
                     foreach (var target in upsert.Target)
                     {
@@ -2040,6 +2071,12 @@ public sealed partial class EmbeddedDatabase
                         context,
                         upsert.TargetWhere,
                         commonTableExpressions);
+                    if (upsert.Action is DoUpdateUpsertAction upsertUpdate)
+                    {
+                        foreach (var assignment in upsertUpdate.Assignments)
+                            ValidateTriggerExpressionSources(context, assignment.Value, commonTableExpressions);
+                        ValidateTriggerExpressionSources(context, upsertUpdate.Where, commonTableExpressions);
+                    }
                 }
                 break;
             case UpdateStatement update:
@@ -2126,7 +2163,7 @@ public sealed partial class EmbeddedDatabase
             case null:
                 return;
             case NamedTableSource named:
-                if (!commonTableExpressions.Contains(named.Name)
+                if ((!named.IsSchemaQualified && !commonTableExpressions.Contains(named.Name))
                     && !context.Tables.ContainsKey(named.Name)
                     && context.Views?.ContainsKey(named.Name) != true
                     && !IsSchemaTable(named.Name))
@@ -2371,13 +2408,13 @@ public sealed partial class EmbeddedDatabase
                 || TriggerQueryCanAbort(insert.Source)
                 || insert.Returning?.Any(projection =>
                     TriggerExpressionCanAbort(projection.Expression)) == true
-                || insert.Upsert?.Target.Any(target =>
-                    TriggerExpressionCanAbort(target.Expression)) == true
-                || TriggerExpressionCanAbort(insert.Upsert?.TargetWhere)
-                || insert.Upsert?.Action is DoUpdateUpsertAction update
-                    && (update.Assignments.Any(assignment =>
-                            TriggerExpressionCanAbort(assignment.Value))
-                        || TriggerExpressionCanAbort(update.Where)),
+                || insert.Upsert?.Clauses().Any(upsert =>
+                    upsert.Target.Any(target => TriggerExpressionCanAbort(target.Expression))
+                    || TriggerExpressionCanAbort(upsert.TargetWhere)
+                    || upsert.Action is DoUpdateUpsertAction update
+                        && (update.Assignments.Any(assignment =>
+                                TriggerExpressionCanAbort(assignment.Value))
+                            || TriggerExpressionCanAbort(update.Where))) == true,
             UpdateStatement update => update.Assignments.Any(assignment =>
                     TriggerExpressionCanAbort(assignment.Value))
                 || TriggerExpressionCanAbort(update.Where)
@@ -2555,22 +2592,20 @@ public sealed partial class EmbeddedDatabase
                         context,
                         insert.Source,
                         new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-                if (insert.Upsert?.Action is not DoUpdateUpsertAction upsertUpdate)
-                    return insertRequiresRollback;
                 var updateContext = context with
                 {
                     ConflictAlgorithmOverride = InsertConflictAlgorithm.Abort,
                 };
-                var updateStatement = new UpdateStatement(
-                    insert.TableName,
-                    upsertUpdate.Assignments,
-                    Where: null);
-                return insertRequiresRollback
-                    || TriggerMutationRequiresStatementRollback(
+                return insertRequiresRollback || (insert.Upsert?.Clauses().Any(upsert =>
+                    upsert.Action is DoUpdateUpsertAction upsertUpdate
+                    && TriggerMutationRequiresStatementRollback(
                         updateContext,
                         insertTable,
                         TriggerMutationKind.Update,
-                        PrepareUpdate(updateStatement, insertTable, updateContext));
+                        PrepareUpdate(
+                            new UpdateStatement(insert.TableName, upsertUpdate.Assignments, Where: null),
+                            insertTable,
+                            updateContext))) ?? false);
             case UpdateStatement update when context.Tables.TryGetValue(update.TableName, out var updateTable):
                 return TriggerMutationRequiresStatementRollback(
                     context,
@@ -2694,7 +2729,7 @@ public sealed partial class EmbeddedDatabase
         {
             return true;
         }
-        if (insert.Upsert?.Action is DoNothingUpsertAction)
+        if (insert.Upsert?.Clauses().All(upsert => upsert.Action is DoNothingUpsertAction) == true)
             return true;
         var effectiveConflict = context.ConflictAlgorithmOverride ?? insert.ConflictAlgorithm;
         return effectiveConflict == InsertConflictAlgorithm.Ignore
@@ -2924,11 +2959,14 @@ public sealed partial class EmbeddedDatabase
                 insert.TableName,
                 TriggerTiming.InsteadOf,
                 TriggerEvent.Insert));
-        if (insert.Upsert?.Action is DoUpdateUpsertAction update)
+        foreach (var upsert in insert.Upsert?.Clauses() ?? [])
         {
-            triggers = triggers.Concat(GetBodyUpdateTriggers(
-                context,
-                new UpdateStatement(insert.TableName, update.Assignments, update.Where)));
+            if (upsert.Action is DoUpdateUpsertAction update)
+            {
+                triggers = triggers.Concat(GetBodyUpdateTriggers(
+                    context,
+                    new UpdateStatement(insert.TableName, update.Assignments, update.Where)));
+            }
         }
 
         var mayReplace = !context.InheritedTriggerConflict
@@ -2995,17 +3033,17 @@ public sealed partial class EmbeddedDatabase
                         ValidateTriggerExpression(expression, triggerEvent, columns, hasRowid);
                 }
                 ValidateTriggerQuery(insert.Source, triggerEvent, columns, hasRowid);
-                if (insert.Upsert?.Action is DoUpdateUpsertAction upsertUpdate)
-                {
-                    foreach (var assignment in upsertUpdate.Assignments)
-                        ValidateTriggerExpression(assignment.Value, triggerEvent, columns, hasRowid);
-                    ValidateTriggerExpression(upsertUpdate.Where, triggerEvent, columns, hasRowid);
-                }
-                if (insert.Upsert is { } upsert)
+                foreach (var upsert in insert.Upsert?.Clauses() ?? [])
                 {
                     foreach (var target in upsert.Target)
                         ValidateTriggerExpression(target.Expression, triggerEvent, columns, hasRowid);
                     ValidateTriggerExpression(upsert.TargetWhere, triggerEvent, columns, hasRowid);
+                    if (upsert.Action is DoUpdateUpsertAction upsertUpdate)
+                    {
+                        foreach (var assignment in upsertUpdate.Assignments)
+                            ValidateTriggerExpression(assignment.Value, triggerEvent, columns, hasRowid);
+                        ValidateTriggerExpression(upsertUpdate.Where, triggerEvent, columns, hasRowid);
+                    }
                 }
                 ValidateTriggerProjections(insert.Returning, triggerEvent, columns, hasRowid);
                 break;

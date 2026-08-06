@@ -23,7 +23,7 @@ public sealed class ManagedAlterTableRenameColumnTests
           id INTEGER PRIMARY KEY,
           old_col INTEGER CHECK(old_col > 0),
           note TEXT,
-          doubled INTEGER GENERATED ALWAYS AS (old_col * 2) STORED,
+          doubled INTEGER GENERATED ALWAYS AS (old_col * 2) VIRTUAL,
           shifted INTEGER GENERATED ALWAYS AS (old_col + 100) VIRTUAL,
           tag TEXT REFERENCES parent(tag),
           CHECK(old_col <> 42 AND note <> 'old_col')
@@ -73,7 +73,7 @@ public sealed class ManagedAlterTableRenameColumnTests
         SchemaSql(managed, "sibling").Should().Be(SchemaSql(sqlite, "sibling"));
         SchemaSql(managed, "t").Should()
             .Contain("CHECK(new_col > 0)")
-            .And.Contain("(new_col * 2) STORED")
+            .And.Contain("(new_col * 2) VIRTUAL")
             .And.Contain("(new_col + 100)")
             .And.Contain("CHECK(new_col <> 42 AND note <> 'old_col')");
         SchemaSql(managed, "expr_idx").Should()
@@ -148,6 +148,29 @@ public sealed class ManagedAlterTableRenameColumnTests
         SchemaSql(managed, "t").Should()
             .Contain("CHECK (renamed <> 'b' AND ab <> 'b' AND ba IS NOT 'b')");
         SchemaSql(managed, "other").Should().Be(SchemaSql(sqlite, "other")).And.NotContain("renamed");
+    }
+
+    [Test]
+    public void RenameColumnPropagatesImplicitViewColumnsAndTableFunctionArguments()
+    {
+        using var connection = OpenManagedMemory();
+        Execute(
+            connection,
+            """
+            CREATE TABLE t(a, b);
+            INSERT INTO t VALUES(1, 'value');
+            CREATE VIEW v1 AS SELECT a, b FROM t;
+            CREATE VIEW v2 AS SELECT b FROM v1;
+            CREATE VIEW v3 AS SELECT j.value FROM t JOIN json_each(json_array(t.b)) AS j;
+            ALTER TABLE t RENAME COLUMN b TO c;
+            """);
+
+        SchemaSql(connection, "v1").Should().Be("CREATE VIEW v1 AS SELECT a, c FROM t");
+        SchemaSql(connection, "v2").Should().Be("CREATE VIEW v2 AS SELECT c FROM v1");
+        SchemaSql(connection, "v3").Should().Be(
+            "CREATE VIEW v3 AS SELECT j.value FROM t JOIN json_each(json_array(t.c)) AS j");
+        ReadRows(connection, "SELECT * FROM v2;").Should().Equal("value");
+        ReadRows(connection, "SELECT * FROM v3;").Should().Equal("value");
     }
 
     [TestCase("z", "b", "CREATE VIEW v AS SELECT z FROM t WHERE z > 0")]

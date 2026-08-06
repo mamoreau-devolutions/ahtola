@@ -12,7 +12,7 @@ public sealed class ManagedBackupSnapshotTests
         using var destination = OpenManagedConnection();
         source.ExecuteNonQuery("CREATE TABLE data(integer_value INTEGER, real_value REAL, text_value TEXT, blob_value BLOB, null_value TEXT);");
         source.ExecuteNonQuery("CREATE TABLE aliases(id INTEGER PRIMARY KEY, value TEXT);");
-        source.ExecuteNonQuery("CREATE TABLE generated(base INTEGER, doubled AS (base * 2) STORED);");
+        source.ExecuteNonQuery("CREATE TABLE generated(base INTEGER, doubled AS (base * 2) VIRTUAL);");
         source.ExecuteNonQuery("CREATE VIEW data_view AS SELECT integer_value, text_value FROM data;");
         source.ExecuteNonQuery("PRAGMA user_version = 123; PRAGMA application_id = 456;");
         destination.ExecuteNonQuery("PRAGMA user_version = 9; PRAGMA application_id = 10;");
@@ -202,7 +202,7 @@ public sealed class ManagedBackupSnapshotTests
                         tenant TEXT,
                         sequence INTEGER,
                         base INTEGER NOT NULL,
-                        doubled INTEGER AS (base * 2) STORED,
+                        doubled INTEGER AS (base * 2) VIRTUAL,
                         PRIMARY KEY(tenant, sequence)
                     );
                     INSERT INTO generated_key(tenant, sequence, base) VALUES ('tenant', 1, 7);
@@ -245,7 +245,7 @@ public sealed class ManagedBackupSnapshotTests
                 "SELECT amount FROM constrained WHERE id = 2;").Should().Be(5);
             var generatedSchema = reopened.ExecuteScalar<string>(
                 "SELECT sql FROM sqlite_master WHERE name = 'generated_key';");
-            generatedSchema.Should().Contain("doubled INTEGER AS (base * 2) STORED")
+            generatedSchema.Should().Contain("doubled INTEGER AS (base * 2) VIRTUAL")
                 .And.Contain("PRIMARY KEY(tenant, sequence)");
             reopened.ExecuteScalar<long>(
                 "SELECT doubled FROM generated_key WHERE tenant = 'tenant' AND sequence = 1;").Should().Be(14);

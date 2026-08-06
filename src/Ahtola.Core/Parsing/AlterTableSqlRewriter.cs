@@ -113,7 +113,69 @@ internal static class AlterTableSqlRewriter
         if (nameSpan is not { } name)
             return null;
 
-        return ReplaceSpan(sql, name, QuoteIdentifier(newName));
+        var edits = new List<SqlSourceSpan> { name };
+        if (parsed is CreateTableStatement table)
+        {
+            // A CHECK expression is evaluated against the renamed table's row, so table-qualified
+            // references in it must follow the CREATE TABLE name token.
+            var collector = new TableReferenceCollector(
+                spans,
+                table.Name,
+                targetSchema: "main",
+                includeUnqualifiedReferences: true);
+            foreach (var column in table.Columns)
+            {
+                foreach (var check in column.CheckConstraints)
+                    collector.CollectExpression(check.Expression);
+            }
+            foreach (var check in table.CheckConstraints ?? [])
+                collector.CollectExpression(check.Expression);
+
+            if (collector.Aborted)
+                return null;
+
+            edits.AddRange(collector.Spans);
+        }
+
+        var replacement = QuoteIdentifier(newName);
+        foreach (var edit in edits.Distinct().OrderByDescending(static span => span.Start))
+            sql = ReplaceSpan(sql, edit, replacement);
+        return sql;
+    }
+
+    /// <summary>
+    /// Rewrites table qualifiers in a standalone table-owned expression such as a CHECK body.
+    /// This is deliberately expression-scoped: a CHECK cannot bind aliases or another table, so
+    /// any matching qualifier identifies the table being renamed.
+    /// </summary>
+    public static string? RenameTableExpressionReferences(string sql, string oldName, string newName)
+    {
+        Expression expression;
+        SqlSourceSpans spans;
+        try
+        {
+            expression = SqlParser.ParseExpressionWithSpans(sql, out spans);
+        }
+        catch (EmbeddedSqlException)
+        {
+            return null;
+        }
+
+        var collector = new TableReferenceCollector(
+            spans,
+            oldName,
+            targetSchema: "main",
+            includeUnqualifiedReferences: true);
+        collector.CollectExpression(expression);
+        if (collector.Aborted)
+            return null;
+        if (collector.Spans.Count == 0)
+            return sql;
+
+        var replacement = QuoteIdentifier(newName);
+        foreach (var span in collector.Spans.OrderByDescending(static span => span.Start))
+            sql = ReplaceSpan(sql, span, replacement);
+        return sql;
     }
 
     /// <summary>
@@ -198,7 +260,12 @@ internal static class AlterTableSqlRewriter
     /// and <see langword="null"/> when the stored text cannot be reparsed or a matching
     /// reference lacks a recorded token span.
     /// </summary>
-    public static string? RenameTableReferences(string sql, string oldName, string newName)
+    public static string? RenameTableReferences(
+        string sql,
+        string oldName,
+        string newName,
+        string targetSchema = "main",
+        bool includeUnqualifiedReferences = true)
     {
         ParsedStatement parsed;
         SqlSourceSpans spans;
@@ -211,7 +278,11 @@ internal static class AlterTableSqlRewriter
             return null;
         }
 
-        var collector = new TableReferenceCollector(spans, oldName);
+        var collector = new TableReferenceCollector(
+            spans,
+            oldName,
+            targetSchema,
+            includeUnqualifiedReferences);
         switch (parsed)
         {
             case CreateTriggerStatement trigger:
@@ -245,7 +316,11 @@ internal static class AlterTableSqlRewriter
     /// trigger or view definition. A matching reference without a recorded span aborts the whole
     /// rewrite (the caller then leaves the dependent object untouched rather than corrupting it).
     /// </summary>
-    private sealed class TableReferenceCollector(SqlSourceSpans spans, string oldName)
+    private sealed class TableReferenceCollector(
+        SqlSourceSpans spans,
+        string oldName,
+        string targetSchema,
+        bool includeUnqualifiedReferences)
     {
         private readonly HashSet<int> _seenStarts = [];
 
@@ -257,11 +332,12 @@ internal static class AlterTableSqlRewriter
         {
             if (ManagedSchemaName.TrySplit(writtenName, out var schema, out var name))
             {
-                return string.Equals(schema, "main", StringComparison.OrdinalIgnoreCase)
+                return string.Equals(schema, targetSchema, StringComparison.OrdinalIgnoreCase)
                     && string.Equals(name, oldName, StringComparison.OrdinalIgnoreCase);
             }
 
-            return string.Equals(writtenName, oldName, StringComparison.OrdinalIgnoreCase);
+            return includeUnqualifiedReferences
+                && string.Equals(writtenName, oldName, StringComparison.OrdinalIgnoreCase);
         }
 
         public void Add(SqlSourceSpan? span)
@@ -403,12 +479,14 @@ internal static class AlterTableSqlRewriter
             switch (expression)
             {
                 case ColumnExpression column:
-                    if (column.Qualifier is not null
+                    if (includeUnqualifiedReferences
+                        && column.Qualifier is not null
                         && string.Equals(column.Qualifier, oldName, StringComparison.OrdinalIgnoreCase))
                         Add(spans.GetQualifier(column));
                     break;
                 case QualifiedStarExpression star:
-                    if (string.Equals(star.Qualifier, oldName, StringComparison.OrdinalIgnoreCase))
+                    if (includeUnqualifiedReferences
+                        && string.Equals(star.Qualifier, oldName, StringComparison.OrdinalIgnoreCase))
                         Add(spans.GetQualifier(star));
                     break;
                 case BinaryExpression binary:
@@ -493,17 +571,17 @@ internal static class AlterTableSqlRewriter
 
         private void CollectUpsert(UpsertClause? upsert)
         {
-            if (upsert is null)
-                return;
-
-            foreach (var target in upsert.Target)
-                CollectExpression(target.Expression);
-            CollectExpression(upsert.TargetWhere);
-            if (upsert.Action is DoUpdateUpsertAction doUpdate)
+            foreach (var clause in upsert?.Clauses() ?? [])
             {
-                foreach (var assignment in doUpdate.Assignments)
-                    CollectExpression(assignment.Value);
-                CollectExpression(doUpdate.Where);
+                foreach (var target in clause.Target)
+                    CollectExpression(target.Expression);
+                CollectExpression(clause.TargetWhere);
+                if (clause.Action is DoUpdateUpsertAction doUpdate)
+                {
+                    foreach (var assignment in doUpdate.Assignments)
+                        CollectExpression(assignment.Value);
+                    CollectExpression(doUpdate.Where);
+                }
             }
         }
 

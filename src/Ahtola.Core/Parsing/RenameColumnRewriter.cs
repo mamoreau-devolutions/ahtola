@@ -251,6 +251,7 @@ internal static class RenameColumnRewriter
         RenameColumnSchema schema)
     {
         private readonly List<SqlSourceSpan> _edits = [];
+        private bool _skipExistsInResultExpressions;
 
         public string? Apply(string sql)
         {
@@ -301,11 +302,19 @@ internal static class RenameColumnRewriter
             scope.Bindings.Add(new Binding("NEW", triggerColumns, isTargetTrigger, QualifiedOnly: true));
             scope.Bindings.Add(new Binding("OLD", triggerColumns, isTargetTrigger, QualifiedOnly: true));
 
-            if (trigger.When is not null)
-                WalkExpression(trigger.When, scope);
+            _skipExistsInResultExpressions = true;
+            try
+            {
+                if (trigger.When is not null)
+                    WalkExpression(trigger.When, scope);
 
-            foreach (var statement in trigger.Body)
-                WalkStatement(statement, scope);
+                foreach (var statement in trigger.Body)
+                    WalkStatement(statement, scope);
+            }
+            finally
+            {
+                _skipExistsInResultExpressions = false;
+            }
         }
 
         private void WalkStatement(ParsedStatement statement, Scope? outer)
@@ -370,22 +379,25 @@ internal static class RenameColumnRewriter
 
         private void WalkUpsert(UpsertClause upsert, string tableName, Scope? outer)
         {
-            var scope = TableScope(tableName, outer);
-            foreach (var target in upsert.Target)
+            foreach (var clause in upsert.Clauses())
             {
-                if (target.Expression is not null)
-                    WalkExpression(target.Expression, scope);
-            }
+                var scope = TableScope(tableName, outer);
+                foreach (var target in clause.Target)
+                {
+                    if (target.Expression is not null)
+                        WalkExpression(target.Expression, scope);
+                }
 
-            if (upsert.TargetWhere is not null)
-                WalkExpression(upsert.TargetWhere, scope);
+                if (clause.TargetWhere is not null)
+                    WalkExpression(clause.TargetWhere, scope);
 
-            if (upsert.Action is DoUpdateUpsertAction update)
-            {
-                WalkAssignments(update.Assignments, tableName);
-                WalkAssignmentValues(update.Assignments, scope);
-                if (update.Where is not null)
-                    WalkExpression(update.Where, scope);
+                if (clause.Action is DoUpdateUpsertAction update)
+                {
+                    WalkAssignments(update.Assignments, tableName);
+                    WalkAssignmentValues(update.Assignments, scope);
+                    if (update.Where is not null)
+                        WalkExpression(update.Where, scope);
+                }
             }
         }
 
@@ -393,12 +405,21 @@ internal static class RenameColumnRewriter
         {
             WalkAssignments(update.Assignments, update.TableName);
             var scope = TableScope(update.TableName, outer);
+            // UPDATE...FROM introduces additional table sources whose columns may be
+            // referenced in the SET values, WHERE, ORDER BY, and LIMIT. Bind them into the
+            // same scope so qualified references (e.g. SET z = src.b FROM src) resolve and
+            // get rewritten when src is the rename target.
+            if (update.From is not null)
+                BindSource(update.From, scope);
+
             WalkAssignmentValues(update.Assignments, scope);
             if (update.Where is not null)
                 WalkExpression(update.Where, scope);
 
             WalkProjections(update.Returning, scope);
             WalkOrderBy(update.OrderBy, scope);
+            WalkExpression(update.Limit, scope);
+            WalkExpression(update.Offset, scope);
         }
 
         private void WalkDelete(DeleteStatement delete, Scope? outer)
@@ -517,7 +538,10 @@ internal static class RenameColumnRewriter
 
             foreach (var projection in select.Projections)
             {
-                WalkExpression(projection.Expression, scope);
+                if (_skipExistsInResultExpressions)
+                    WalkResultExpression(projection.Expression, scope);
+                else
+                    WalkExpression(projection.Expression, scope);
                 if (projection.Alias is not null)
                     scope.OutputAliases.Add(projection.Alias);
             }
@@ -534,6 +558,11 @@ internal static class RenameColumnRewriter
             WalkExpression(select.Limit, scope);
             WalkExpression(select.Offset, scope);
         }
+
+        // SQLite validates EXISTS subqueries reached through a trigger result expression against
+        // the candidate trigger after the rewrite pass instead of rewriting them eagerly.
+        private void WalkResultExpression(Expression expression, Scope? scope)
+            => WalkExpression(expression, scope, skipExistsSubqueries: true);
 
         private void WalkProjections(IReadOnlyList<Projection>? projections, Scope? scope)
         {
@@ -572,7 +601,7 @@ internal static class RenameColumnRewriter
                     scope.Bindings.Add(new Binding(
                         named.Alias ?? UnqualifiedObjectName(named.Name),
                         schema.ResolveColumns(named.Name),
-                        named.Alias is null && schema.IsRenameTarget(named.Name),
+                        schema.IsRenameTarget(named.Name),
                         QualifiedOnly: false));
                     break;
                 case DerivedTableSource derived:
@@ -585,7 +614,7 @@ internal static class RenameColumnRewriter
                     break;
                 case TableValuedFunctionSource function:
                     foreach (var argument in function.Arguments)
-                        WalkExpression(argument, scope.Parent);
+                        WalkExpression(argument, scope);
 
                     scope.Bindings.Add(new Binding(
                         function.Alias ?? function.Name,
@@ -628,7 +657,10 @@ internal static class RenameColumnRewriter
             }
         }
 
-        public void WalkExpression(Expression? expression, Scope? scope)
+        public void WalkExpression(
+            Expression? expression,
+            Scope? scope,
+            bool skipExistsSubqueries = false)
         {
             switch (expression)
             {
@@ -645,66 +677,67 @@ internal static class RenameColumnRewriter
                     return;
                 case RowValueExpression row:
                     foreach (var value in row.Values)
-                        WalkExpression(value, scope);
+                        WalkExpression(value, scope, skipExistsSubqueries);
                     return;
                 case FunctionExpression function:
                     foreach (var argument in function.Arguments)
-                        WalkExpression(argument, scope);
+                        WalkExpression(argument, scope, skipExistsSubqueries);
 
-                    WalkExpression(function.Filter, scope);
+                    WalkExpression(function.Filter, scope, skipExistsSubqueries);
                     WalkWindow(function.Window, scope);
                     return;
                 case ScalarSubqueryExpression scalar:
                     WalkQuery(scalar.Query, scope);
                     return;
                 case ExistsExpression exists:
-                    WalkQuery(exists.Query, scope);
+                    if (!skipExistsSubqueries)
+                        WalkQuery(exists.Query, scope);
                     return;
                 case CollationExpression collation:
-                    WalkExpression(collation.Expression, scope);
+                    WalkExpression(collation.Expression, scope, skipExistsSubqueries);
                     return;
                 case CastExpression cast:
-                    WalkExpression(cast.Expression, scope);
+                    WalkExpression(cast.Expression, scope, skipExistsSubqueries);
                     return;
                 case CaseExpression caseExpression:
-                    WalkExpression(caseExpression.Operand, scope);
+                    WalkExpression(caseExpression.Operand, scope, skipExistsSubqueries);
                     foreach (var clause in caseExpression.Clauses)
                     {
-                        WalkExpression(clause.When, scope);
-                        WalkExpression(clause.Then, scope);
+                        WalkExpression(clause.When, scope, skipExistsSubqueries);
+                        WalkExpression(clause.Then, scope, skipExistsSubqueries);
                     }
 
-                    WalkExpression(caseExpression.Else, scope);
+                    WalkExpression(caseExpression.Else, scope, skipExistsSubqueries);
                     return;
                 case LikeExpression like:
-                    WalkExpression(like.Value, scope);
-                    WalkExpression(like.Pattern, scope);
-                    WalkExpression(like.Escape, scope);
+                    WalkExpression(like.Value, scope, skipExistsSubqueries);
+                    WalkExpression(like.Pattern, scope, skipExistsSubqueries);
+                    WalkExpression(like.Escape, scope, skipExistsSubqueries);
                     return;
                 case GlobExpression glob:
-                    WalkExpression(glob.Value, scope);
-                    WalkExpression(glob.Pattern, scope);
+                    WalkExpression(glob.Value, scope, skipExistsSubqueries);
+                    WalkExpression(glob.Pattern, scope, skipExistsSubqueries);
                     return;
                 case InExpression inExpression:
-                    WalkExpression(inExpression.Value, scope);
+                    WalkExpression(inExpression.Value, scope, skipExistsSubqueries);
                     foreach (var value in inExpression.Values)
-                        WalkExpression(value, scope);
+                        WalkExpression(value, scope, skipExistsSubqueries);
                     return;
                 case InSubqueryExpression inSubquery:
-                    WalkExpression(inSubquery.Value, scope);
+                    WalkExpression(inSubquery.Value, scope, skipExistsSubqueries);
                     WalkQuery(inSubquery.Query, scope);
                     return;
                 case BetweenExpression between:
-                    WalkExpression(between.Value, scope);
-                    WalkExpression(between.Lower, scope);
-                    WalkExpression(between.Upper, scope);
+                    WalkExpression(between.Value, scope, skipExistsSubqueries);
+                    WalkExpression(between.Lower, scope, skipExistsSubqueries);
+                    WalkExpression(between.Upper, scope, skipExistsSubqueries);
                     return;
                 case UnaryExpression unary:
-                    WalkExpression(unary.Operand, scope);
+                    WalkExpression(unary.Operand, scope, skipExistsSubqueries);
                     return;
                 case BinaryExpression binary:
-                    WalkExpression(binary.Left, scope);
-                    WalkExpression(binary.Right, scope);
+                    WalkExpression(binary.Left, scope, skipExistsSubqueries);
+                    WalkExpression(binary.Right, scope, skipExistsSubqueries);
                     return;
                 default:
                     throw Reject(
@@ -724,7 +757,7 @@ internal static class RenameColumnRewriter
                     {
                         var span = spans.GetName(column);
                         if (span is null)
-                            throw Reject($"no such column: {column.Name}");
+                            throw Reject($"no such column: {FormatQualifiedName(column)}");
 
                         _edits.Add(span.Value);
                         return;
@@ -732,9 +765,18 @@ internal static class RenameColumnRewriter
                 case Resolution.Other:
                     return;
                 default:
-                    throw Reject($"no such column: {column.Name}");
+                    throw Reject($"no such column: {FormatQualifiedName(column)}");
             }
         }
+
+        /// <summary>
+        /// Formats a column reference for a "no such column" diagnostic, preserving a
+        /// schema qualifier (<c>main.t.b</c>) the way SQLite does. <see cref="ColumnExpression.Name"/>
+        /// already carries the table qualifier for one- or two-part references, so the schema
+        /// is prepended only when present.
+        /// </summary>
+        private static string FormatQualifiedName(ColumnExpression column)
+            => column.Schema is { } schema ? schema + "." + column.Name : column.Name;
 
         private Resolution Resolve(string? qualifier, string name, Scope? scope)
         {
