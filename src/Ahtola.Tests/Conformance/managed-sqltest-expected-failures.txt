@@ -7,7 +7,6 @@
 alter_table.sqltest::alter-table-rename-column-view-attached-db-qualified | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern 'cannot reference'
 alter_table.sqltest::alter-table-rename-column-trigger-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-alter_table.sqltest::alter-table-rename-temp-table-invalid-temp-trigger-missing-main-table | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-rename-column-temp-trigger-exists-result-expr-error | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-rename-column-temp-table-rejects-invalid-trigger-rewrite | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-rename-column-temp-trigger-attached-cross-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.

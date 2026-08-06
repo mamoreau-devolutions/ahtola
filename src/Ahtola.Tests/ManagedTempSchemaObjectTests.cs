@@ -358,6 +358,32 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void RenamingTempTableRejectsTriggerReferencingDroppedMainTable()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE missing_main_tbl (x)");
+        Execute(connection, "CREATE TEMP TABLE temp_rename_src (a)");
+        Execute(connection, "CREATE TEMP TABLE temp_trigger_driver (b)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_invalid_temp_rename AFTER UPDATE ON temp.temp_trigger_driver BEGIN "
+                + "SELECT * FROM missing_main_tbl; END");
+        Execute(connection, "DROP TABLE missing_main_tbl");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE temp.temp_rename_src RENAME TO temp_rename_dst"))!
+            .Message.Should().Be("error in trigger trig_invalid_temp_rename: no such table: missing_main_tbl");
+
+        ReadRows(
+            connection,
+            "SELECT name FROM temp.sqlite_schema WHERE type = 'table' ORDER BY name")
+            .Select(row => row[0].AsText())
+            .Should()
+            .Equal("temp_rename_src", "temp_trigger_driver");
+    }
+
+    [Test]
     public void TempViewBodyOutsideTheTempSchemaIsRejectedUpFront()
     {
         using var database = new EmbeddedDatabase();

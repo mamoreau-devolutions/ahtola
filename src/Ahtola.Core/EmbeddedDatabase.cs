@@ -5180,7 +5180,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 : $"error in {kind} {name} after {operation}: {failure.Message}",
             failure);
 
-    private void ValidateTriggerSchema(
+    internal void ValidateTriggerSchema(
         TriggerDefinition trigger,
         QueryContext context,
         CancellationToken cancellationToken)
@@ -37338,8 +37338,16 @@ public sealed class EmbeddedConnection : IDisposable
     // Temp triggers are connection-private, so the altered database cannot rewrite their stored
     // definitions itself. Prepare their catalog replacement before the primary ALTER succeeds,
     // then publish it with the same transaction lifetime as the table rename.
-    private PendingTempTriggerCatalogRewrite? PrepareTempTriggerTableRename(RoutedStatement routed)
+    private PendingTempTriggerCatalogRewrite? PrepareTempTriggerTableRename(
+        RoutedStatement routed,
+        CancellationToken cancellationToken)
     {
+        if (ReferenceEquals(routed.Database, _tempDatabase)
+            && routed.Statement is AlterTableRenameStatement)
+        {
+            ValidateTempTableOwnedTriggers(cancellationToken);
+        }
+
         if (!ReferenceEquals(routed.Database, _database)
             || routed.Statement is not AlterTableRenameStatement rename)
         {
@@ -37381,6 +37389,45 @@ public sealed class EmbeddedConnection : IDisposable
         }
 
         return changed ? new PendingTempTriggerCatalogRewrite(candidateCatalog) : null;
+    }
+
+    private void ValidateTempTableOwnedTriggers(CancellationToken cancellationToken)
+    {
+        var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
+        var mainCatalog = GetTransactionState(_database)?.Catalog ?? _database.LiveCatalog;
+        var tables = new Dictionary<string, EmbeddedTable>(mainCatalog.Tables, StringComparer.OrdinalIgnoreCase);
+        foreach (var table in tempCatalog.Tables)
+            tables[table.Key] = table.Value;
+
+        var views = new Dictionary<string, ViewDefinition>(mainCatalog.Views, StringComparer.OrdinalIgnoreCase);
+        foreach (var view in tempCatalog.Views)
+            views[view.Key] = view.Value;
+
+        var context = new EmbeddedDatabase.QueryContext(
+            tables,
+            new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
+            views,
+            tempCatalog.Triggers,
+            SchemaValidation: true);
+        foreach (var trigger in tempCatalog.Triggers.Values)
+        {
+            // Explicitly qualified body statements are routed by the connection at execution time.
+            // This combined-catalog preflight only models temp-first unqualified resolution.
+            if (trigger.TargetSchema is not null
+                || trigger.Body.Any(ContainsSchemaQualification))
+            {
+                continue;
+            }
+
+            try
+            {
+                _tempDatabase.ValidateTriggerSchema(trigger, context, cancellationToken);
+            }
+            catch (EmbeddedSqlException exception)
+            {
+                throw new EmbeddedSqlException($"error in trigger {trigger.Name}: {exception.Message}", exception);
+            }
+        }
     }
 
     private PendingTempTriggerCatalogRewrite? PrepareTempTriggerColumnRename(RoutedStatement routed)
@@ -38174,7 +38221,7 @@ public sealed class EmbeddedConnection : IDisposable
                 EmbeddedDatabase.SchemaCatalog? statementCatalog = null;
                 HashSet<EmbeddedDatabase.ForeignKeyViolation>? deferredBefore = null;
                 var tempTriggers = CreateTempTriggerBridge(routed.Database, out var tempTriggerSession);
-                var pendingTempTriggerRewrite = PrepareTempTriggerTableRename(routed)
+                var pendingTempTriggerRewrite = PrepareTempTriggerTableRename(routed, cancellationToken)
                     ?? PrepareTempTriggerColumnRename(routed);
                 try
                 {
