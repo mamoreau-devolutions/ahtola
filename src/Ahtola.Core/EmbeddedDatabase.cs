@@ -41973,12 +41973,20 @@ public sealed class EmbeddedConnection : IDisposable
     private ExecutionResult ExecutePragmaJournalMode(PragmaJournalModeStatement statement)
     {
         var database = ResolvePragmaDatabase(statement.Schema);
-        var current = database.IsFileBacked
+        var isTempDatabase = ReferenceEquals(database, _tempDatabase);
+        var current = isTempDatabase
+            ? "wal"
+            : database.IsFileBacked
             ? database.GetJournalMode().ToString().ToLowerInvariant()
             : "memory";
         if (statement.Mode is null)
             return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
 
+        // Turso's JournalMode opcode keeps non-main databases in their existing mode.
+        // The connection-local temp catalog has no managed pager, but SQL observes its
+        // WAL-compatible mode rather than that implementation detail.
+        if (isTempDatabase)
+            return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
         if (!database.IsFileBacked)
             return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
         if (!Enum.TryParse<SqliteJournalMode>(statement.Mode, ignoreCase: true, out var requested))

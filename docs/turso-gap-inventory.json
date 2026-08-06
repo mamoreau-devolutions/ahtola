@@ -14,12 +14,12 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 16,
+    "current_conformance_expected_failures": 15,
     "last_reconciled": "2026-08-08",
-    "entry_count": 210,
+    "entry_count": 211,
     "counts": {
       "by_layer": {
-        "vdbe": 37,
+        "vdbe": 38,
         "compilation": 66,
         "parser": 29,
         "functions": 26,
@@ -29,7 +29,7 @@
       },
       "by_kind": {
         "missing": 95,
-        "divergent": 71,
+        "divergent": 72,
         "partial": 27,
         "extension": 8,
         "parity": 9
@@ -38,16 +38,16 @@
         "s3-perf": 34,
         "s2-capability": 104,
         "s4-intentional": 33,
-        "s1-correctness": 39
+        "s1-correctness": 40
       },
       "by_effort": {
         "M": 75,
         "L": 37,
-        "S": 98
+        "S": 99
       },
       "by_status": {
         "open": 110,
-        "closed": 100
+        "closed": 101
       }
     },
     "schema": {
@@ -135,6 +135,20 @@
       "conformance_links": [],
       "notes": "No cookie opcodes: user_version/application_id read-write and schema-cookie validation (stale-schema detection, 'database schema has changed' errors) are not modeled at the VDBE level. Turso re-parses schema via ParseSchema when the cookie changes; Ahtola snapshots schema differently (see mvcc entries). PageCount/MaxPgcnt/JournalMode pragma surface partially exists tree-walking; journal_mode switching works, page_count/max_page_count unverified.",
       "status": "open"
+    },
+    {
+      "id": "vdbe-temp-journal-mode-scope",
+      "layer": "vdbe",
+      "kind": "divergent",
+      "turso_ref": "turso-src/core/vdbe/execute.rs::op_journal_mode_inner (returns the previous mode when db != MAIN_DB_ID)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::EmbeddedConnection.ExecutePragmaJournalMode",
+      "severity": "s1-correctness",
+      "effort": "S",
+      "conformance_links": [
+        "temp_tables_mvcc.sqltest::pragma-temp-journal-mode-mvcc-is-ignored"
+      ],
+      "notes": "Closed 2026-08-08. Turso accepts the requested journal mode but leaves every non-main database unchanged and returns its prior mode. Ahtola's connection-local temp catalog has no managed pager, so it had exposed the implementation-specific value 'memory'. It now reports its WAL-compatible temp mode and leaves it unchanged when PRAGMA temp.journal_mode=MVCC is issued, matching Turso's observable contract without claiming to enable MVCC.",
+      "status": "closed"
     },
     {
       "id": "vdbe-fk-enforcement-opcodes",
