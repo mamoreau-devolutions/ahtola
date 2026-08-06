@@ -610,11 +610,20 @@ public sealed class ResumableStatement : IDisposable
                 case DeleteInstruction delete:
                     {
                         var target = RequireWriteTarget(delete.Cursor);
-                        var deleteRow = target.DeleteRow
-                            ?? throw new InvalidOperationException(
-                                $"Cursor {delete.Cursor.Index} has no delete action bound.");
-                        deleteRow(_cursorPositions[delete.Cursor.Index]);
-                        RowsAffected = checked(RowsAffected + 1);
+                        var position = _cursorPositions[delete.Cursor.Index];
+                        if (target.TryDeleteRow is { } tryDeleteRow)
+                        {
+                            if (tryDeleteRow(position))
+                                RowsAffected = checked(RowsAffected + 1);
+                        }
+                        else
+                        {
+                            var deleteRow = target.DeleteRow
+                                ?? throw new InvalidOperationException(
+                                    $"Cursor {delete.Cursor.Index} has no delete action bound.");
+                            deleteRow(position);
+                            RowsAffected = checked(RowsAffected + 1);
+                        }
                         AdvanceInstructionPointer();
                         break;
                     }
@@ -1322,12 +1331,16 @@ public sealed class ResumableStatement : IDisposable
     private bool ExecuteSubprogram(ProgramInstruction instruction, CancellationToken cancellationToken)
     {
         var instructionOffset = _instructionPointer.Offset;
-        if (!_subprogramStatements.TryGetValue(instructionOffset, out var subprogram))
+        var hasCachedSubprogram = _subprogramStatements.TryGetValue(instructionOffset, out var subprogram);
+        if (!hasCachedSubprogram
+            || (instruction.Subprogram.RequiresFreshRuntime
+                && subprogram!.State != ResumableStatementState.Yielded))
         {
+            subprogram?.Dispose();
             subprogram = instruction.Subprogram.CreateRuntime(CreateSubprogramBinding(instruction));
-            _subprogramStatements.Add(instructionOffset, subprogram);
+            _subprogramStatements[instructionOffset] = subprogram;
         }
-        else if (subprogram.State == ResumableStatementState.Yielded)
+        else if (subprogram!.State == ResumableStatementState.Yielded)
         {
             subprogram.Resume();
         }

@@ -5,7 +5,6 @@
 #     --filter FullyQualifiedName~RegenerateExpectedFailures -- NUnit.Explicit=true
 
 delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'memory'
-foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates | expected success but got error: EXPLAIN is only supported for statements lowered to the bytecode compiler.
 mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'
 mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'
 mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'

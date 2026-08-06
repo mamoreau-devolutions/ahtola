@@ -988,6 +988,13 @@ public sealed class VdbeWriteTarget
     /// <summary>Marks the scan row at a position for deletion (DELETE).</summary>
     public Action<int>? DeleteRow { get; init; }
 
+    /// <summary>
+    /// Deletes the scan row at a position and returns whether it still existed. This is used by a
+    /// snapshot-scanning cascade action, where an earlier recursive action may already have removed a row
+    /// that was present when the current action began.
+    /// </summary>
+    public Func<int, bool>? TryDeleteRow { get; init; }
+
     /// <summary>Builds and records the new row for a position, returning the values
     /// a following <c>Column</c>/<c>RowId</c> should observe (INSERT/UPDATE).</summary>
     public Func<int, VdbeRowMutation>? MutateRow { get; init; }
@@ -1005,6 +1012,7 @@ public sealed class VdbeWriteTarget
 public sealed class VdbeSubprogram
 {
     private readonly object _syncRoot = new();
+    private readonly Func<VdbeParameterBinding?, IReadOnlyList<VdbeWriteTarget?>>? _dynamicWriteTargets;
     private ReadOnlyCollection<VdbeCursorSource?>? _cursorSources;
     private ReadOnlyCollection<VdbeWriteTarget?>? _writeTargets;
     private VdbeProgram? _program;
@@ -1027,11 +1035,30 @@ public sealed class VdbeSubprogram
         ParameterSlotCount = parameterSlotCount;
     }
 
+    private VdbeSubprogram(
+        int parameterSlotCount,
+        Func<VdbeParameterBinding?, IReadOnlyList<VdbeWriteTarget?>> dynamicWriteTargets)
+        : this(parameterSlotCount)
+    {
+        _dynamicWriteTargets = dynamicWriteTargets
+            ?? throw new ArgumentNullException(nameof(dynamicWriteTargets));
+    }
+
     /// <summary>
     /// Creates a subprogram reference that can be resolved once after its body has been built. This is
     /// required when a foreign-key action recursively invokes the subprogram currently being compiled.
     /// </summary>
     public static VdbeSubprogram CreateDeferred(int parameterSlotCount) => new(parameterSlotCount);
+
+    /// <summary>
+    /// Creates a deferred action program whose write targets are rebuilt from its bound values for every
+    /// invocation. Foreign-key cascade actions need this because each recursive call scans the live child
+    /// rows matching a different parent key.
+    /// </summary>
+    internal static VdbeSubprogram CreateDeferred(
+        int parameterSlotCount,
+        Func<VdbeParameterBinding?, IReadOnlyList<VdbeWriteTarget?>> dynamicWriteTargets)
+        => new(parameterSlotCount, dynamicWriteTargets);
 
     /// <summary>
     /// Resolves a deferred subprogram exactly once. The program's parameter-slot count must match the
@@ -1099,13 +1126,16 @@ public sealed class VdbeSubprogram
 
     public IReadOnlyList<VdbeWriteTarget?>? WriteTargets => _writeTargets;
 
+    internal bool RequiresFreshRuntime => _dynamicWriteTargets is not null;
+
     internal ResumableStatement CreateRuntime(VdbeParameterBinding? parameterBinding)
     {
         lock (_syncRoot)
         {
             var program = _program ?? throw new InvalidOperationException(
                 "The recursive VDBE subprogram was not resolved before execution.");
-            return new ResumableStatement(program, _cursorSources, _writeTargets, parameterBinding);
+            var writeTargets = _dynamicWriteTargets?.Invoke(parameterBinding) ?? _writeTargets;
+            return new ResumableStatement(program, _cursorSources, writeTargets, parameterBinding);
         }
     }
 }

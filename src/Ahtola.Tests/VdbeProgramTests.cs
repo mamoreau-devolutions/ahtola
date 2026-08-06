@@ -300,6 +300,44 @@ public class VdbeProgramTests
     }
 
     [Test]
+    public void DeleteInstructionCountsOnlyRowsDeletedByItsLiveWriteTarget()
+    {
+        var attemptedPositions = new List<int>();
+        var writeTarget = new VdbeWriteTarget
+        {
+            TableName = "t",
+            RowCount = 2,
+            GetRow = _ => [SqlValue.Integer(1)],
+            GetRowId = index => index + 1,
+            TryDeleteRow = position =>
+            {
+                attemptedPositions.Add(position);
+                return position == 0;
+            },
+            Commit = () => null,
+        };
+        using var statement = new ResumableStatement(
+            new VdbeProgram(
+                registerCount: 0,
+                cursorCount: 1,
+                [
+                    new OpenWriteCursorInstruction(new Cursor(0), "t", 1),
+                    new RewindCursorInstruction(new Cursor(0), new ProgramCounter(4)),
+                    new DeleteInstruction(new Cursor(0)),
+                    new NextInstruction(new Cursor(0), new ProgramCounter(2)),
+                    new CommitInstruction(new Cursor(0)),
+                    new CloseCursorInstruction(new Cursor(0)),
+                    new HaltInstruction(),
+                ]),
+            writeTargets: [writeTarget]);
+
+        statement.StepResumable().Should().Be(ResumableStatementStepResult.Done);
+
+        attemptedPositions.Should().Equal(0, 1);
+        statement.RowsAffected.Should().Be(1);
+    }
+
+    [Test]
     public void DeferredProgramInstructionResolvesARecursiveSubprogram()
     {
         var parameter = new Register(0);

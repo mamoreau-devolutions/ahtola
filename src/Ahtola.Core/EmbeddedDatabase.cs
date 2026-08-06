@@ -12549,6 +12549,22 @@ public sealed partial class EmbeddedDatabase : IDisposable
         context = EnterCollationSource(
             context,
             new NamedTableSource(statement.TableName, statement.Alias));
+        if (CanCompileForeignKeyCascadeDelete(context)
+            && TryCompileSelfReferentialCascadeDelete(
+                statement,
+                parameters,
+                context,
+                out var foreignKeyCompiled,
+                out var foreignKeyColumns,
+                out var foreignKeyHasReturning))
+        {
+            return RunCompiledDml(
+                foreignKeyCompiled,
+                foreignKeyColumns,
+                foreignKeyHasReturning,
+                parameters);
+        }
+
         if (CanCompileDml(context)
             && TryCompileDelete(statement, parameters, context, out var compiled, out var columns, out var hasReturning))
             return RunCompiledDml(compiled, columns, hasReturning, parameters);
@@ -12562,6 +12578,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private bool CanCompileDml(QueryContext context)
         => !context.CancellationToken.CanBeCanceled
             && !context.ForeignKeysEnabled
+            && !HasOpenBlobHandles;
+
+    private bool CanCompileForeignKeyCascadeDelete(QueryContext context)
+        => !context.CancellationToken.CanBeCanceled
+            && context.ForeignKeysEnabled
             && !HasOpenBlobHandles;
 
     private bool CanRouteInsertThroughCompiler(InsertStatement statement, QueryContext context)
@@ -18929,6 +18950,201 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return true;
     }
 
+    private bool TryCompileSelfReferentialCascadeDelete(
+        DeleteStatement statement,
+        SqlValue[] parameters,
+        QueryContext context,
+        out CompiledDml compiled,
+        out string[] columns,
+        out bool hasReturning)
+    {
+        compiled = null!;
+        columns = [];
+        hasReturning = false;
+
+        if (statement.Limit is not null
+            || statement.Offset is not null
+            || statement.EffectiveOrderBy.Count != 0
+            || statement.Alias is not null
+            || statement.Returning is not null
+            || context.CommonTableExpressions.Count != 0
+            || IsSchemaTable(statement.TableName)
+            || !context.Tables.TryGetValue(statement.TableName, out var table)
+            || !table.HasRowid)
+        {
+            return false;
+        }
+
+        if (table.ForeignKeys.Count != 1)
+            return false;
+
+        var foreignKey = table.ForeignKeys[0];
+        if (!string.Equals(foreignKey.ParentTable, statement.TableName, StringComparison.OrdinalIgnoreCase)
+            || foreignKey.OnDelete != ForeignKeyAction.Cascade)
+        {
+            return false;
+        }
+
+        foreach (var (_, candidateTable) in context.Tables)
+        {
+            foreach (var candidateForeignKey in candidateTable.ForeignKeys)
+            {
+                if (string.Equals(
+                        candidateForeignKey.ParentTable,
+                        statement.TableName,
+                        StringComparison.OrdinalIgnoreCase)
+                    && !ReferenceEquals(candidateForeignKey, foreignKey))
+                {
+                    return false;
+                }
+            }
+        }
+
+        DmlRowFilter? filter = null;
+        if (statement.Where is not null)
+        {
+            filter = CompileDmlRowPredicate(statement.Where, table, statement.TableName, parameters, context);
+            if (filter is null)
+                return false;
+        }
+
+        var parent = ResolveForeignKeyParent(context.Tables, statement.TableName, foreignKey);
+        var parentRegisters = new Register[parent.ColumnIndices.Count];
+        for (var index = 0; index < parentRegisters.Length; index++)
+            parentRegisters[index] = new Register(index);
+
+        var cascadeAction = VdbeSubprogram.CreateDeferred(
+            parentRegisters.Length,
+            binding => CreateCompiledCascadeWriteTargets(
+                context,
+                statement.TableName,
+                table,
+                foreignKey,
+                parent,
+                binding));
+        var actionProgram = DmlStatementCompiler.BuildProgramWithMutationPrograms(
+            DmlKind.Delete,
+            statement.TableName,
+            table.Columns.Length,
+            filter: null,
+            CreateParentKeyCaptureInstructions(parent, parentRegisters),
+            [new ProgramInstruction(parentRegisters, cascadeAction)],
+            registerCount: parentRegisters.Length,
+            parameterSlotCount: parentRegisters.Length);
+        cascadeAction.Resolve(actionProgram);
+
+        var sourceRows = table.Rows.ToArray();
+        var sourceRowIds = table.RowIds.ToArray();
+        var writeTarget = new VdbeWriteTarget
+        {
+            TableName = statement.TableName,
+            RowCount = sourceRows.Length,
+            GetRow = index => sourceRows[index],
+            GetRowId = index => sourceRowIds[index],
+            TryDeleteRow = index => DeleteCompiledCascadeRow(
+                context,
+                statement.TableName,
+                table,
+                sourceRowIds[index],
+                countAsCascade: false),
+            Commit = () => null,
+        };
+        var program = DmlStatementCompiler.BuildProgramWithMutationPrograms(
+            DmlKind.Delete,
+            statement.TableName,
+            table.Columns.Length,
+            filter,
+            CreateParentKeyCaptureInstructions(parent, parentRegisters),
+            [new ProgramInstruction(parentRegisters, cascadeAction)],
+            registerCount: parentRegisters.Length);
+        compiled = new CompiledDml(program, [writeTarget]);
+        return true;
+    }
+
+    private static IReadOnlyList<VdbeInstruction> CreateParentKeyCaptureInstructions(
+        ForeignKeyParent parent,
+        IReadOnlyList<Register> destinationRegisters)
+    {
+        var instructions = new VdbeInstruction[destinationRegisters.Count];
+        for (var index = 0; index < destinationRegisters.Count; index++)
+        {
+            instructions[index] = new ColumnInstruction(
+                new Cursor(0),
+                parent.ColumnIndices[index],
+                destinationRegisters[index]);
+        }
+
+        return instructions;
+    }
+
+    private IReadOnlyList<VdbeWriteTarget?> CreateCompiledCascadeWriteTargets(
+        QueryContext context,
+        string tableName,
+        EmbeddedTable table,
+        ForeignKeyDefinition foreignKey,
+        ForeignKeyParent parent,
+        VdbeParameterBinding? binding)
+    {
+        if (binding is null)
+            throw new InvalidOperationException("A compiled foreign-key cascade action requires parent key bindings.");
+
+        var parentValues = new SqlValue[binding.Count];
+        for (var index = 0; index < parentValues.Length; index++)
+            parentValues[index] = binding[index];
+
+        var matchingPositions = FindForeignKeyChildPositions(
+            table,
+            tableName,
+            foreignKey,
+            parent,
+            parentValues);
+        var sourceRows = new SqlValue[matchingPositions.Count][];
+        var sourceRowIds = new long[matchingPositions.Count];
+        for (var index = 0; index < matchingPositions.Count; index++)
+        {
+            var position = matchingPositions[index];
+            sourceRows[index] = table.Rows[position];
+            sourceRowIds[index] = table.RowIds[position];
+        }
+
+        return
+        [
+            new VdbeWriteTarget
+            {
+                TableName = tableName,
+                RowCount = sourceRows.Length,
+                GetRow = index => sourceRows[index],
+                GetRowId = index => sourceRowIds[index],
+                TryDeleteRow = index => DeleteCompiledCascadeRow(
+                    context,
+                    tableName,
+                    table,
+                    sourceRowIds[index],
+                    countAsCascade: true),
+                Commit = () => null,
+            },
+        ];
+    }
+
+    private bool DeleteCompiledCascadeRow(
+        QueryContext context,
+        string tableName,
+        EmbeddedTable table,
+        long rowId,
+        bool countAsCascade)
+    {
+        var position = table.RowIds.IndexOf(rowId);
+        if (position < 0)
+            return false;
+
+        table.Rows.RemoveAt(position);
+        table.RowIds.RemoveAt(position);
+        context.ReportRowChange(SqliteChangeOperation.Delete, tableName, table, rowId);
+        if (countAsCascade)
+            _totalChanges++;
+        return true;
+    }
+
     // Reuses the SELECT expression emitter for RETURNING. The write loop first buffers every affected
     // row, then this block runs over that buffer in source order before Commit, preserving evaluator
     // predicate/assignment callback order while keeping projection failures statement-atomic.
@@ -19132,6 +19348,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         out _,
                         out _):
                 return DescribeProgram(compiledUpdate.Program);
+            case DeleteStatement delete
+                when TryCompileSelfReferentialCascadeDelete(
+                        delete,
+                        parameters,
+                        compilationContext,
+                        out var compiledForeignKeyDelete,
+                        out _,
+                        out _):
+                return DescribeProgram(compiledForeignKeyDelete.Program);
             case DeleteStatement delete
                 when CanCompileDml(compilationContext)
                     && TryCompileDelete(
@@ -19339,6 +19564,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             CompareInstruction => VdbeExplain.Describe(instruction),
             JumpIfNotTrueInstruction => VdbeExplain.Describe(instruction),
             CastInstruction => VdbeExplain.Describe(instruction),
+            ProgramInstruction => VdbeExplain.Describe(instruction),
             OpenJoinCursorInstruction => VdbeExplain.Describe(instruction),
             OpenReadCursorInstruction open => (
                 open.Cursor.Index,

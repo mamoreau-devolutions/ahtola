@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 15,
+    "current_conformance_expected_failures": 14,
     "last_reconciled": "2026-08-08",
     "entry_count": 211,
     "counts": {
@@ -155,15 +155,14 @@
       "layer": "vdbe",
       "kind": "divergent",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::FkCounter, FkIfZero, FkCheck (deferred-FK counters and immediate FK validation as opcodes)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (FK checks inside write/delegate paths; defer_foreign_keys works per mvcc audit)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (FK checks and narrow compiled self-cascade DELETE lowering); src/Ahtola.Core/Execution/VdbeProgram.cs (Program instruction)",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [
-        "foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates",
         "gencol.sqltest::fk-gencol-unique-idx-update-cascade",
         "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
       ],
-      "notes": "FK enforcement exists but lives in the write-target delegates, not opcodes. defer_foreign_keys and immediate checking work for common shapes; the divergence is structural. Closed 2026-08-08: self-referential parent matching now applies the parent key affinity before comparing, so TEXT child values correctly match INTEGER PRIMARY KEY rowids during immediate inserts and deferred in-place updates. Edge coverage (FK actions through compiled DML, cross-database checks) tracked in compilation entries. Note: fk-column-constraint-multi-parent was detached from this entry 2026-08-07 — it is a parse-time column-level FK arity check, not runtime FK enforcement; see parser-fk-column-level-multi-parent-rejection (closed).",
+      "notes": "FK enforcement mostly lives in write-target delegates, not opcodes. Closed 2026-08-08: self-referential parent matching applies parent-key affinity before comparing, so TEXT child values correctly match INTEGER PRIMARY KEY rowids during immediate inserts and deferred in-place updates. Closed 2026-08-08: trigger-free, single self-referential ON DELETE CASCADE tables now lower through Program with a deferred recursive subprogram and dynamic write targets, so the recursive FK EXPLAIN terminates and execution sees each parent deletion before its action runs. Broader FK action compilation, deferred-FK counters, generated/unique parent keys, and cross-database checks remain open. Note: fk-column-constraint-multi-parent was detached from this entry 2026-08-07 — it is a parse-time column-level FK arity check, not runtime FK enforcement; see parser-fk-column-level-multi-parent-rejection (closed).",
       "status": "open"
     },
     {
@@ -171,11 +170,11 @@
       "layer": "vdbe",
       "kind": "missing",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Program, Gosub, Return, BeginSubrtn (trigger/FK sub-program invocation and subroutine call/return)",
-      "ahtola_ref": "none",
+      "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs (VdbeSubprogram, ProgramInstruction); src/Ahtola.Core/Execution/ResumableStatement.cs (nested runtime execution)",
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [],
-      "notes": "The Program primitive now invokes a child VDBE program with a separate register frame, fixed parent-register bindings, cached resumable child state, suppressed child rows, and a deferred form for recursive references. It is not yet wired into DML lowering, and Gosub/Return/BeginSubrtn are still absent; triggers and FK actions therefore continue to use the tree-walking implementation. Further work must preserve Turso's trigger/FK change-counter, error, and statement-rollback timing.",
+      "notes": "The Program primitive invokes a child VDBE program with a separate register frame, fixed parent-register bindings, cached resumable child state, suppressed child rows, and a deferred form for recursive references. It now lowers the narrow trigger-free, single self-referential ON DELETE CASCADE shape through dynamic child write targets; Gosub/Return/BeginSubrtn, trigger lowering, and broader FK-action lowering are still absent. Further work must preserve Turso's trigger/FK change-counter, error, and statement-rollback timing.",
       "status": "open"
     },
     {
