@@ -436,6 +436,53 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void DroppingMainColumnRejectsTempTriggerReferencingDroppedColumn()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE src_drop_temp (a, b)");
+        Execute(connection, "CREATE TEMP TABLE temp_drop_driver (x)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_temp_drop AFTER INSERT ON temp.temp_drop_driver BEGIN "
+                + "SELECT b FROM src_drop_temp; END");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE src_drop_temp DROP COLUMN b"))!
+            .Message.Should().Be("error in trigger trig_temp_drop after drop column: no such column: b");
+
+        ReadRows(connection, "SELECT name FROM pragma_table_info('src_drop_temp') ORDER BY cid")
+            .Select(row => row[0].AsText())
+            .Should()
+            .Equal("a", "b");
+    }
+
+    [Test]
+    public void DroppingMainColumnRejectsPreExistingInvalidTempTrigger()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE missing_main_tbl_drop (x)");
+        Execute(connection, "CREATE TABLE main_drop_src (a, b)");
+        Execute(connection, "CREATE TEMP TABLE temp_drop_driver_missing (x)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_invalid_temp_drop AFTER UPDATE ON temp.temp_drop_driver_missing BEGIN "
+                + "SELECT * FROM missing_main_tbl_drop; END");
+        Execute(connection, "DROP TABLE missing_main_tbl_drop");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE main_drop_src DROP COLUMN a"))!
+            .Message.Should().Be(
+                "error in trigger trig_invalid_temp_drop: no such table: missing_main_tbl_drop");
+
+        ReadRows(connection, "SELECT name FROM pragma_table_info('main_drop_src') ORDER BY cid")
+            .Select(row => row[0].AsText())
+            .Should()
+            .Equal("a", "b");
+    }
+
+    [Test]
     public void TempViewBodyOutsideTheTempSchemaIsRejectedUpFront()
     {
         using var database = new EmbeddedDatabase();

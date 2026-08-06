@@ -37572,6 +37572,98 @@ public sealed class EmbeddedConnection : IDisposable
         }
     }
 
+    private void ValidateTempTriggersAfterDropColumn(
+        RoutedStatement routed,
+        CancellationToken cancellationToken)
+    {
+        if (routed.Statement is not AlterTableDropColumnStatement drop
+            || (!ReferenceEquals(routed.Database, _database)
+                && !ReferenceEquals(routed.Database, _tempDatabase)))
+        {
+            return;
+        }
+
+        var mainCatalog = GetTransactionState(_database)?.Catalog ?? _database.LiveCatalog;
+        var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
+        var alteredCatalog = ReferenceEquals(routed.Database, _database) ? mainCatalog : tempCatalog;
+        if (tempCatalog.Triggers.Count == 0
+            || !alteredCatalog.Tables.TryGetValue(drop.TableName, out var originalTable))
+        {
+            return;
+        }
+
+        var replacement = originalTable.CreateWithoutColumn(drop.ColumnName, cancellationToken);
+        var candidateMainTables = new Dictionary<string, EmbeddedTable>(mainCatalog.Tables, StringComparer.OrdinalIgnoreCase);
+        var candidateTempTables = new Dictionary<string, EmbeddedTable>(tempCatalog.Tables, StringComparer.OrdinalIgnoreCase);
+        (ReferenceEquals(routed.Database, _database) ? candidateMainTables : candidateTempTables)[drop.TableName] = replacement;
+
+        var currentContext = CreateTempFirstValidationContext(
+            mainCatalog.Tables,
+            mainCatalog.Views,
+            tempCatalog.Tables,
+            tempCatalog.Views,
+            tempCatalog.Triggers);
+        var candidateContext = CreateTempFirstValidationContext(
+            candidateMainTables,
+            mainCatalog.Views,
+            candidateTempTables,
+            tempCatalog.Views,
+            tempCatalog.Triggers);
+        foreach (var trigger in tempCatalog.Triggers.Values)
+        {
+            // Explicitly qualified body statements are routed by the connection at execution time.
+            // This preflight only models unqualified temp-first resolution.
+            if (trigger.TargetSchema is not null
+                || trigger.Body.Any(ContainsSchemaQualification))
+            {
+                continue;
+            }
+
+            try
+            {
+                _tempDatabase.ValidateTriggerSchema(trigger, currentContext, cancellationToken);
+            }
+            catch (EmbeddedSqlException exception)
+            {
+                throw new EmbeddedSqlException($"error in trigger {trigger.Name}: {exception.Message}", exception);
+            }
+
+            try
+            {
+                _tempDatabase.ValidateTriggerSchema(trigger, candidateContext, cancellationToken);
+            }
+            catch (EmbeddedSqlException exception)
+            {
+                throw new EmbeddedSqlException(
+                    $"error in trigger {trigger.Name} after drop column: {exception.Message}",
+                    exception);
+            }
+        }
+    }
+
+    private static EmbeddedDatabase.QueryContext CreateTempFirstValidationContext(
+        IReadOnlyDictionary<string, EmbeddedTable> mainTables,
+        IReadOnlyDictionary<string, ViewDefinition> mainViews,
+        IReadOnlyDictionary<string, EmbeddedTable> tempTables,
+        IReadOnlyDictionary<string, ViewDefinition> tempViews,
+        IReadOnlyDictionary<string, TriggerDefinition> tempTriggers)
+    {
+        var tables = new Dictionary<string, EmbeddedTable>(mainTables, StringComparer.OrdinalIgnoreCase);
+        foreach (var table in tempTables)
+            tables[table.Key] = table.Value;
+
+        var views = new Dictionary<string, ViewDefinition>(mainViews, StringComparer.OrdinalIgnoreCase);
+        foreach (var view in tempViews)
+            views[view.Key] = view.Value;
+
+        return new EmbeddedDatabase.QueryContext(
+            tables,
+            new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
+            views,
+            tempTriggers,
+            SchemaValidation: true);
+    }
+
     private void ValidateTempTableOwnedTriggersAfterColumnRename(
         AlterTableRenameColumnStatement rename,
         CancellationToken cancellationToken)
@@ -38398,6 +38490,7 @@ public sealed class EmbeddedConnection : IDisposable
                 var tempTriggers = CreateTempTriggerBridge(routed.Database, out var tempTriggerSession);
                 var pendingTempTriggerRewrite = PrepareTempTriggerTableRename(routed, cancellationToken)
                     ?? PrepareTempTriggerColumnRename(routed, cancellationToken);
+                ValidateTempTriggersAfterDropColumn(routed, cancellationToken);
                 try
                 {
                     ExecutionResult result;
