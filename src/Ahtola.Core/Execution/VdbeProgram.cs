@@ -840,6 +840,26 @@ public sealed class VdbeJoinScanPlan : VdbeJoinPlanNode
     }
 }
 
+/// <summary>
+/// Optional equijoin probe for <see cref="VdbeJoinOperatorPlan"/>: hashes the right side
+/// once and probes per left row. The full <see cref="VdbeJoinCondition"/> still runs so
+/// affinity/collation edge cases stay correct; the probe is only a candidate filter.
+/// </summary>
+public sealed class VdbeJoinEquiProbe
+{
+    public VdbeJoinEquiProbe(
+        Func<VdbeJoinRow, string?> buildLeftKey,
+        Func<VdbeJoinRow, string?> buildRightKey)
+    {
+        BuildLeftKey = buildLeftKey ?? throw new ArgumentNullException(nameof(buildLeftKey));
+        BuildRightKey = buildRightKey ?? throw new ArgumentNullException(nameof(buildRightKey));
+    }
+
+    public Func<VdbeJoinRow, string?> BuildLeftKey { get; }
+
+    public Func<VdbeJoinRow, string?> BuildRightKey { get; }
+}
+
 /// <summary>An INNER, LEFT, RIGHT, or FULL node in a materializing join plan.</summary>
 public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
 {
@@ -847,7 +867,8 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
         VdbeJoinPlanNode left,
         VdbeJoinPlanNode right,
         VdbeJoinKind kind,
-        VdbeJoinCondition? condition)
+        VdbeJoinCondition? condition,
+        VdbeJoinEquiProbe? equiProbe = null)
         : base(
             checked((left ?? throw new ArgumentNullException(nameof(left))).ColumnCount
                 + (right ?? throw new ArgumentNullException(nameof(right))).ColumnCount),
@@ -860,6 +881,7 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
         Right = right;
         Kind = kind;
         Condition = condition;
+        EquiProbe = equiProbe;
     }
 
     public VdbeJoinPlanNode Left { get; }
@@ -869,6 +891,8 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
     public VdbeJoinKind Kind { get; }
 
     public VdbeJoinCondition? Condition { get; }
+
+    public VdbeJoinEquiProbe? EquiProbe { get; }
 
     internal override IReadOnlyList<VdbeJoinRow> Materialize(int? maximumRows) => Enumerate(maximumRows).ToList();
 
@@ -885,10 +909,45 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
             : null;
         var emitted = 0;
 
+        // Optional equijoin hash: bucket right rows by canonical key, probe per left row.
+        // Candidates still pass through Condition for full SQLite equality semantics.
+        Dictionary<string, List<int>>? buckets = null;
+        if (EquiProbe is not null && rightRows.Count > 0)
+        {
+            buckets = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            for (var rightIndex = 0; rightIndex < rightRows.Count; rightIndex++)
+            {
+                var key = EquiProbe.BuildRightKey(rightRows[rightIndex]);
+                if (key is null)
+                    continue;
+                if (!buckets.TryGetValue(key, out var bucket))
+                {
+                    bucket = [];
+                    buckets[key] = bucket;
+                }
+
+                bucket.Add(rightIndex);
+            }
+        }
+
         foreach (var left in Left.Enumerate(maximumRows: null))
         {
             var matched = false;
-            for (var rightIndex = 0; rightIndex < rightRows.Count; rightIndex++)
+            IEnumerable<int> candidateIndices;
+            if (buckets is not null && EquiProbe is not null)
+            {
+                var key = EquiProbe.BuildLeftKey(left);
+                if (key is not null && buckets.TryGetValue(key, out var bucket))
+                    candidateIndices = bucket;
+                else
+                    candidateIndices = Array.Empty<int>();
+            }
+            else
+            {
+                candidateIndices = Enumerable.Range(0, rightRows.Count);
+            }
+
+            foreach (var rightIndex in candidateIndices)
             {
                 var right = rightRows[rightIndex];
                 var combined = Combine(left, right);

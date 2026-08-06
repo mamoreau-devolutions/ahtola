@@ -16548,14 +16548,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
             JoinKind.Full => VdbeJoinKind.Full,
             _ => throw new InvalidOperationException($"Unknown join kind {join.Kind}."),
         };
+        var equiProbe = TryCreateCompiledJoinEquiProbe(join, context);
         var plan = new VdbeJoinOperatorPlan(
             left.Plan,
             right.Plan,
             kind,
-            join.Condition is null && joinPairs.Count == 0 ? null : condition);
+            join.Condition is null && joinPairs.Count == 0 ? null : condition,
+            equiProbe);
         compiled = new CompiledJoinSource(
             plan,
-            $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} join",
+            equiProbe is null
+                ? $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} join"
+                : $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} equijoin",
             columns,
             qualifiedColumns,
             qualifiedRowIds,
@@ -16564,6 +16568,68 @@ public sealed partial class EmbeddedDatabase : IDisposable
             outputColumns,
             rawOutputColumns);
         return true;
+    }
+
+    /// <summary>
+    /// Builds a hash probe for compiled multi-way joins when ON is a conjunction of
+    /// simple column equalities (same shape as the evaluator EquiJoinHashIndex).
+    /// </summary>
+    private VdbeJoinEquiProbe? TryCreateCompiledJoinEquiProbe(
+        JoinTableSource join,
+        QueryContext context)
+    {
+        if (join.Condition is null)
+            return null;
+
+        var leftColumns = GetOutputColumns(join.Left, context);
+        var rightColumns = GetOutputColumns(join.Right, context);
+        var keys = new List<EquiJoinKey>();
+        var pending = new Stack<Expression>();
+        pending.Push(join.Condition);
+        while (pending.Count > 0)
+        {
+            var conjunct = pending.Pop();
+            if (conjunct is BinaryExpression { Operator: BinaryOperator.And } and)
+            {
+                pending.Push(and.Left);
+                pending.Push(and.Right);
+                continue;
+            }
+
+            if (TryCreateEquiJoinKey(conjunct, join, leftColumns, rightColumns, context) is { } key)
+                keys.Add(key);
+        }
+
+        if (keys.Count == 0)
+            return null;
+
+        string? BuildKey(VdbeJoinRow row, bool leftSide)
+        {
+            string? key = null;
+            foreach (var equiKey in keys)
+            {
+                var column = leftSide ? equiKey.LeftColumn : equiKey.RightColumn;
+                if (column.Index < 0 || column.Index >= row.Values.Length)
+                    return null;
+                var value = row.Values[column.Index];
+                var segment = EquiJoinHashIndex.CanonicalizeJoinKeyValue(
+                    value,
+                    leftSide ? equiKey.LeftConvertsTextToNumeric : equiKey.RightConvertsTextToNumeric,
+                    leftSide ? equiKey.LeftConvertsNumericToText : equiKey.RightConvertsNumericToText,
+                    equiKey.Collation);
+                if (segment is null)
+                    return null;
+                key = key is null
+                    ? segment.Length + ":" + segment
+                    : key + segment.Length + ":" + segment;
+            }
+
+            return key;
+        }
+
+        return new VdbeJoinEquiProbe(
+            left => BuildKey(left, leftSide: true),
+            right => BuildKey(right, leftSide: false));
     }
 
     private static SourceRow CreateCompiledJoinSourceRow(

@@ -574,7 +574,7 @@
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [],
-      "notes": "VdbeJoinOperatorPlan.Enumerate always materializes the right side fully and nested-loops the left side against it in memory (VdbeJoinRow arrays), regardless of whether an index exists on the join key. There is no index-driven nested-loop join (seek into the right table per left row using its index) anywhere in the join plan machinery -- every N-way join is O(preceding-rows * table-size) in the worst case. JoinProgramBuilder.cs (2-table direct builder) is explicitly nested-loop only per its own doc comment.",
+      "notes": "Partial 2026-08-06. VdbeJoinOperatorPlan still materializes the right side once, but when ON is a conjunction of simple column equalities the compiled join now attaches a VdbeJoinEquiProbe hash (same canonical keys as evaluator EquiJoinHashIndex) so each left row only tests matching buckets before the full Condition. Evidence: JoinOpcodeExecutionTests.EquiJoinProbeFiltersRightCandidatesBeforeCondition; multi-way compiled join description becomes 'equijoin' when probe attaches. Residual: no true index btree seek nested-loop (OpenRead/Seek per left row); JoinProgramBuilder 2-table path remains pure nested-loop opcodes; non-equality ON still O(L*R).",
       "status": "open"
     },
     {
