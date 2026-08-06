@@ -38,14 +38,6 @@ mvcc-update-noop.sqltest::mvcc-update-self-data-intact | expected 2 row(s), got 
 mvcc-update-noop.sqltest::mvcc-update-self-multiple-rows | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'wal'
 mvcc-update-noop.sqltest::mvcc-update-different-value | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'wal'
 on_conflict.sqltest::mvcc-upsert-set-pk-on-conflict-target-resolves | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'memory'
-partial_idx.sqltest::plan-partial-index-and-where-eq-seek | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SEARCH samples USING INDEX samples_pidx (name=?)' but was '0/0/0/SEARCH samples USING INDEX samples_pidx'
-partial_idx.sqltest::plan-partial-index-and-where-reversed-order | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SEARCH samples USING INDEX samples_pidx (name=?)' but was '0/0/0/SEARCH samples USING INDEX samples_pidx'
-partial_idx.sqltest::plan-partial-index-qualified-where-matches | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SEARCH samples USING INDEX samples_pidx (name=?)' but was '0/0/0/SEARCH samples USING INDEX samples_pidx'
-partial_idx.sqltest::plan-partial-index-full-scan-when-where-matched | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SCAN samples USING INDEX samples_user_processed_idx' but was '0/0/0/MANAGED COMPILED VDBE'
-partial_idx.sqltest::plan-partial-index-not-used-when-where-not-implied | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SCAN samples' but was '0/0/0/MANAGED EVALUATOR FALLBACK'
-partial_idx.sqltest::plan-partial-index-equality-predicate | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SEARCH products USING INDEX idx_active_sku (sku=?)' but was '0/0/0/SEARCH products USING INDEX idx_active_sku'
-partial_idx.sqltest::plan-partial-index-range-predicate | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SEARCH products USING INDEX idx_expensive (sku=?)' but was '0/0/0/SEARCH products USING INDEX idx_expensive'
-partial_idx.sqltest::plan-partial-index-range-not-implied | expected 1 row(s), got 1 row(s); row 0 expected '1/0/0/SCAN products' but was '0/0/0/MANAGED EVALUATOR FALLBACK'
 pragma/foreign_key_list.sqltest::pragma-foreign-key-list-attached-database | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 pragma/index_list.sqltest::pragma-index-list-attached-database | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 pragma/table_list.sqltest::pragma-table-list-attached-database | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.

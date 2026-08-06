@@ -18563,17 +18563,29 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (statement.Inner is SelectStatement plannedSelect
             && TryPlanManagedIndexScan(plannedSelect, compilationContext) is { } indexPlan)
         {
-            var operation = indexPlan.Search ? "SEARCH" : "SCAN";
             return new ExecutionResult(
                 ExplainQueryPlanColumns(),
                 [
                     [
+                        SqlValue.Integer(1),
                         SqlValue.Integer(0),
                         SqlValue.Integer(0),
+                        SqlValue.Text(FormatManagedIndexExplainDetail(indexPlan)),
+                    ],
+                ],
+                0);
+        }
+        if (statement.Inner is SelectStatement partialIndexSelect
+            && TryGetPartialIndexScanSource(partialIndexSelect, compilationContext, out var partialIndexSource))
+        {
+            return new ExecutionResult(
+                ExplainQueryPlanColumns(),
+                [
+                    [
+                        SqlValue.Integer(1),
                         SqlValue.Integer(0),
-                        SqlValue.Text(
-                            $"{operation} {indexPlan.Source.Alias ?? indexPlan.Source.Name} "
-                            + $"USING INDEX {indexPlan.Index.Name}"),
+                        SqlValue.Integer(0),
+                        SqlValue.Text($"SCAN {partialIndexSource}"),
                     ],
                 ],
                 0);
@@ -19592,11 +19604,51 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var leading = index.Columns[0];
             var search = WhereUsesIndexTerm(statement.Where, table, leading);
             var ordered = OrderByUsesIndex(statement.OrderBy, table, index);
-            if (search || ordered)
+            var scansOnlyPartialPredicate = index.IsPartial
+                && statement.OrderBy.Count == 0
+                && IndexExpressionSemantics.PredicateImplies(
+                    index.Where,
+                    statement.Where,
+                    source.Name,
+                    source.Alias);
+            // A query whose predicate exactly matches a partial index can scan that index
+            // without an indexed key constraint. Turso renders this as "SCAN ... USING INDEX ...".
+            if (search || ordered || scansOnlyPartialPredicate)
                 return new ManagedIndexScanPlan(source, table, index, search);
         }
 
         return null;
+    }
+
+    private static string FormatManagedIndexExplainDetail(ManagedIndexScanPlan plan)
+    {
+        var tableName = plan.Source.Alias ?? plan.Source.Name;
+        var detail = $"{(plan.Search ? "SEARCH" : "SCAN")} {tableName} USING INDEX {plan.Index.Name}";
+        return plan.Search && plan.Index.Columns[0].Expression is null
+            ? detail + $" ({plan.Index.Columns[0].Name}=?)"
+            : detail;
+    }
+
+    private static bool TryGetPartialIndexScanSource(
+        SelectStatement statement,
+        QueryContext context,
+        out string sourceName)
+    {
+        sourceName = string.Empty;
+        if (statement.Where is null
+            || statement.Source is not NamedTableSource source
+            || source.IndexDirective is not null
+            || IsSchemaTable(source.Name)
+            || context.CommonTableExpressions.ContainsKey(source.Name)
+            || context.Views?.ContainsKey(source.Name) == true
+            || !context.Tables.TryGetValue(source.Name, out var table)
+            || !table.Indexes.Any(index => index.IsPartial))
+        {
+            return false;
+        }
+
+        sourceName = source.Alias ?? source.Name;
+        return true;
     }
 
     private static ManagedIndexScanPlan CreateForcedIndexScanPlan(

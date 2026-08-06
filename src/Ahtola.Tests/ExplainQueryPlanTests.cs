@@ -365,6 +365,37 @@ public sealed class ExplainQueryPlanTests
             .Rows[0][3].AsText().Should().NotContain("USING INDEX t_normalized");
     }
 
+    [Test]
+    public void RendersTursoStylePartialIndexSearchAndScanPlans()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE products(id INTEGER PRIMARY KEY, sku TEXT, status TEXT);");
+        Execute(connection, "CREATE INDEX active_sku ON products(sku) WHERE status = 'active';");
+        Execute(
+            connection,
+            "INSERT INTO products VALUES (1, 'X', 'active'), (2, 'X', 'inactive'), (3, 'Y', 'active');");
+
+        ReadPlan(
+                connection,
+                "EXPLAIN QUERY PLAN SELECT id FROM products WHERE status = 'active' AND sku = 'X';")
+            .Rows.Should().ContainSingle()
+            .Which.Should().Equal(
+                SqlValue.Integer(1),
+                SqlValue.Integer(0),
+                SqlValue.Integer(0),
+                SqlValue.Text("SEARCH products USING INDEX active_sku (sku=?)"));
+        ReadPlan(
+                connection,
+                "EXPLAIN QUERY PLAN SELECT count(*) FROM products WHERE status = 'active';")
+            .Rows[0][3].Should().Be(SqlValue.Text("SCAN products USING INDEX active_sku"));
+        ReadScalar(connection, "SELECT count(*) FROM products WHERE status = 'active';")
+            .Should().Be(SqlValue.Integer(2));
+        ReadPlan(
+                connection,
+                "EXPLAIN QUERY PLAN SELECT id FROM products WHERE status = 'inactive' AND sku = 'X';")
+            .Rows[0][3].Should().Be(SqlValue.Text("SCAN products"));
+    }
+
     private static string ReadDetail(EmbeddedStatement statement)
     {
         statement.Step().Should().Be(StatementStepResult.Row);
