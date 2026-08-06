@@ -384,6 +384,30 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void RenamingTempTableColumnRejectsInvalidTriggerRewrite()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TEMP TABLE t(a,b)");
+        Execute(
+            connection,
+            "CREATE TRIGGER tr AFTER INSERT ON temp.t BEGIN "
+                + "INSERT INTO t VALUES(new.a,new.b); END");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE t RENAME COLUMN b TO c"))!
+            .Message.Should().Be("error in trigger tr after rename: no such column: new.c");
+
+        ReadRows(connection, "SELECT sql FROM temp.sqlite_schema WHERE name = 'tr'")
+            .Should()
+            .ContainSingle()
+            .Which[0]
+            .AsText()
+            .Should()
+            .Contain("new.b");
+    }
+
+    [Test]
     public void TempViewBodyOutsideTheTempSchemaIsRejectedUpFront()
     {
         using var database = new EmbeddedDatabase();

@@ -5183,12 +5183,19 @@ public sealed partial class EmbeddedDatabase : IDisposable
     internal void ValidateTriggerSchema(
         TriggerDefinition trigger,
         QueryContext context,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        EmbeddedTable? pseudoRowTable = null)
     {
         string[] triggerColumns;
         EmbeddedColumn[]? triggerColumnDefinitions;
         var triggerHasRowid = false;
-        if (context.Tables.TryGetValue(trigger.TableName, out var triggerTable))
+        if (pseudoRowTable is not null)
+        {
+            triggerColumns = pseudoRowTable.Columns;
+            triggerColumnDefinitions = pseudoRowTable.ColumnDefinitions;
+            triggerHasRowid = pseudoRowTable.HasRowid;
+        }
+        else if (context.Tables.TryGetValue(trigger.TableName, out var triggerTable))
         {
             triggerColumns = triggerTable.Columns;
             triggerColumnDefinitions = triggerTable.ColumnDefinitions;
@@ -37430,13 +37437,23 @@ public sealed class EmbeddedConnection : IDisposable
         }
     }
 
-    private PendingTempTriggerCatalogRewrite? PrepareTempTriggerColumnRename(RoutedStatement routed)
+    private PendingTempTriggerCatalogRewrite? PrepareTempTriggerColumnRename(
+        RoutedStatement routed,
+        CancellationToken cancellationToken)
     {
-        if (!ReferenceEquals(routed.Database, _database)
-            || routed.Statement is not AlterTableRenameColumnStatement rename)
+        if (routed.Statement is not AlterTableRenameColumnStatement rename)
         {
             return null;
         }
+
+        if (ReferenceEquals(routed.Database, _tempDatabase))
+        {
+            ValidateTempTableOwnedTriggersAfterColumnRename(rename, cancellationToken);
+            return null;
+        }
+
+        if (!ReferenceEquals(routed.Database, _database))
+            return null;
 
         var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
         if (tempCatalog.Triggers.Count == 0)
@@ -37489,6 +37506,100 @@ public sealed class EmbeddedConnection : IDisposable
         }
 
         return changed ? new PendingTempTriggerCatalogRewrite(candidateCatalog) : null;
+    }
+
+    private void ValidateTempTableOwnedTriggersAfterColumnRename(
+        AlterTableRenameColumnStatement rename,
+        CancellationToken cancellationToken)
+    {
+        var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
+        if (!tempCatalog.Tables.TryGetValue(rename.TableName, out var originalTable))
+            return;
+
+        var columnIndex = Array.FindIndex(
+            originalTable.Columns,
+            column => column.Equals(rename.ColumnName, StringComparison.OrdinalIgnoreCase));
+        if (columnIndex < 0)
+            return;
+
+        var oldName = originalTable.Columns[columnIndex];
+        var candidateTables = new Dictionary<string, EmbeddedTable>(tempCatalog.Tables, StringComparer.OrdinalIgnoreCase)
+        {
+            [rename.TableName] = originalTable.CreateWithRenamedColumn(
+                rename.ColumnName,
+                rename.NewName,
+                rename.QuoteNewName,
+                cancellationToken),
+        };
+        var rewriteSchema = EmbeddedDatabase.CreateRenameColumnSchema(
+            candidateTables,
+            tempCatalog.Views,
+            originalTable.Name,
+            originalTable.Columns);
+        var candidateContext = new EmbeddedDatabase.QueryContext(
+            candidateTables,
+            new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
+            tempCatalog.Views,
+            tempCatalog.Triggers,
+            SchemaValidation: true);
+        foreach (var trigger in tempCatalog.Triggers.Values)
+        {
+            // Explicitly qualified body statements are routed by the connection at execution time.
+            // This candidate check only models temp-local, unqualified trigger bodies.
+            if (trigger.TargetSchema is not null
+                || trigger.Body.Any(ContainsSchemaQualification))
+            {
+                continue;
+            }
+
+            string? rewritten;
+            try
+            {
+                rewritten = RenameColumnRewriter.RewriteSchemaObject(
+                    trigger.Sql,
+                    oldName,
+                    rename.NewName,
+                    rename.QuoteNewName,
+                    rewriteSchema);
+            }
+            catch (RenameColumnRewriteException exception)
+            {
+                throw new EmbeddedSqlException(
+                    $"error in trigger {trigger.Name} after rename: {exception.Message}",
+                    exception);
+            }
+
+            if (rewritten is null)
+                continue;
+
+            var parsed = (CreateTriggerStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
+            var candidate = trigger with
+            {
+                UpdateOfColumns = parsed.UpdateOfColumns,
+                When = parsed.When,
+                Body = parsed.Body,
+                Sql = parsed.Sql,
+            };
+            try
+            {
+                _tempDatabase.ValidateTriggerSchema(
+                    candidate,
+                    candidateContext,
+                    cancellationToken,
+                    pseudoRowTable: string.Equals(
+                        trigger.TableName,
+                        rename.TableName,
+                        StringComparison.OrdinalIgnoreCase)
+                        ? originalTable
+                        : null);
+            }
+            catch (EmbeddedSqlException exception)
+            {
+                throw new EmbeddedSqlException(
+                    $"error in trigger {trigger.Name} after rename: {exception.Message}",
+                    exception);
+            }
+        }
     }
 
     private static RenameColumnSchema CreateTempTriggerRenameColumnSchema(
@@ -38222,7 +38333,7 @@ public sealed class EmbeddedConnection : IDisposable
                 HashSet<EmbeddedDatabase.ForeignKeyViolation>? deferredBefore = null;
                 var tempTriggers = CreateTempTriggerBridge(routed.Database, out var tempTriggerSession);
                 var pendingTempTriggerRewrite = PrepareTempTriggerTableRename(routed, cancellationToken)
-                    ?? PrepareTempTriggerColumnRename(routed);
+                    ?? PrepareTempTriggerColumnRename(routed, cancellationToken);
                 try
                 {
                     ExecutionResult result;
