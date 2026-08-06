@@ -408,6 +408,34 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void RenamingMainColumnRejectsInvalidUnqualifiedTempTriggerReference()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TEMP TABLE temp_exists_driver (n)");
+        Execute(connection, "CREATE TABLE src_temp_exists (c1, c2, b)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_temp_exists AFTER INSERT ON temp.temp_exists_driver BEGIN "
+                + "SELECT 1 NOT IN ("
+                + "NOT EXISTS (SELECT * FROM src_temp_exists WHERE c1 "
+                + "ORDER BY b ASC, CASE WHEN b THEN 'x' WHEN b THEN 1 END)"
+                + "); END");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE src_temp_exists RENAME COLUMN b TO bb"))!
+            .Message.Should().Be("error in trigger trig_temp_exists after rename: no such column: b");
+
+        ReadRows(connection, "SELECT sql FROM temp.sqlite_schema WHERE name = 'trig_temp_exists'")
+            .Should()
+            .ContainSingle()
+            .Which[0]
+            .AsText()
+            .Should()
+            .Contain("ORDER BY b ASC");
+    }
+
+    [Test]
     public void TempViewBodyOutsideTheTempSchemaIsRejectedUpFront()
     {
         using var database = new EmbeddedDatabase();

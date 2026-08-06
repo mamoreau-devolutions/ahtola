@@ -37505,7 +37505,71 @@ public sealed class EmbeddedConnection : IDisposable
             changed = true;
         }
 
+        ValidateTempTriggersAfterMainColumnRename(
+            rename,
+            renamedTable,
+            primaryCatalog,
+            tempCatalog,
+            candidateCatalog,
+            cancellationToken);
         return changed ? new PendingTempTriggerCatalogRewrite(candidateCatalog) : null;
+    }
+
+    private void ValidateTempTriggersAfterMainColumnRename(
+        AlterTableRenameColumnStatement rename,
+        EmbeddedTable originalTable,
+        EmbeddedDatabase.SchemaCatalog primaryCatalog,
+        EmbeddedDatabase.SchemaCatalog tempCatalog,
+        EmbeddedDatabase.SchemaCatalog candidateTempCatalog,
+        CancellationToken cancellationToken)
+    {
+        var candidatePrimaryTables = new Dictionary<string, EmbeddedTable>(
+            primaryCatalog.Tables,
+            StringComparer.OrdinalIgnoreCase)
+        {
+            [rename.TableName] = originalTable.CreateWithRenamedColumn(
+                rename.ColumnName,
+                rename.NewName,
+                rename.QuoteNewName,
+                cancellationToken),
+        };
+        var tables = new Dictionary<string, EmbeddedTable>(
+            candidatePrimaryTables,
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var table in candidateTempCatalog.Tables)
+            tables[table.Key] = table.Value;
+
+        var views = new Dictionary<string, ViewDefinition>(primaryCatalog.Views, StringComparer.OrdinalIgnoreCase);
+        foreach (var view in candidateTempCatalog.Views)
+            views[view.Key] = view.Value;
+
+        var context = new EmbeddedDatabase.QueryContext(
+            tables,
+            new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
+            views,
+            candidateTempCatalog.Triggers,
+            SchemaValidation: true);
+        foreach (var trigger in candidateTempCatalog.Triggers.Values)
+        {
+            // Explicitly qualified body statements are routed by the connection at execution time.
+            // This combined-catalog candidate check only models unqualified temp-first resolution.
+            if (trigger.TargetSchema is not null
+                || trigger.Body.Any(ContainsSchemaQualification))
+            {
+                continue;
+            }
+
+            try
+            {
+                _tempDatabase.ValidateTriggerSchema(trigger, context, cancellationToken);
+            }
+            catch (EmbeddedSqlException exception)
+            {
+                throw new EmbeddedSqlException(
+                    $"error in trigger {trigger.Name} after rename: {exception.Message}",
+                    exception);
+            }
+        }
     }
 
     private void ValidateTempTableOwnedTriggersAfterColumnRename(
