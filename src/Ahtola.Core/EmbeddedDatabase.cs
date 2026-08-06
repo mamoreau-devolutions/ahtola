@@ -19474,7 +19474,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         SqlValue.Integer(1),
                         SqlValue.Integer(0),
                         SqlValue.Integer(0),
-                        SqlValue.Text(FormatManagedIndexExplainDetail(indexPlan)),
+                        SqlValue.Text(FormatManagedIndexExplainDetail(indexPlan, plannedSelect)),
                     ],
                 ],
                 0);
@@ -20530,13 +20530,140 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return null;
     }
 
-    private static string FormatManagedIndexExplainDetail(ManagedIndexScanPlan plan)
+    private static string FormatManagedIndexExplainDetail(
+        ManagedIndexScanPlan plan,
+        SelectStatement? select = null)
     {
         var tableName = plan.Source.Alias ?? plan.Source.Name;
-        var detail = $"{(plan.Search ? "SEARCH" : "SCAN")} {tableName} USING INDEX {plan.Index.Name}";
+        var covering = select is not null
+            && IndexCoversSelect(select, plan.Table, plan.Index);
+        var usingClause = covering
+            ? $"USING COVERING INDEX {plan.Index.Name}"
+            : $"USING INDEX {plan.Index.Name}";
+        var detail = $"{(plan.Search ? "SEARCH" : "SCAN")} {tableName} {usingClause}";
         return plan.Search && plan.Index.Columns[0].Expression is null
             ? detail + $" ({plan.Index.Columns[0].Name}=?)"
             : detail;
+    }
+
+    /// <summary>
+    /// True when every column the <paramref name="select"/> needs is available from
+    /// <paramref name="index"/> keys (plus the rowid for rowid tables). Used to emit
+    /// COVERING INDEX and to skip redundant base-table projection work.
+    /// </summary>
+    private static bool IndexCoversSelect(SelectStatement select, EmbeddedTable table, EmbeddedIndex index)
+    {
+        if (index.Columns.Any(term => term.IsExpression))
+            return false;
+
+        var covered = new HashSet<int>();
+        foreach (var term in index.Columns)
+        {
+            if (term.ColumnIndex >= 0)
+                covered.Add(term.ColumnIndex);
+        }
+
+        // Rowid tables can always satisfy rowid references from the index entry.
+        bool NeedsColumn(int columnIndex) => !covered.Contains(columnIndex);
+
+        foreach (var projection in select.Projections)
+        {
+            if (!ProjectionCoveredByIndex(projection.Expression, table, covered, NeedsColumn))
+                return false;
+        }
+
+        if (select.Where is not null
+            && !ExpressionCoveredByIndex(select.Where, table, covered))
+        {
+            return false;
+        }
+
+        foreach (var term in select.OrderBy)
+        {
+            if (!ExpressionCoveredByIndex(term.Expression, table, covered))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool ProjectionCoveredByIndex(
+        Expression expression,
+        EmbeddedTable table,
+        HashSet<int> covered,
+        Func<int, bool> needsColumn)
+    {
+        switch (expression)
+        {
+            case StarExpression:
+            case QualifiedStarExpression:
+                for (var i = 0; i < table.Columns.Length; i++)
+                {
+                    if (needsColumn(i))
+                        return false;
+                }
+
+                return true;
+            case ColumnExpression column:
+                return ColumnCoveredByIndex(column, table, covered);
+            case LiteralExpression:
+                return true;
+            default:
+                return ExpressionCoveredByIndex(expression, table, covered);
+        }
+    }
+
+    private static bool ExpressionCoveredByIndex(
+        Expression expression,
+        EmbeddedTable table,
+        HashSet<int> covered)
+    {
+        switch (expression)
+        {
+            case LiteralExpression:
+            case ParameterExpression:
+                return true;
+            case ColumnExpression column:
+                return ColumnCoveredByIndex(column, table, covered);
+            case BinaryExpression binary:
+                return ExpressionCoveredByIndex(binary.Left, table, covered)
+                    && ExpressionCoveredByIndex(binary.Right, table, covered);
+            case UnaryExpression unary:
+                return ExpressionCoveredByIndex(unary.Operand, table, covered);
+            case CollationExpression collation:
+                return ExpressionCoveredByIndex(collation.Expression, table, covered);
+            case FunctionExpression function:
+                return function.Arguments.All(arg => ExpressionCoveredByIndex(arg, table, covered));
+            default:
+                // Subqueries, CASE, etc. are not covering-index safe without deeper analysis.
+                return false;
+        }
+    }
+
+    private static bool ColumnCoveredByIndex(
+        ColumnExpression column,
+        EmbeddedTable table,
+        HashSet<int> covered)
+    {
+        var bare = column.UnqualifiedName ?? column.Name;
+        if (table.HasRowid && EmbeddedTable.IsRowidAliasName(bare))
+            return true;
+
+        if (table.TryGetColumnIndex(bare, out var index))
+            return covered.Contains(index);
+
+        // Qualified name: strip qualifier.
+        var separator = bare.IndexOf('.');
+        if (separator >= 0)
+        {
+            var name = bare[(separator + 1)..];
+            if (table.HasRowid && EmbeddedTable.IsRowidAliasName(name))
+                return true;
+            if (table.TryGetColumnIndex(name, out index))
+                return covered.Contains(index);
+        }
+
+        return false;
     }
 
     private static bool TryGetPartialIndexScanSource(

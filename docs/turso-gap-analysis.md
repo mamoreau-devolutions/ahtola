@@ -877,6 +877,7 @@ aggregates because the EF Core provider depends on them).
 | **F2.26 — FkCounter/FkIfZero/FkCheck** | 2026-08-06 | `vdbe-fk-enforcement-opcodes` (closed — statement FK counters + constraint halt) | 11 → 11 |
 | **F2.27 — SeekGE family + index cursor opcodes** | 2026-08-06 | `vdbe-seek-op-family-partial`, `vdbe-index-cursor-opcode-family` (closed — SeekKey/Idx*/IdxRowId/RowData/IdxInsert/IdxDelete) | 11 → 11 |
 | **F2.28 — ORDER BY index elision** | 2026-08-06 | `compile-no-order-by-elision-from-index` (closed — rowid/PK alias + secondary index ORDER BY without sorter; plain indexes eligible for SEARCH/ORDER planning) | 11 → 11 |
+| **F2.29 — covering-index EQP label** | 2026-08-06 | `compile-select-compiler-no-multi-table-covering-index` partial — IndexCoversSelect + EXPLAIN QUERY PLAN `USING COVERING INDEX`; index-only table skip still open | 11 → 11 |
 
 Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
 redistributed onto a newly-unmasked blocker within the same commit group.

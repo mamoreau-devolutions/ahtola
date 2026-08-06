@@ -704,6 +704,27 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
+    public void CoveringIndexIsReportedInExplainQueryPlan()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b TEXT);");
+        Execute(connection, "CREATE INDEX idx_t_a ON t(a);");
+        Execute(connection, "INSERT INTO t VALUES (1,'x'),(2,'y');");
+
+        // SELECT a ORDER BY a only needs the index key — COVERING INDEX.
+        var covering = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT a FROM t ORDER BY a;");
+        covering.Should().ContainSingle();
+        covering[0][3].AsText().Should().Contain("USING COVERING INDEX idx_t_a");
+
+        // SELECT b needs a non-indexed column — plain USING INDEX.
+        var nonCovering = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT b FROM t ORDER BY a;");
+        nonCovering.Should().ContainSingle();
+        nonCovering[0][3].AsText().Should().Contain("USING INDEX idx_t_a");
+        nonCovering[0][3].AsText().Should().NotContain("COVERING");
+    }
+
+    [Test]
     public void OrderByIntegerPrimaryKeyAliasElidesSorter()
     {
         var database = new EmbeddedDatabase();

@@ -985,7 +985,7 @@
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Every indexed-seek fast path in SelectStatementCompiler still opens the base table cursor and reads projected columns from it after seeking by rowid (`ColumnInstruction(seekCursor, columnIndex, ...)`); there is no detection of the case where the index itself carries all referenced columns (a covering index), which would let the compiler avoid opening/reading the table b-tree entirely and use only the (typically much smaller, better cached) index pages.",
+      "notes": "Partial 2026-08-06. EXPLAIN QUERY PLAN now reports USING COVERING INDEX when IndexCoversSelect proves every projection/WHERE/ORDER BY column is in the index key (or rowid). Evidence: CompiledSortedScanExecutionTests.CoveringIndexIsReportedInExplainQueryPlan. Residual: SelectStatementCompiler still opens the base table cursor after index seek and reads ColumnInstruction from table rows; multi-table covering and true index-only OpenRead (no table b-tree) remain open. Turso access_method.rs skips the table b-tree when coverage is proven.",
       "status": "open"
     },
     {
