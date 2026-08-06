@@ -315,7 +315,7 @@ public sealed class ManagedTempCtasStrictVirtualContractTests
             "CREATE TABLE parent(id INTEGER PRIMARY KEY)",
             "INSERT INTO parent VALUES (1)",
             "CREATE TABLE source(id INTEGER PRIMARY KEY,parent_id INTEGER REFERENCES parent(id),"
-                + "base INT NOT NULL CHECK(base>0),doubled INT AS(base*2) STORED) STRICT",
+                + "base INT NOT NULL CHECK(base>0),doubled INT AS(base*2) VIRTUAL) STRICT",
             "CREATE TABLE audit(value INTEGER)",
             "CREATE TRIGGER source_ai AFTER INSERT ON source BEGIN INSERT INTO audit VALUES (1); END",
             "INSERT INTO source(id,parent_id,base) VALUES (1,1,3)",
@@ -383,7 +383,7 @@ public sealed class ManagedTempCtasStrictVirtualContractTests
                 id INT PRIMARY KEY,
                 left_value INT DEFAULT (1 << 3),
                 right_value INT,
-                packed INT AS ((left_value << 4) | right_value) STORED,
+                packed INT AS ((left_value << 4) | right_value) VIRTUAL,
                 CHECK ((left_value,right_value) >= (0,0) AND (left_value & 1) = 0)
             ) STRICT
             """,
@@ -468,7 +468,7 @@ public sealed class ManagedTempCtasStrictVirtualContractTests
             "PRAGMA foreign_keys=ON;"
             + "CREATE TABLE parent(id INT PRIMARY KEY) STRICT;"
             + "CREATE TABLE child(id INT PRIMARY KEY,parent_id INT REFERENCES parent(id),"
-            + "base INT CHECK(base>0),doubled INT AS(base*2) STORED) STRICT;"
+            + "base INT CHECK(base>0),doubled INT AS(base*2) VIRTUAL) STRICT;"
             + "CREATE TABLE audit(value INT) STRICT;"
             + "CREATE TRIGGER child_ai AFTER INSERT ON child BEGIN INSERT INTO audit VALUES ('bad'); END;"
             + "INSERT INTO parent VALUES (1);");

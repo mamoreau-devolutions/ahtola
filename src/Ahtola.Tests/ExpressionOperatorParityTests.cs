@@ -421,7 +421,7 @@ public sealed class ExpressionOperatorParityTests
             CREATE TABLE parent(
                 code TEXT COLLATE NOCASE,
                 version INTEGER DEFAULT (8 >> 1),
-                parity INTEGER GENERATED ALWAYS AS (version & 1) STORED,
+                parity INTEGER GENERATED ALWAYS AS (version & 1) VIRTUAL,
                 CHECK (version > 0
                     AND (version, parity) IS NOT DISTINCT FROM (version, version & 1)),
                 PRIMARY KEY(code COLLATE NOCASE, version)
@@ -432,7 +432,7 @@ public sealed class ExpressionOperatorParityTests
                 id INTEGER PRIMARY KEY,
                 parent_code TEXT COLLATE NOCASE,
                 parent_version INTEGER DEFAULT (8 >> 1),
-                inverted INTEGER GENERATED ALWAYS AS (~parent_version) STORED,
+                inverted INTEGER GENERATED ALWAYS AS (~parent_version) VIRTUAL,
                 CHECK (parent_version > 0 AND (parent_version & 3) = 0),
                 FOREIGN KEY(parent_code, parent_version)
                     REFERENCES parent(code, version)
@@ -472,7 +472,7 @@ public sealed class ExpressionOperatorParityTests
             CREATE TABLE limited_values(
                 id INTEGER PRIMARY KEY,
                 value INTEGER DEFAULT (8 >> 1),
-                mask INTEGER GENERATED ALWAYS AS (value & 7) STORED,
+                mask INTEGER GENERATED ALWAYS AS (value & 7) VIRTUAL,
                 label TEXT COLLATE NOCASE,
                 CHECK (value >= 0
                     AND (value, mask) IS NOT DISTINCT FROM (value, value & 7))

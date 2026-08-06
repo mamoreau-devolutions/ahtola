@@ -424,7 +424,7 @@ public sealed class ManagedVacuumStorageTests
                 parent_code TEXT NOT NULL REFERENCES parents(code) ON UPDATE CASCADE ON DELETE RESTRICT,
                 category TEXT COLLATE NOCASE UNIQUE,
                 payload TEXT NOT NULL,
-                doubled INTEGER GENERATED ALWAYS AS (id * 2) STORED,
+                doubled INTEGER GENERATED ALWAYS AS (id * 2) VIRTUAL,
                 CONSTRAINT positive_id CHECK (id > 0)
             );
             CREATE INDEX entries_order

@@ -710,7 +710,7 @@ public sealed class ManagedInsertOrFullSemanticsTests
                 id INTEGER PRIMARY KEY,
                 left_value INTEGER DEFAULT 1,
                 right_value INTEGER DEFAULT 2,
-                pair TEXT AS (left_value || ':' || right_value) STORED UNIQUE,
+                pair TEXT AS (left_value || ':' || right_value) VIRTUAL UNIQUE,
                 CHECK ((left_value, right_value) <> (0, 0))
             );
             INSERT INTO items DEFAULT VALUES;
@@ -913,7 +913,7 @@ public sealed class ManagedInsertOrFullSemanticsTests
                 tenant TEXT,
                 id INTEGER,
                 value TEXT,
-                normalized TEXT AS (lower(value)) STORED,
+                normalized TEXT AS (lower(value)) VIRTUAL,
                 active INTEGER,
                 PRIMARY KEY(tenant, id)
             ) WITHOUT ROWID;

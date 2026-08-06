@@ -230,11 +230,11 @@ public sealed class AhtolaManagedSqliteMigrationsSqlGenerator(
 
     private static void ValidateComputedColumn(ColumnOperation operation)
     {
-        if (operation.ComputedColumnSql is not null && operation.IsStored is not true)
+        if (operation.ComputedColumnSql is not null && operation.IsStored is true)
         {
             throw new NotSupportedException(
-                $"The managed local provider does not support virtual computed columns for '{operation.Name}' on '{operation.Table}'. " +
-                "Declare the computed column as STORED.");
+                $"The managed local provider does not support STORED computed columns for '{operation.Name}' on '{operation.Table}'. " +
+                "Declare the computed column as VIRTUAL.");
         }
     }
 }

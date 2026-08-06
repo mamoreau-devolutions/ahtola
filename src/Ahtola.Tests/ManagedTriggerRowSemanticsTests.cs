@@ -135,7 +135,7 @@ public sealed class ManagedTriggerRowSemanticsTests
         AssertMatchesSqlite(
             [
                 "CREATE TABLE items(key TEXT PRIMARY KEY, seed INTEGER, "
-                    + "doubled INTEGER AS (seed * 2) STORED) WITHOUT ROWID",
+                    + "doubled INTEGER AS (seed * 2) VIRTUAL) WITHOUT ROWID",
                 "CREATE TABLE trace(value TEXT)",
                 "CREATE TRIGGER items_before_insert BEFORE INSERT ON items BEGIN "
                     + "INSERT INTO trace VALUES ('BI:' || NEW.key || ':' || NEW.doubled); END",
@@ -1124,7 +1124,7 @@ public sealed class ManagedTriggerRowSemanticsTests
         AssertErrorAndStateMatchesSqlite(
             [
                 "PRAGMA recursive_triggers = ON",
-                "CREATE TABLE data(id INTEGER, computed INTEGER AS (abs(id)) STORED)",
+                "CREATE TABLE data(id INTEGER, computed INTEGER AS (abs(id)) VIRTUAL)",
                 "CREATE TRIGGER data_inserted AFTER INSERT ON data WHEN NEW.id < 2000 "
                     + "BEGIN INSERT INTO data(id) VALUES (NEW.id + 1); END",
                 "BEGIN",
@@ -1329,7 +1329,7 @@ public sealed class ManagedTriggerRowSemanticsTests
         AssertErrorAndStateMatchesSqlite(
             [
                 "PRAGMA recursive_triggers = ON",
-                "CREATE TABLE data(id INTEGER, seed INTEGER, computed INTEGER AS (seed) STORED, "
+                "CREATE TABLE data(id INTEGER, seed INTEGER, computed INTEGER AS (seed) VIRTUAL, "
                     + "UNIQUE(computed))",
                 "CREATE TRIGGER data_inserted AFTER INSERT ON data WHEN NEW.id < 2000 "
                     + "BEGIN INSERT INTO data(id, seed) VALUES (NEW.id + 1, NEW.seed + 1); END",
@@ -1437,7 +1437,7 @@ public sealed class ManagedTriggerRowSemanticsTests
                 "PRAGMA recursive_triggers = ON",
                 "CREATE TABLE trace(value TEXT)",
                 "CREATE TABLE row_data(id INTEGER PRIMARY KEY, seed INTEGER, "
-                    + "doubled INTEGER AS (seed * 2) STORED)",
+                    + "doubled INTEGER AS (seed * 2) VIRTUAL)",
                 "CREATE TRIGGER row_inserted AFTER INSERT ON row_data WHEN NEW.seed < 3 BEGIN "
                     + "INSERT INTO trace VALUES ('I:' || NEW.rowid || ':' || NEW.seed || ':' || NEW.doubled); "
                     + "INSERT INTO row_data(seed) VALUES (NEW.seed + 1); END",
@@ -1448,7 +1448,7 @@ public sealed class ManagedTriggerRowSemanticsTests
                 "INSERT INTO row_data(seed) VALUES (1)",
                 "UPDATE row_data SET seed = 3 WHERE id = 1",
                 "CREATE TABLE keyed_data(key TEXT PRIMARY KEY, seed INTEGER, "
-                    + "doubled INTEGER AS (seed * 2) STORED) WITHOUT ROWID",
+                    + "doubled INTEGER AS (seed * 2) VIRTUAL) WITHOUT ROWID",
                 "CREATE TRIGGER keyed_inserted AFTER INSERT ON keyed_data WHEN NEW.seed < 3 BEGIN "
                     + "INSERT INTO trace VALUES ('W:' || NEW.key || ':' || NEW.seed || ':' || NEW.doubled); "
                     + "INSERT INTO keyed_data(key, seed) VALUES (NEW.key || NEW.seed, NEW.seed + 1); END",

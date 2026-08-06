@@ -23,7 +23,7 @@ public sealed class ManagedAlterTableRenameColumnTests
           id INTEGER PRIMARY KEY,
           old_col INTEGER CHECK(old_col > 0),
           note TEXT,
-          doubled INTEGER GENERATED ALWAYS AS (old_col * 2) STORED,
+          doubled INTEGER GENERATED ALWAYS AS (old_col * 2) VIRTUAL,
           shifted INTEGER GENERATED ALWAYS AS (old_col + 100) VIRTUAL,
           tag TEXT REFERENCES parent(tag),
           CHECK(old_col <> 42 AND note <> 'old_col')
@@ -73,7 +73,7 @@ public sealed class ManagedAlterTableRenameColumnTests
         SchemaSql(managed, "sibling").Should().Be(SchemaSql(sqlite, "sibling"));
         SchemaSql(managed, "t").Should()
             .Contain("CHECK(new_col > 0)")
-            .And.Contain("(new_col * 2) STORED")
+            .And.Contain("(new_col * 2) VIRTUAL")
             .And.Contain("(new_col + 100)")
             .And.Contain("CHECK(new_col <> 42 AND note <> 'old_col')");
         SchemaSql(managed, "expr_idx").Should()

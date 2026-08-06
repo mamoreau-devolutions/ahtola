@@ -473,7 +473,7 @@ public sealed class ManagedUpsertTargetInferenceTests
                 tenant TEXT COLLATE NOCASE,
                 code INT,
                 label TEXT,
-                normalized TEXT GENERATED ALWAYS AS (lower(label)) STORED,
+                normalized TEXT GENERATED ALWAYS AS (lower(label)) VIRTUAL,
                 PRIMARY KEY(tenant DESC, code)
             ) WITHOUT ROWID, STRICT
             """,

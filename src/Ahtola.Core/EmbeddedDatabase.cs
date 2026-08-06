@@ -4141,6 +4141,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             throw new EmbeddedSqlException($"table {SqliteSequenceTableName} may not be altered");
         if (!context.Tables.TryGetValue(statement.TableName, out var table))
             throw new EmbeddedSqlException($"no such table: {statement.TableName}");
+        if (statement.Column.GeneratedStored)
+            throw new EmbeddedSqlException("cannot add a STORED column");
 
         ValidateCollation(statement.Column.Collation);
         var candidate = table.Clone();
@@ -42155,6 +42157,9 @@ internal sealed class EmbeddedTable
 
         if (generated.Count == 0)
             return [];
+
+        if (generated.Any(index => columns[index].GeneratedStored))
+            throw new EmbeddedSqlException("Stored generated columns are not supported");
 
         foreach (var index in generated)
         {

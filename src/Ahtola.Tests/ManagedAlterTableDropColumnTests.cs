@@ -25,7 +25,7 @@ public sealed class ManagedAlterTableDropColumnTests
                 keep TEXT COLLATE NOCASE CONSTRAINT keep_default DEFAULT 'fallback',
                 removed BLOB,
                 score INTEGER CONSTRAINT positive_score CHECK(score > 0),
-                doubled INTEGER GENERATED ALWAYS AS (score * 2) STORED,
+                doubled INTEGER GENERATED ALWAYS AS (score * 2) VIRTUAL,
                 CONSTRAINT unique_keep UNIQUE(keep)
             );
             CREATE INDEX data_score_desc ON data(score COLLATE NOCASE DESC);
@@ -69,7 +69,7 @@ public sealed class ManagedAlterTableDropColumnTests
                 "SELECT sql FROM sqlite_schema WHERE type='table' AND name='data';")
             .Should().Be(Scalar<string>(sqlite, "SELECT sql FROM sqlite_schema WHERE type='table' AND name='data';"))
             .And.Contain("keep TEXT COLLATE NOCASE CONSTRAINT keep_default DEFAULT 'fallback'")
-            .And.Contain("doubled INTEGER GENERATED ALWAYS AS (score * 2) STORED")
+            .And.Contain("doubled INTEGER GENERATED ALWAYS AS (score * 2) VIRTUAL")
             .And.Contain("CONSTRAINT unique_keep UNIQUE(keep)")
             .And.NotContain("removed");
         Scalar<string>(
@@ -224,7 +224,7 @@ public sealed class ManagedAlterTableDropColumnTests
         "a",
         "error in table t")]
     [TestCase(
-        "CREATE TABLE t(a, b GENERATED ALWAYS AS (a + 1) STORED, c);",
+        "CREATE TABLE t(a, b GENERATED ALWAYS AS (a + 1) VIRTUAL, c);",
         "a",
         "error in table t")]
     [TestCase(

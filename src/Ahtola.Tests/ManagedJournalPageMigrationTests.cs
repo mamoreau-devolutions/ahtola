@@ -489,7 +489,7 @@ public sealed class ManagedJournalPageMigrationTests
                         tenant TEXT,
                         sequence INTEGER,
                         base INTEGER NOT NULL,
-                        doubled INTEGER AS (base * 2) STORED,
+                        doubled INTEGER AS (base * 2) VIRTUAL,
                         PRIMARY KEY(tenant, sequence)
                     );
                     INSERT INTO parent VALUES (1);
@@ -517,7 +517,7 @@ public sealed class ManagedJournalPageMigrationTests
                 .And.Contain("CONSTRAINT positive CHECK (quantity > 0)");
             verification.CommandText = "SELECT sql FROM sqlite_schema WHERE name='generated_key'";
             verification.ExecuteScalar()!.ToString().Should()
-                .Contain("doubled INTEGER AS (base * 2) STORED")
+                .Contain("doubled INTEGER AS (base * 2) VIRTUAL")
                 .And.Contain("PRIMARY KEY(tenant, sequence)");
             verification.CommandText =
                 "SELECT doubled FROM generated_key WHERE tenant='tenant' AND sequence=1";

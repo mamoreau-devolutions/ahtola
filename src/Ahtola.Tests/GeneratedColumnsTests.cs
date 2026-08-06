@@ -5,12 +5,11 @@ using MsData = Microsoft.Data.Sqlite;
 
 namespace Ahtola.Tests;
 
-// Coverage for the managed engine's SQLite-compatible generated-column subset
-// (VIRTUAL/STORED). Every runtime behaviour is cross-checked against a real SQLite build
-// (Microsoft.Data.Sqlite): computed values and affinity, dependency ordering, recompute on
-// UPDATE, the generated-column exclusion from the default INSERT column list and from
-// PRAGMA table_info, and the family of CREATE/DML rejections. The bounded deterministic-
-// function allow-list remains a deliberate managed-engine boundary.
+// Coverage for Turso-compatible VIRTUAL generated columns. Runtime behavior is cross-checked
+// against SQLite: computed values and affinity, dependency ordering, recompute on UPDATE, the
+// generated-column exclusion from the default INSERT column list and from PRAGMA table_info,
+// and the family of CREATE/DML rejections. The bounded deterministic-function allow-list remains
+// a deliberate managed-engine boundary.
 public class GeneratedColumnsTests
 {
     [Test]
@@ -26,15 +25,11 @@ public class GeneratedColumnsTests
     }
 
     [Test]
-    public void StoredGeneratedColumnComputesValue()
+    [TestCase("CREATE TABLE t(a INT, v AS (a * 2) STORED)")]
+    [TestCase("CREATE TABLE t(a INT, v INT GENERATED ALWAYS AS (a * 2) STORED)")]
+    public void StoredGeneratedColumnIsRejectedLikeTurso(string sql)
     {
-        AssertMatchesSqlite(
-            [
-                "CREATE TABLE t(a INT, v AS (a * 2) STORED)",
-                "INSERT INTO t(a) VALUES (3)",
-                "INSERT INTO t(a) VALUES (7)",
-            ],
-            "SELECT a, v FROM t ORDER BY a");
+        CaptureManagedError([], sql).Should().Be("Stored generated columns are not supported");
     }
 
     [Test]
@@ -42,7 +37,7 @@ public class GeneratedColumnsTests
     {
         AssertMatchesSqlite(
             [
-                "CREATE TABLE t(a INT, b INT, v INT GENERATED ALWAYS AS (a + b) STORED)",
+                "CREATE TABLE t(a INT, b INT, v INT GENERATED ALWAYS AS (a + b) VIRTUAL)",
                 "INSERT INTO t(a, b) VALUES (2, 5)",
             ],
             "SELECT a, b, v FROM t");
@@ -66,7 +61,7 @@ public class GeneratedColumnsTests
     {
         AssertMatchesSqlite(
             [
-                "CREATE TABLE t(a TEXT, v AS (a || '!') STORED)",
+                "CREATE TABLE t(a TEXT, v AS (a || '!') VIRTUAL)",
                 "INSERT INTO t(a) VALUES ('hi')",
             ],
             "SELECT a, v FROM t");
@@ -102,7 +97,7 @@ public class GeneratedColumnsTests
     {
         AssertMatchesSqlite(
             [
-                "CREATE TABLE t(a TEXT, u AS (upper(a)) STORED, n AS (length(a)))",
+                "CREATE TABLE t(a TEXT, u AS (upper(a)) VIRTUAL, n AS (length(a)))",
                 "INSERT INTO t(a) VALUES ('abc')",
             ],
             "SELECT a, u, n FROM t");
@@ -125,7 +120,7 @@ public class GeneratedColumnsTests
     {
         AssertMatchesSqlite(
             [
-                "CREATE TABLE t(a INT, v AS (a + 1) STORED)",
+                "CREATE TABLE t(a INT, v AS (a + 1) VIRTUAL)",
                 "INSERT INTO t(a) VALUES (1)",
                 "UPDATE t SET a = 100",
             ],
@@ -249,7 +244,16 @@ public class GeneratedColumnsTests
     }
 
     [Test]
-    public void StoredGeneratedColumnPersistsAndIsReadableByRealSqlite()
+    public void AlterTableAddStoredGeneratedColumnIsRejectedLikeTurso()
+    {
+        CaptureManagedError(
+            ["CREATE TABLE t(a INT)"],
+            "ALTER TABLE t ADD COLUMN v AS (a * 2) STORED")
+            .Should().Be("cannot add a STORED column");
+    }
+
+    [Test]
+    public void VirtualGeneratedColumnPersistsAndIsReadableByRealSqlite()
     {
         var path = CreatePhysicalDatabasePath();
         try
@@ -257,7 +261,7 @@ public class GeneratedColumnsTests
             using (var database = EmbeddedDatabase.OpenFile(path))
             using (var connection = database.Connect())
             {
-                Execute(connection, "CREATE TABLE t(a INT, v AS (a + 1) STORED, label TEXT AS (a || '!') STORED);");
+                Execute(connection, "CREATE TABLE t(a INT, v AS (a + 1) VIRTUAL, label TEXT AS (a || '!') VIRTUAL);");
                 Execute(connection, "INSERT INTO t(a) VALUES (10);");
                 Execute(connection, "INSERT INTO t(a) VALUES (20);");
             }
@@ -269,8 +273,8 @@ public class GeneratedColumnsTests
                 using var real = new MsData.SqliteConnection($"Data Source={verifyPath}");
                 real.Open();
 
-                // integrity_check re-derives STORED generated values, so a mismatch between
-                // the managed and SQLite computation would fail here.
+                // integrity_check evaluates the persisted VIRTUAL expressions, proving the
+                // managed schema and SQLite computation remain compatible.
                 using var integrity = real.CreateCommand();
                 integrity.CommandText = "PRAGMA integrity_check;";
                 integrity.ExecuteScalar().Should().Be("ok");
@@ -302,18 +306,18 @@ public class GeneratedColumnsTests
     }
 
     [Test]
-    public void StoredGeneratedColumnRoundTripsAcrossManagedReopen()
+    public void VirtualGeneratedColumnRoundTripsAcrossManagedReopen()
     {
         var fileSystem = new InMemoryFileSystem();
 
-        using (var database = EmbeddedDatabase.OpenFile("stored-generated.db", fileSystem))
+        using (var database = EmbeddedDatabase.OpenFile("virtual-generated.db", fileSystem))
         using (var connection = database.Connect())
         {
-            Execute(connection, "CREATE TABLE t(a INT, v AS (a + 1) STORED);");
+            Execute(connection, "CREATE TABLE t(a INT, v AS (a + 1) VIRTUAL);");
             Execute(connection, "INSERT INTO t(a) VALUES (5);");
         }
 
-        using (var reopened = EmbeddedDatabase.OpenFile("stored-generated.db", fileSystem))
+        using (var reopened = EmbeddedDatabase.OpenFile("virtual-generated.db", fileSystem))
         using (var connection = reopened.Connect())
         {
             var rows = Query(connection, "SELECT a, v FROM t;");
@@ -345,7 +349,7 @@ public class GeneratedColumnsTests
                         c INT CONSTRAINT generated_c GENERATED ALWAYS AS (b + 1) VIRTUAL
                             CONSTRAINT positive_c CHECK (c > 0),
                         b INT CONSTRAINT generated_b AS (a + 1) VIRTUAL,
-                        d INT AS (c + 1) STORED,
+                        d INT AS (c + 1) VIRTUAL,
                         e INT AS (d + 1) VIRTUAL,
                         CONSTRAINT unique_c UNIQUE(c) ON CONFLICT IGNORE
                     );

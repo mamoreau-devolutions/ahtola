@@ -25,9 +25,6 @@ detach/transaction.sqltest::detach-fails-with-active-read-transaction | error 'M
 detach/transaction.sqltest::detach-fails-with-active-write-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
 detach/transaction.sqltest::detach-succeeds-after-commit | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates | expected success but got error: EXPLAIN is only supported for statements lowered to the bytecode compiler.
-gencol.sqltest::gencol_alter_add_stored_rejected | expected an error but the statement succeeded
-gencol.sqltest::gencol_stored_rejected | expected an error but the statement succeeded
-gencol.sqltest::gencol_stored_generated_always_rejected | expected an error but the statement succeeded
 indexed_by.sqltest::indexed-by-attached-qualified-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 indexed_by.sqltest::indexed-by-attached-update-delete | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 join/memory.sqltest::correlated-subquery-hash-join-reuse | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.

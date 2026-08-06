@@ -13,7 +13,7 @@ public sealed class ManagedDefaultValuesTests
         using var connection = database.Connect();
         Execute(
             connection,
-            "CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT DEFAULT 'new', quantity INTEGER DEFAULT 3, doubled AS (quantity * 2) STORED);");
+            "CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT DEFAULT 'new', quantity INTEGER DEFAULT 3, doubled AS (quantity * 2) VIRTUAL);");
         Execute(connection, "CREATE TABLE audit(event TEXT DEFAULT 'inserted');");
         Execute(
             connection,
@@ -70,7 +70,7 @@ public sealed class ManagedDefaultValuesTests
         {
             Execute(
                 connection,
-                "CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT DEFAULT 'persisted', quantity INTEGER DEFAULT 4, doubled AS (quantity * 2) STORED);");
+                "CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT DEFAULT 'persisted', quantity INTEGER DEFAULT 4, doubled AS (quantity * 2) VIRTUAL);");
             Execute(connection, "INSERT INTO items DEFAULT VALUES;");
         }
 

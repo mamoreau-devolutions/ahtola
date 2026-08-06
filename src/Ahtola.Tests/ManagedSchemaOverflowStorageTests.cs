@@ -190,7 +190,7 @@ public sealed class ManagedSchemaOverflowStorageTests
             .And.Contain("CHECK")
             .And.Contain("NOT NULL")
             .And.Contain("DEFAULT")
-            .And.Contain("STORED");
+            .And.Contain("VIRTUAL");
     }
 
     [Test]
@@ -287,7 +287,7 @@ public sealed class ManagedSchemaOverflowStorageTests
                         tenant TEXT COLLATE NOCASE,
                         sequence INTEGER,
                         payload TEXT COLLATE RTRIM NOT NULL DEFAULT '{payload}',
-                        normalized TEXT COLLATE NOCASE AS (lower(payload)) STORED UNIQUE,
+                        normalized TEXT COLLATE NOCASE AS (lower(payload)) VIRTUAL UNIQUE,
                         PRIMARY KEY(tenant COLLATE NOCASE, sequence DESC)
                     ) WITHOUT ROWID;
                     """);
@@ -333,7 +333,7 @@ public sealed class ManagedSchemaOverflowStorageTests
                 ScalarText(connection, "SELECT sql FROM sqlite_schema WHERE name='parent';")
                     .Should().Contain("COLLATE NOCASE")
                     .And.Contain("sequence DESC")
-                    .And.Contain("STORED")
+                    .And.Contain("VIRTUAL")
                     .And.Contain(payload);
                 ScalarText(connection, "SELECT sql FROM sqlite_schema WHERE name='child';")
                     .Should().Contain("ON UPDATE CASCADE")
@@ -622,7 +622,7 @@ public sealed class ManagedSchemaOverflowStorageTests
            + "\"id\" INTEGER PRIMARY KEY, "
            + $"\"required\" TEXT NOT NULL DEFAULT '{defaultValue}', "
            + "\"base\" INTEGER NOT NULL DEFAULT 7, "
-           + "\"doubled\" INTEGER AS (\"base\" * 2) STORED)";
+           + "\"doubled\" INTEGER AS (\"base\" * 2) VIRTUAL)";
 
     private static string BuildLargeMutableTableSql(string name, string defaultValue)
         => $"CREATE TABLE {QuoteQualifiedIdentifier(name)} ("
@@ -635,7 +635,7 @@ public sealed class ManagedSchemaOverflowStorageTests
            + "\"id\" INTEGER NOT NULL, "
            + $"\"code\" TEXT NOT NULL DEFAULT '{defaultValue}', "
            + "\"base\" INTEGER NOT NULL DEFAULT 7 CHECK (\"base\" > 0), "
-           + "\"doubled\" INTEGER AS (\"base\" * 2) STORED, "
+           + "\"doubled\" INTEGER AS (\"base\" * 2) VIRTUAL, "
            + $"CONSTRAINT {QuoteIdentifier(name + "_pk")} PRIMARY KEY (\"id\", \"code\" DESC))";
 
     private static string BuildLargeIndexSql(string name, string tableName, string columnName)

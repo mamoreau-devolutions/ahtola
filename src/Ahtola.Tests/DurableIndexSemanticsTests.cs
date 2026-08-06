@@ -26,7 +26,7 @@ public sealed class DurableIndexSemanticsTests
                 tenant TEXT COLLATE NOCASE,
                 sequence TEXT,
                 code TEXT,
-                normalized TEXT GENERATED ALWAYS AS (lower(code)) STORED,
+                normalized TEXT GENERATED ALWAYS AS (lower(code)) VIRTUAL,
                 CONSTRAINT terms_pk PRIMARY KEY(
                     tenant COLLATE NOCASE DESC,
                     sequence COLLATE RTRIM ASC

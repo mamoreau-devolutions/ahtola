@@ -7,7 +7,7 @@ namespace Ahtola.Tests;
 public class ManagedEfVirtualComputedColumnTests
 {
     [Test]
-    public async Task EnsureCreatedRejectsVirtualComputedColumnsBeforeSchemaMutation()
+    public async Task EnsureCreatedSupportsVirtualComputedColumns()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
         await connection.OpenAsync();
@@ -17,15 +17,17 @@ public class ManagedEfVirtualComputedColumnTests
             .Options;
         await using var context = new VirtualComputedColumnContext(options);
 
-        var ensureCreated = async () => await context.Database.EnsureCreatedAsync();
+        (await context.Database.EnsureCreatedAsync()).Should().BeTrue();
 
-        await ensureCreated.Should().ThrowAsync<NotSupportedException>()
-            .WithMessage("*virtual computed columns*");
+        var item = new VirtualComputedColumnItem { Name = "Ada" };
+        context.Items.Add(item);
+        await context.SaveChangesAsync();
+        item.NameLength.Should().Be(3);
 
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM \"sqlite_master\" WHERE \"type\" = 'table';";
 
-        (await command.ExecuteScalarAsync()).Should().Be(0L);
+        Convert.ToInt64(await command.ExecuteScalarAsync()).Should().BeGreaterThan(0L);
     }
 
     private sealed class VirtualComputedColumnContext(

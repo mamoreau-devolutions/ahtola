@@ -400,7 +400,7 @@ public sealed class ManagedConstraintSemanticsTests
                     """
                     CREATE TABLE generated_values(
                         value INTEGER,
-                        computed INTEGER GENERATED ALWAYS AS (value + 1) STORED
+                        computed INTEGER GENERATED ALWAYS AS (value + 1) VIRTUAL
                             CONSTRAINT generated_unique UNIQUE ON CONFLICT IGNORE
                     );
                     """);
@@ -787,7 +787,7 @@ public sealed class ManagedConstraintSemanticsTests
                 value INTEGER,
                 computed INTEGER GENERATED ALWAYS AS (
                     CASE WHEN value > 0 THEN value END
-                ) STORED NOT NULL ON CONFLICT IGNORE
+                ) VIRTUAL NOT NULL ON CONFLICT IGNORE
             );
             """;
         AssertQueryMatchesSqlite(
