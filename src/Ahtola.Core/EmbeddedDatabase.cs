@@ -493,6 +493,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     private sealed record ReturningTableSnapshot(SqlValue[][] Rows, long[] RowIds);
 
+    internal sealed record ReturningCteScope(
+        IReadOnlyList<CommonTableExpression> Expressions,
+        IReadOnlySet<string> RequiredNames);
+
     private sealed record IndexConstraint(Expression Expression, bool RequiresNullRejection);
 
     // The rows of an enclosing aggregate evaluation (one GROUP BY group, or the whole
@@ -541,7 +545,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         OuterAggregateScope? OuterAggregateScope = null,
         bool IgnoreCheckConstraints = false,
         Func<string?, string?, ExecutionResult>? ExecuteTableList = null,
-        bool PreserveSubqueryMemoSnapshot = false)
+        bool PreserveSubqueryMemoSnapshot = false,
+        ReturningCteScope? ReturningCteScope = null)
     {
         /// <summary>
         /// Row-loop checkpoint. It honors cooperative cancellation exactly as before and
@@ -12251,6 +12256,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                             TriggerState = new TriggerStatementState(rowLastInsertRowId),
                         }
                         : context;
+                evaluationContext = RematerializeReturningCommonTableExpressions(parameters, evaluationContext);
                 var output = new List<SqlValue>();
                 try
                 {
@@ -21270,6 +21276,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[] parameters,
         QueryContext context)
     {
+        var returningCteScope = CreateReturningCteScope(
+            statement.CommonTableExpressions,
+            statement.Dml);
         var requiredCteNames = GetRequiredCommonTableExpressionNames(
             statement.CommonTableExpressions,
             name => CountDmlReferences(statement.Dml, name));
@@ -21279,6 +21288,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             context,
             outerRow: null,
             requiredCteNames: requiredCteNames);
+        if (returningCteScope is not null)
+            cteContext = cteContext with { ReturningCteScope = returningCteScope };
         var backup = CloneTablesShallow(context.Tables);
         try
         {
@@ -21335,6 +21346,46 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return required;
     }
 
+    private static ReturningCteScope? CreateReturningCteScope(
+        IReadOnlyList<CommonTableExpression> expressions,
+        ParsedStatement statement)
+    {
+        var (returning, targetNames) = statement switch
+        {
+            InsertStatement insert => (
+                insert.Returning,
+                new HashSet<string>([ManagedSchemaName.Display(insert.TableName)], StringComparer.OrdinalIgnoreCase)),
+            UpdateStatement update => (
+                update.Returning,
+                new HashSet<string>(
+                    [ManagedSchemaName.Display(update.TableName), update.TargetQualifier],
+                    StringComparer.OrdinalIgnoreCase)),
+            DeleteStatement delete => (
+                delete.Returning,
+                new HashSet<string>(
+                    [ManagedSchemaName.Display(delete.TableName), delete.TargetQualifier],
+                    StringComparer.OrdinalIgnoreCase)),
+            _ => (null, new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+        };
+        if (returning is null || returning.Count == 0)
+            return null;
+
+        // Turso excludes CTE reads in correlated post-write RETURNING subqueries from the
+        // shared pre-write CTE snapshot used by UPDATE FROM source rows.
+        var correlatedReturning = returning
+            .Where(projection => ExpressionContainsCorrelatedSubquery(projection.Expression, targetNames))
+            .ToArray();
+        if (correlatedReturning.Length == 0)
+            return null;
+
+        var requiredNames = GetRequiredCommonTableExpressionNames(
+            expressions,
+            name => correlatedReturning.Sum(projection => CountReferencesInExpression(projection.Expression, name)));
+        return requiredNames.Count == 0
+            ? null
+            : new ReturningCteScope(expressions, requiredNames);
+    }
+
     private QueryContext MaterializeCommonTableExpressions(
         IReadOnlyList<CommonTableExpression> expressions,
         SqlValue[] parameters,
@@ -21365,6 +21416,21 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
 
         return context with { CommonTableExpressions = resolvedExpressions };
+    }
+
+    private QueryContext RematerializeReturningCommonTableExpressions(
+        SqlValue[] parameters,
+        QueryContext context)
+    {
+        if (context.ReturningCteScope is not { } scope)
+            return context;
+
+        return MaterializeCommonTableExpressions(
+            scope.Expressions,
+            parameters,
+            context with { ReturningCteScope = null },
+            outerRow: null,
+            scope.RequiredNames);
     }
 
     private SourceData EvaluateNonRecursiveCte(

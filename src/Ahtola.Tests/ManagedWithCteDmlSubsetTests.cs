@@ -71,6 +71,39 @@ public class ManagedWithCteDmlSubsetTests
     }
 
     [Test]
+    public void ManagedWithCteUpdateFromRematerializesReturningAfterTriggerMutation()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE target(id INTEGER PRIMARY KEY, value INTEGER);");
+        Execute(connection, "CREATE TABLE source(id INTEGER PRIMARY KEY, bump INTEGER);");
+        Execute(connection, "INSERT INTO target VALUES (1, 0), (2, 0), (3, 0);");
+        Execute(connection, "INSERT INTO source VALUES (1, 1), (2, 2), (3, 3);");
+        Execute(connection, """
+            CREATE TRIGGER mutate_source BEFORE UPDATE ON target
+            WHEN NEW.id = 1
+            BEGIN
+                UPDATE source SET bump = 100 WHERE id = 2;
+            END;
+            """);
+
+        using var statement = connection.Prepare("""
+            WITH c(id, bump) AS (SELECT id, bump FROM source)
+            UPDATE target
+            SET value = c.bump
+            FROM c
+            WHERE target.id = c.id
+            RETURNING id, (SELECT bump FROM c WHERE c.id = target.id);
+            """);
+
+        AssertRows(
+            ReadRows(statement),
+            [SqlValue.Integer(1), SqlValue.Integer(1)],
+            [SqlValue.Integer(2), SqlValue.Integer(100)],
+            [SqlValue.Integer(3), SqlValue.Integer(3)]);
+    }
+
+    [Test]
     public void ManagedWithCteDmlDeleteMaterializesTargetRowsBeforeDeleting()
     {
         var database = new EmbeddedDatabase();

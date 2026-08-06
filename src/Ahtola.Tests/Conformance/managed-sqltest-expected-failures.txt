@@ -91,7 +91,6 @@ trigger_attach_regression.sqltest::trigger-attached-db-multi-cmd-same-db | expec
 trigger_attach_regression.sqltest::trigger-attached-db-subquery-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 trigger_attach_regression.sqltest::trigger-attached-db-explicit-qual-subquery | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 trigger_attach_regression.sqltest::trigger-attached-db-cte-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-update-from.sqltest::update-from-returning-reuses-row-cte-snapshot-after-trigger-mutation | expected 3 row(s), got 3 row(s); row 1 expected '2/100' but was '2/2'
 update-from.sqltest::update-from-attached-constant-where-literal-set | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update-from.sqltest::update-from-attached-constant-where-zero | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update-from.sqltest::update-from-attached-constant-where-one | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
