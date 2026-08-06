@@ -58,6 +58,8 @@ public sealed class ResumableStatement : IDisposable
     private VdbeParameterBinding? _binding;
     private ProgramCounter _instructionPointer;
     private ReadOnlyCollection<SqlValue>? _currentRow;
+    private int _fkImmediateViolations;
+    private int _fkDeferredViolations;
     private bool _hasExecutedInstruction;
     private bool _disposed;
 
@@ -419,6 +421,47 @@ public sealed class ResumableStatement : IDisposable
                             _instructionPointer = found.FoundTarget;
                         else
                             AdvanceInstructionPointer();
+                        break;
+                    }
+                case NoConflictInstruction noConflict:
+                    {
+                        // Jump when no matching key (or any NULL key); position on match.
+                        if (TryPositionCursorOnKeyPrefix(noConflict.Cursor, noConflict.Key))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = noConflict.NoConflictTarget;
+                        break;
+                    }
+                case FkCounterInstruction fkCounter:
+                    {
+                        if (fkCounter.Deferred)
+                            _fkDeferredViolations = checked(_fkDeferredViolations + fkCounter.Increment);
+                        else
+                            _fkImmediateViolations = checked(_fkImmediateViolations + fkCounter.Increment);
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case FkIfZeroInstruction fkIfZero:
+                    {
+                        var count = fkIfZero.Deferred ? _fkDeferredViolations : _fkImmediateViolations;
+                        if (count == 0)
+                            _instructionPointer = fkIfZero.Target;
+                        else
+                            AdvanceInstructionPointer();
+                        break;
+                    }
+                case FkCheckInstruction fkCheck:
+                    {
+                        var count = fkCheck.Deferred ? _fkDeferredViolations : _fkImmediateViolations;
+                        if (count != 0)
+                        {
+                            throw new EmbeddedSqlException(
+                                "FOREIGN KEY constraint failed",
+                                SqliteResultCode.ConstraintForeignKey,
+                                InsertConflictAlgorithm.Abort);
+                        }
+
+                        AdvanceInstructionPointer();
                         break;
                     }
                 case SeekRowidRangeInstruction seekRowidRange:
@@ -1257,6 +1300,11 @@ public sealed class ResumableStatement : IDisposable
         _currentRow = null;
         _instructionPointer = default;
         _hasExecutedInstruction = false;
+        _fkImmediateViolations = 0;
+        // Deferred FK violations survive statement Reset within a transaction, matching
+        // SQLite's database-level deferred counter. Clear only when not in a transaction.
+        if (!_transaction.InTransaction)
+            _fkDeferredViolations = 0;
         RowsAffected = 0;
         LastInsertRowId = null;
         // The parameter binding is intentionally preserved across Reset, mirroring SQLite's
@@ -1736,6 +1784,49 @@ public sealed class ResumableStatement : IDisposable
                 continue;
 
             _cursorPositions[cursor.Index] = i;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Positions <paramref name="cursor"/> on the first row whose leading columns equal
+    /// <paramref name="key"/>. Returns false when any key register is NULL (Turso
+    /// NoConflict: NULL never conflicts) or when no row matches.
+    /// </summary>
+    private bool TryPositionCursorOnKeyPrefix(Cursor cursor, RegisterRange key)
+    {
+        _materializedRows[cursor.Index] = null;
+        var keyValues = ReadRegisters(key);
+        for (var i = 0; i < keyValues.Length; i++)
+        {
+            if (keyValues[i].Kind == SqlValueKind.Null)
+                return false;
+        }
+
+        var source = RequireCursorSource(cursor);
+        var rows = source.Rows;
+        for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            var row = rows[rowIndex];
+            if (row.Length < keyValues.Length)
+                continue;
+
+            var match = true;
+            for (var column = 0; column < keyValues.Length; column++)
+            {
+                if (!row[column].Equals(keyValues[column]))
+                {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (!match)
+                continue;
+
+            _cursorPositions[cursor.Index] = rowIndex;
             return true;
         }
 

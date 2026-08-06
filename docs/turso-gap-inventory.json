@@ -258,7 +258,7 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Partial 2026-08-06 (still open). Rowid probes complete: SeekRowid/SeekRowidRange (existing) plus NotExists and Found opcodes (Turso NotExists/Found) with shared TryPositionCursorOnRowId linear probe. Still open: record-key SeekGE/GT/LE/LT over index keys, eq_only distinction, NoConflict (NULL-aware unique probe). Those need the index-cursor family (vdbe-index-cursor-opcode-family) rather than materialization-only sources.",
+      "notes": "Partial 2026-08-06 (still open). Rowid probe family complete: SeekRowid/SeekRowidRange, NotExists, Found, NoConflict (NULL-is-no-conflict + key-prefix equality probe with cursor positioning). INTEGER PRIMARY KEY alias now participates in SeekRowid point lookups (WHERE id = N). Evidence: VdbeHaltAndSeekProbeOpcodeTests, VdbeNoConflictOpcodeTests, SeekAccessPathTests.IntegerPrimaryKeyAliasPointLookupEmitsSeekRowid. Still open: record-key SeekGE/GT/LE/LT with eq_only over index btree keys — owned jointly with vdbe-index-cursor-opcode-family.",
       "status": "open"
     },
     {
@@ -562,7 +562,7 @@
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Partial 2026-08-06 (still open). Bare rowid ORDER BY is now elided without a sorter: ASC uses the plain Rewind/Next scan (physical rowid order); DESC uses Last/Prev reverse scan (existing path). Evidence: CompiledSortedScanExecutionTests.OrderByRowidAscElidesSorterAndUsesForwardScan + DESC reverse-scan tests. Still open: secondary-index ORDER BY/GROUP BY elision (needs access-method / covering-index planner), INTEGER PRIMARY KEY alias column as order key, and elision combined with WHERE predicates. Turso order.rs eliminate_order_by remains the full target.",
+      "notes": "Partial 2026-08-06 (still open). Bare rowid and INTEGER PRIMARY KEY alias ORDER BY elide the sorter: ASC uses Rewind/Next; DESC uses Last/Prev. WHERE id = N also lowers to SeekRowid. Evidence: CompiledSortedScanExecutionTests.OrderByRowidAscElidesSorterAndUsesForwardScan, OrderByIntegerPrimaryKeyAliasElidesSorter; SeekAccessPathTests.IntegerPrimaryKeyAliasPointLookupEmitsSeekRowid. Still open: secondary-index ORDER BY/GROUP BY elision (needs access-method planner), elision combined with WHERE on non-rowid predicates.",
       "status": "open"
     },
     {

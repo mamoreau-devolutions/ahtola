@@ -193,6 +193,34 @@ public static class VdbeExplain
                 ephemeralInsert.Values.Count,
                 null,
                 $"insert into ephemeral cursor {ephemeralInsert.Cursor.Index} from {FormatRange(ephemeralInsert.Values)}"),
+            NoConflictInstruction noConflict => (
+                noConflict.Cursor.Index,
+                noConflict.NoConflictTarget.Offset,
+                noConflict.Key.Start.Index,
+                FormatRange(noConflict.Key),
+                noConflict.Description),
+            FkCounterInstruction fkCounter => (
+                fkCounter.Deferred ? 1 : 0,
+                fkCounter.Increment,
+                0,
+                null,
+                fkCounter.Deferred
+                    ? $"fk deferred counter += {fkCounter.Increment}"
+                    : $"fk statement counter += {fkCounter.Increment}"),
+            FkIfZeroInstruction fkIfZero => (
+                fkIfZero.Deferred ? 1 : 0,
+                fkIfZero.Target.Offset,
+                0,
+                null,
+                fkIfZero.Deferred
+                    ? $"if deferred fk counter == 0 goto {fkIfZero.Target.Offset}"
+                    : $"if statement fk counter == 0 goto {fkIfZero.Target.Offset}"),
+            FkCheckInstruction fkCheck => (
+                fkCheck.Deferred ? 1 : 0,
+                0,
+                0,
+                null,
+                fkCheck.Deferred ? "check deferred fk counter" : "check statement fk counter"),
             SeekRowidRangeInstruction seekRowidRange => (
                 seekRowidRange.Cursor.Index,
                 seekRowidRange.NotFoundTarget.Offset,

@@ -683,6 +683,36 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
+    public void OrderByIntegerPrimaryKeyAliasElidesSorter()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);");
+        Execute(connection, "INSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c');");
+
+        // INTEGER PRIMARY KEY aliases rowid, so ORDER BY id is the same as ORDER BY rowid.
+        RouteUsesSorter(connection, "SELECT v FROM t ORDER BY id ASC;").Should().BeFalse();
+        var ascOpcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT v FROM t ORDER BY id ASC;"));
+        ascOpcodes.Should().Contain("Rewind");
+        ascOpcodes.Should().NotContain(op => op.Contains("Sorter", StringComparison.Ordinal));
+
+        RouteUsesSorter(connection, "SELECT v FROM t ORDER BY id DESC;").Should().BeFalse();
+        var descOpcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT v FROM t ORDER BY id DESC;"));
+        descOpcodes.Should().Contain("Last");
+        descOpcodes.Should().Contain("Prev");
+        descOpcodes.Should().NotContain(op => op.Contains("Sorter", StringComparison.Ordinal));
+
+        ReadRows(connection, "SELECT v FROM t ORDER BY id ASC;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("a"), SqlValue.Text("b"), SqlValue.Text("c"));
+        ReadRows(connection, "SELECT v FROM t ORDER BY id DESC;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("c"), SqlValue.Text("b"), SqlValue.Text("a"));
+    }
+
+    [Test]
     public void OrderByRowidDescWithWhereDoesNotEmitReverseScan()
     {
         var database = new EmbeddedDatabase();

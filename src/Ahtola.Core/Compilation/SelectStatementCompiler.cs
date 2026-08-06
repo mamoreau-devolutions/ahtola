@@ -574,17 +574,59 @@ internal sealed class SelectStatementCompiler
 
     private static bool IsTargetRowIdReference(ColumnExpression column, ScanTarget target)
     {
-        if (!target.HasRowId || target.ResolveColumnIndex(column.Name) is not null)
+        if (!target.HasRowId)
             return false;
 
         var separator = column.Name.IndexOf('.');
+        if (separator >= 0
+            && !string.Equals(
+                column.Name[..separator],
+                target.Qualifier,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         var bareName = separator < 0 ? column.Name : column.Name[(separator + 1)..];
-        return EmbeddedTable.IsRowidAliasName(bareName)
-            && (separator < 0
-                || string.Equals(
-                    column.Name[..separator],
-                    target.Qualifier,
-                    StringComparison.OrdinalIgnoreCase));
+
+        // Bare rowid/_rowid_/oid that is not also a declared column name.
+        if (target.ResolveColumnIndex(column.Name) is null)
+            return EmbeddedTable.IsRowidAliasName(bareName);
+
+        // INTEGER PRIMARY KEY column aliases the rowid; ORDER BY id is ORDER BY rowid.
+        return IsIntegerPrimaryKeyRowidAlias(bareName, target);
+    }
+
+    /// <summary>
+    /// True when <paramref name="bareName"/> is the single-column INTEGER PRIMARY KEY
+    /// that aliases the table's rowid (SQLite's rowid-alias rule).
+    /// </summary>
+    private static bool IsIntegerPrimaryKeyRowidAlias(string bareName, ScanTarget target)
+    {
+        if (target.ColumnDefinitions is null || target.ColumnDefinitions.Count == 0)
+            return false;
+
+        var aliasIndex = -1;
+        var primaryKeyCount = 0;
+        for (var index = 0; index < target.ColumnDefinitions.Count; index++)
+        {
+            var definition = target.ColumnDefinitions[index];
+            if (definition is null || !definition.PrimaryKey)
+                continue;
+
+            primaryKeyCount++;
+            aliasIndex = index;
+        }
+
+        if (primaryKeyCount != 1 || aliasIndex < 0)
+            return false;
+
+        var alias = target.ColumnDefinitions[aliasIndex]!;
+        if (alias.PrimaryKeyDescending || !EmbeddedTable.IsIntegerDeclaredType(alias.DeclaredType))
+            return false;
+
+        return string.Equals(alias.Name, bareName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(target.Columns[aliasIndex], bareName, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

@@ -243,6 +243,17 @@ public enum VdbeOpcode
     OpenEphemeral = 79,
     /// <summary>Append one row from registers into an ephemeral table cursor.</summary>
     EphemeralInsert = 80,
+    /// <summary>
+    /// Jump if the key in registers has no matching row (or contains NULL); leave the cursor
+    /// positioned when a match is found (Turso/SQLite <c>NoConflict</c>).
+    /// </summary>
+    NoConflict = 81,
+    /// <summary>Add P2 to the deferred or statement FK constraint counter (Turso <c>FkCounter</c>).</summary>
+    FkCounter = 82,
+    /// <summary>Jump if the deferred or statement FK counter is zero (Turso <c>FkIfZero</c>).</summary>
+    FkIfZero = 83,
+    /// <summary>Halt with SQLITE_CONSTRAINT_FOREIGNKEY when the FK counter is non-zero (Turso <c>FkCheck</c>).</summary>
+    FkCheck = 84,
 }
 
 /// <summary>
@@ -1984,6 +1995,48 @@ public sealed record EphemeralInsertInstruction(Cursor Cursor, RegisterRange Val
 }
 
 /// <summary>
+/// Probes <paramref name="Cursor"/> for a row whose leading columns equal
+/// <paramref name="Key"/>. Jumps to <paramref name="NoConflictTarget"/> when any key
+/// register is NULL or no match exists (Turso/SQLite <c>NoConflict</c> — NULL never
+/// conflicts). Falls through with the cursor positioned on the match when found.
+/// </summary>
+public sealed record NoConflictInstruction(
+    Cursor Cursor,
+    RegisterRange Key,
+    ProgramCounter NoConflictTarget,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.NoConflict;
+}
+
+/// <summary>
+/// Adds <paramref name="Increment"/> (may be negative) to the deferred or statement-level
+/// foreign-key constraint counter (Turso/SQLite <c>FkCounter</c>).
+/// </summary>
+public sealed record FkCounterInstruction(int Increment, bool Deferred) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.FkCounter;
+}
+
+/// <summary>
+/// Jumps to <paramref name="Target"/> when the deferred or statement FK counter is zero
+/// (Turso/SQLite <c>FkIfZero</c>).
+/// </summary>
+public sealed record FkIfZeroInstruction(bool Deferred, ProgramCounter Target) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.FkIfZero;
+}
+
+/// <summary>
+/// Halts with <see cref="SqliteResultCode.ConstraintForeignKey"/> when the deferred or
+/// statement FK counter is non-zero (Turso/SQLite <c>FkCheck</c>).
+/// </summary>
+public sealed record FkCheckInstruction(bool Deferred) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.FkCheck;
+}
+
+/// <summary>
 /// Opens the statement's outermost transaction over the interpreter's mutable register state,
 /// snapshotting the register file so a later <see cref="RollbackTransactionInstruction"/> can restore
 /// it. It fails at run time when a transaction is already open, mirroring SQLite's "cannot start a
@@ -2637,6 +2690,24 @@ public sealed class VdbeProgram
                     ValidateOpenCursor(found.Cursor, openCursors, instructionIndex);
                     ValidateRegister(found.RowIdRegister, instructionIndex);
                     ValidateJumpTarget(found.FoundTarget, instructionIndex);
+                    break;
+                case NoConflictInstruction noConflict:
+                    ValidateOpenCursor(noConflict.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(noConflict.Key, instructionIndex);
+                    if (noConflict.Key.Count <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} NoConflict requires a positive key width.");
+                    }
+
+                    ValidateJumpTarget(noConflict.NoConflictTarget, instructionIndex);
+                    break;
+                case FkCounterInstruction:
+                    break;
+                case FkIfZeroInstruction fkIfZero:
+                    ValidateJumpTarget(fkIfZero.Target, instructionIndex);
+                    break;
+                case FkCheckInstruction:
                     break;
                 case SeekRowidRangeInstruction seekRowidRange:
                     ValidateOpenCursor(seekRowidRange.Cursor, openCursors, instructionIndex);

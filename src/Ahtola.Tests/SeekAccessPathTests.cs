@@ -74,6 +74,23 @@ public class SeekPlanShapeTests
     }
 
     [Test]
+    public void IntegerPrimaryKeyAliasPointLookupEmitsSeekRowid()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);");
+        Execute(connection, "INSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c');");
+
+        // id is the rowid alias, so WHERE id = N is the same seek path as rowid = N.
+        var opcodes = Opcodes(connection, "EXPLAIN SELECT v FROM t WHERE id = 2;");
+        opcodes.Should().Contain("SeekRowid");
+
+        ReadRows(connection, "SELECT v FROM t WHERE id = 2;")
+            .Select(row => row[0].AsText())
+            .Should()
+            .Equal("b");
+    }
+
+    [Test]
     public void RowidGreaterThanEmitsSeekRowid()
     {
         using var connection = new EmbeddedDatabase().Connect();

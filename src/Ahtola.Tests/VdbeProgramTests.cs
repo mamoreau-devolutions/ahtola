@@ -23,6 +23,10 @@ public class VdbeProgramTests
         ((int)VdbeOpcode.HaltIfNull).Should().Be(78);
         ((int)VdbeOpcode.OpenEphemeral).Should().Be(79);
         ((int)VdbeOpcode.EphemeralInsert).Should().Be(80);
+        ((int)VdbeOpcode.NoConflict).Should().Be(81);
+        ((int)VdbeOpcode.FkCounter).Should().Be(82);
+        ((int)VdbeOpcode.FkIfZero).Should().Be(83);
+        ((int)VdbeOpcode.FkCheck).Should().Be(84);
 
         typeof(VdbeProgram).GetConstructor(
             [
