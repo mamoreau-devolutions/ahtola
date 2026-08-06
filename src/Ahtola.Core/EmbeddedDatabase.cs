@@ -33334,6 +33334,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 ntileBuckets.Add(function, buckets);
             }
 
+            // The default RANGE frame ends at the current peer group. Every row in one peer
+            // group therefore sees the same frame, so intrinsic aggregate results can be reused
+            // without changing user-defined aggregate callback timing.
+            var sharePeerAggregateFrames = CanShareAggregateFrameAcrossPeers(spec);
+            IReadOnlyList<int>? sharedFramePositions = null;
+            Dictionary<FunctionExpression, SqlValue>? sharedAggregateValues = null;
+            var sharedPeerGroupStart = -1;
             for (var position = 0; position < entries.Count; position++)
             {
                 context.CheckInterrupt();
@@ -33343,16 +33350,54 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     continue;
                 }
 
-                var framePositions = needsFrame
-                    ? ResolveWindowFramePositions(
-                        spec,
-                        entries,
-                        peers,
-                        position,
-                        frameRuntime)
-                    : [];
+                var startsNewSharedPeerGroup = sharePeerAggregateFrames
+                    && sharedPeerGroupStart != peers.Starts[position];
+                if (startsNewSharedPeerGroup)
+                {
+                    sharedFramePositions = needsFrame
+                        ? ResolveWindowFramePositions(
+                            spec,
+                            entries,
+                            peers,
+                            position,
+                            frameRuntime)
+                        : [];
+                    sharedAggregateValues = [];
+                    sharedPeerGroupStart = peers.Starts[position];
+                }
+
+                var framePositions = sharePeerAggregateFrames
+                    ? sharedFramePositions!
+                    : needsFrame
+                        ? ResolveWindowFramePositions(
+                            spec,
+                            entries,
+                            peers,
+                            position,
+                            frameRuntime)
+                        : [];
                 foreach (var function in functions)
                 {
+                    if (sharePeerAggregateFrames && IsIntrinsicAggregateWindowFunction(function))
+                    {
+                        if (startsNewSharedPeerGroup)
+                        {
+                            sharedAggregateValues![function] = EvaluateWindowFunctionAtPosition(
+                                function,
+                                entries,
+                                peers,
+                                position,
+                                framePositions,
+                                ntileBuckets.GetValueOrDefault(function),
+                                inputs[function],
+                                parameters,
+                                context);
+                        }
+
+                        results[function][entries[position].SourceIndex] = sharedAggregateValues![function];
+                        continue;
+                    }
+
                     results[function][entries[position].SourceIndex] = EvaluateWindowFunctionAtPosition(
                         function,
                         entries,
@@ -33369,6 +33414,22 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         return results;
     }
+
+    private static bool CanShareAggregateFrameAcrossPeers(WindowSpecification specification)
+    {
+        return specification.Frame is null
+            || specification.Frame is
+            {
+                Mode: Ahtola.Core.Parsing.WindowFrameMode.Range,
+                Start: { Kind: FrameBoundKind.UnboundedPreceding },
+                End: { Kind: FrameBoundKind.CurrentRow },
+                Exclusion: FrameExclusion.NoOthers,
+            };
+    }
+
+    private static bool IsIntrinsicAggregateWindowFunction(FunctionExpression function)
+        => function.Name.Equals("COUNT", StringComparison.OrdinalIgnoreCase)
+            || IsBuiltInAggregate(function);
 
     private static bool WindowFunctionUsesFrame(FunctionExpression function)
     {

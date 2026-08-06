@@ -85,6 +85,29 @@ public class WindowSqlRoutingTests
     }
 
     [Test]
+    public void DefaultRangeAggregateReusesPeerFrameAcrossJoinRows()
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+        Execute(connection, "CREATE TABLE w(p TEXT, v INTEGER);");
+        Execute(connection, "INSERT INTO w SELECT 'p' || (value % 3), value FROM generate_series(1, 60);");
+
+        var rows = ReadRows(connection, """
+            SELECT a.p
+            FROM w AS a JOIN w AS b USING (p) JOIN w AS d USING (p)
+            ORDER BY a.p, sum(1e18) OVER (ORDER BY a.p)
+            LIMIT 6;
+            """);
+
+        rows.Select(row => row[0]).Should().Equal(
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"),
+            SqlValue.Text("p0"));
+    }
+
+    [Test]
     public void MultipleWindowFunctionsSharingOneSpecRouteThroughOneSorter()
     {
         using var connection = new EmbeddedDatabase().Connect();

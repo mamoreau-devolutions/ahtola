@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 119,
+    "current_conformance_expected_failures": 16,
     "last_reconciled": "2026-08-08",
     "entry_count": 210,
     "counts": {
@@ -46,8 +46,8 @@
         "S": 98
       },
       "by_status": {
-        "open": 111,
-        "closed": 99
+        "open": 110,
+        "closed": 100
       }
     },
     "schema": {
@@ -84,12 +84,8 @@
       "ahtola_ref": "none",
       "severity": "s3-perf",
       "effort": "L",
-      "conformance_links": [
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition",
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
-      ],
-      "notes": "Entire hash-join execution family absent, including the grace (disk-partitioned) variant for outsized build sides and the unmatched-scan support for outer joins. Ahtola joins are in-memory nested loops over materialized rows (VdbeJoinPlan/OpenJoinCursor), so large equijoins degrade. The triple-selfjoin conformance timeouts are planner-caused (no cost-based ordering) but hash join is the execution-side fix.",
+      "conformance_links": [],
+      "notes": "Entire hash-join execution family absent, including the grace (disk-partitioned) variant for outsized build sides and the unmatched-scan support for outer joins. Ahtola joins are in-memory nested loops over materialized rows (VdbeJoinPlan/OpenJoinCursor), so large equijoins degrade.",
       "status": "open"
     },
     {
@@ -212,11 +208,7 @@
       "ahtola_ref": "none",
       "severity": "s3-perf",
       "effort": "M",
-      "conformance_links": [
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition",
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
-        "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
-      ],
+      "conformance_links": [],
       "notes": "Turso can build a transient auto-index when no usable index exists for a join. Combined with the missing cost-based join order (compilation entry), Ahtola's joins are O(N*M) nested loops with materialized right sides.",
       "status": "open"
     },
@@ -752,8 +744,8 @@
       "id": "compile-save-all-cursors-window-selfjoin-timeout",
       "layer": "compilation",
       "kind": "divergent",
-      "turso_ref": "turso-src/core/translate/window.rs, optimizer/join.rs (bounded-cost self-join + window evaluation)",
-      "ahtola_ref": "src/Ahtola.Core/Compilation/WindowProgramBuilder.cs, BufferedWindowProgramBuilder.cs, VdbeJoinPlan (nested-loop self-join)",
+      "turso_ref": "turso-src/core/translate/window.rs::emit_aggregation_step + emit_return_buffered_rows (advance aggregate state per input row, capture its value once per peer group)",
+      "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ComputeWindowFunctions (shared default RANGE peer-frame aggregate value); src/Ahtola.Tests/WindowSqlRoutingTests.cs::DefaultRangeAggregateReusesPeerFrameAcrossJoinRows",
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [
@@ -761,8 +753,8 @@
         "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery",
         "save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery"
       ],
-      "notes": "Triple self-join plus window function queries time out (exceed the 30s managed execution budget) in Ahtola, consistent with the lack of index-driven joins and cost-based join ordering (see compile-nway-join-not-index-driven, compile-no-cost-based-join-ordering): a triple self-join is O(n^3) without index seeks, whereas Turso's optimizer would choose index-backed access methods per join.",
-      "status": "open"
+      "notes": "Closed 2026-08-06. The three joins correctly materialize 24,000 rows, but the managed evaluator rebuilt and re-aggregated each identical default RANGE UNBOUNDED PRECEDING ... CURRENT ROW peer frame for every output row. ComputeWindowFunctions now shares frame positions and intrinsic aggregate values per peer group, mirroring Turso's window bytecode: emit_aggregation_step advances aggregate state once per input row and emit_return_buffered_rows captures AggValue once per peer-group flush. User-defined aggregates remain per-row to preserve callback timing. Cleared all three save-all-cursors triple-self-join keys.",
+      "status": "closed"
     },
     {
       "id": "compile-schema-sql-always-quotes-identifiers",
