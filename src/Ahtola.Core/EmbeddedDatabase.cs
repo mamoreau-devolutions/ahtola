@@ -231,6 +231,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private static RecursiveTriggerCallbackDispatcher? s_recursiveTriggerCallbackDispatcher;
     private static readonly AsyncLocal<EmbeddedDatabase?> RecursiveTriggerCallbackDatabase = new();
     internal const string SqliteSequenceTableName = "sqlite_sequence";
+    internal const string SqliteStat1TableName = "sqlite_stat1";
     private const string TursoSequenceBackingTablePrefix = "__turso_internal_seq_";
     private const string TursoAutoIncrementSequencePrefix = "__turso_internal_autoincrement_";
     private static readonly ConditionalWeakTable<IFileSystem, FileCatalogWriteLockScope> FileCatalogWriteLocks = new();
@@ -1474,7 +1475,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         or AlterTableAddColumnStatement or AlterTableRenameStatement or AlterTableRenameColumnStatement
         or AlterTableAlterColumnStatement or AlterTableDropColumnStatement
         or InsertStatement or UpdateStatement or DeleteStatement or WithDmlStatement
-        or ReindexStatement or VacuumStatement
+        or AnalyzeStatement or ReindexStatement or VacuumStatement
         or PragmaHeaderIntegerStatement { Value: not null }
         or PragmaJournalModeStatement { Mode: not null }
         or PragmaMaxPageCountStatement;
@@ -2835,7 +2836,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             PragmaEncodingStatement => ExecutePragmaEncoding(),
             PragmaPageCountStatement => ExecutePragmaPageCount(),
             PragmaFreelistCountStatement => ExecutePragmaFreelistCount(),
-            AnalyzeStatement => throw AnalyzeNotSupported(),
+            AnalyzeStatement analyze => ExecuteAnalyze(analyze, catalog),
             ReindexStatement reindex => ExecuteReindex(reindex, catalog),
             ExplainStatement explain => ExecuteExplain(explain, parameters, context),
             ExplainQueryPlanStatement explainQueryPlan => ExecuteExplainQueryPlan(explainQueryPlan, parameters, context),
@@ -4043,10 +4044,244 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
     }
 
-    internal static EmbeddedSqlException AnalyzeNotSupported()
-        => new(
-            "Managed ANALYZE is not supported because sqlite_stat tables and planner statistics "
-            + "are not implemented; no statistics were changed.");
+    private ExecutionResult ExecuteAnalyze(AnalyzeStatement statement, SchemaCatalog catalog)
+    {
+        var targets = ResolveAnalyzeTargets(statement.Target, catalog);
+        if (targets.Count == 0)
+            return new ExecutionResult([], [], 0, Changed: true);
+
+        foreach (var target in targets)
+        {
+            if (!target.Table.HasRowid)
+                throw new EmbeddedSqlException("ANALYZE on tables without rowid is not supported");
+        }
+
+        var statistics = GetOrCreateSqliteStat1Table(catalog);
+        foreach (var target in targets)
+        {
+            DeleteStatistics(statistics, target.Table.Name, target.Index?.Name);
+            if (target.Index is not null)
+                AddIndexStatistic(statistics, target.Table, target.Index);
+            else
+                AddTableStatistics(statistics, target.Table);
+        }
+
+        return new ExecutionResult([], [], 0, Changed: true);
+    }
+
+    private static List<AnalyzeTarget> ResolveAnalyzeTargets(string? target, SchemaCatalog catalog)
+    {
+        var tables = catalog.Tables.Values
+            .Where(static table => !IsInternalAnalyzeTable(table.Name))
+            .OrderBy(static table => table.Name, StringComparer.OrdinalIgnoreCase);
+
+        if (string.IsNullOrWhiteSpace(target)
+            || string.Equals(target, "main", StringComparison.OrdinalIgnoreCase))
+        {
+            return tables.Select(static table => new AnalyzeTarget(table, null)).ToList();
+        }
+
+        if (catalog.Tables.TryGetValue(target, out var table))
+        {
+            return IsInternalAnalyzeTable(table.Name)
+                ? []
+                : [new AnalyzeTarget(table, null)];
+        }
+
+        foreach (var candidate in tables)
+        {
+            var index = candidate.Indexes.FirstOrDefault(index =>
+                string.Equals(index.Name, target, StringComparison.OrdinalIgnoreCase));
+            if (index is not null)
+                return [new AnalyzeTarget(candidate, index)];
+        }
+
+        throw new EmbeddedSqlException($"no such table or index: {target}");
+    }
+
+    private static bool IsInternalAnalyzeTable(string name)
+        => name.StartsWith("sqlite_", StringComparison.OrdinalIgnoreCase)
+           || IsAutoIncrementSequenceBackingTable(name);
+
+    private EmbeddedTable GetOrCreateSqliteStat1Table(SchemaCatalog catalog)
+    {
+        if (catalog.Tables.TryGetValue(SqliteStat1TableName, out var existing))
+        {
+            ValidateSqliteStat1Table(existing);
+            return existing;
+        }
+
+        if (catalog.Views.ContainsKey(SqliteStat1TableName)
+            || catalog.Triggers.ContainsKey(SqliteStat1TableName)
+            || TryFindIndex(catalog.Tables, SqliteStat1TableName, out _, out _))
+        {
+            throw new EmbeddedSqlException($"object name reserved for internal use: {SqliteStat1TableName}");
+        }
+
+        EnforceMaxPageCountForCatalogChange(1);
+        var statistics = new EmbeddedTable(
+            SqliteStat1TableName,
+            [
+                new EmbeddedColumn("tbl", null, false, false, false, null),
+                new EmbeddedColumn("idx", null, false, false, false, null),
+                new EmbeddedColumn("stat", null, false, false, false, null),
+            ])
+        {
+            Sql = "CREATE TABLE sqlite_stat1(tbl,idx,stat)"
+        };
+        catalog.Tables.Add(statistics.Name, statistics);
+        return statistics;
+    }
+
+    private static void ValidateSqliteStat1Table(EmbeddedTable table)
+    {
+        if (!table.HasRowid
+            || table.ColumnDefinitions.Length != 3
+            || !string.Equals(table.ColumnDefinitions[0].Name, "tbl", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(table.ColumnDefinitions[1].Name, "idx", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(table.ColumnDefinitions[2].Name, "stat", StringComparison.OrdinalIgnoreCase)
+            || table.PrimaryKeyColumns.Count != 0
+            || table.Indexes.Count != 0)
+        {
+            throw new EmbeddedSqlException("database disk image is malformed");
+        }
+    }
+
+    private void AddTableStatistics(EmbeddedTable statistics, EmbeddedTable table)
+    {
+        var indexes = table.Indexes.ToArray();
+        if (!indexes.Any(static index => !index.IsPartial))
+        {
+            if (table.Rows.Count > 0)
+            {
+                AddStatisticRow(
+                    statistics,
+                    table.Name,
+                    SqlValue.Null,
+                    table.Rows.Count.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+
+        foreach (var index in indexes)
+            AddIndexStatistic(statistics, table, index);
+    }
+
+    private void AddIndexStatistic(EmbeddedTable statistics, EmbeddedTable table, EmbeddedIndex index)
+    {
+        if (table.Rows.Count == 0 || index.Columns.Count == 0)
+            return;
+
+        var keys = new List<SqlValue[]>(table.Rows.Count);
+        for (var rowIndex = 0; rowIndex < table.Rows.Count; rowIndex++)
+        {
+            var row = table.Rows[rowIndex];
+            var rowId = rowIndex < table.RowIds.Count ? table.RowIds[rowIndex] : rowIndex + 1L;
+            if (!IndexExpressionSemantics.Qualifies(index, table, row, rowId, EvaluateIndexExpression))
+                continue;
+
+            keys.Add(IndexExpressionSemantics.ProjectKey(index, table, row, rowId, EvaluateIndexExpression));
+        }
+
+        if (keys.Count == 0)
+            return;
+
+        keys.Sort((left, right) => CompareIndexStatisticKeys(table, index, left, right));
+        var statParts = new List<string>(index.Columns.Count + 1)
+        {
+            keys.Count.ToString(CultureInfo.InvariantCulture)
+        };
+
+        for (var prefixLength = 1; prefixLength <= index.Columns.Count; prefixLength++)
+        {
+            var distinctPrefixCount = 1;
+            for (var keyIndex = 1; keyIndex < keys.Count; keyIndex++)
+            {
+                if (!IndexPrefixesEqual(table, index, keys[keyIndex - 1], keys[keyIndex], prefixLength))
+                    distinctPrefixCount++;
+            }
+
+            var averageRowsPerDistinctPrefix = (keys.Count + distinctPrefixCount - 1) / distinctPrefixCount;
+            statParts.Add(averageRowsPerDistinctPrefix.ToString(CultureInfo.InvariantCulture));
+        }
+
+        AddStatisticRow(statistics, table.Name, SqlValue.Text(index.Name), string.Join(" ", statParts));
+    }
+
+    private int CompareIndexStatisticKeys(
+        EmbeddedTable table,
+        EmbeddedIndex index,
+        SqlValue[] left,
+        SqlValue[] right)
+    {
+        for (var columnIndex = 0; columnIndex < index.Columns.Count; columnIndex++)
+        {
+            var column = index.Columns[columnIndex];
+            var comparison = Compare(
+                left[columnIndex],
+                right[columnIndex],
+                IndexExpressionSemantics.GetCollationName(table, column));
+            if (comparison != 0)
+                return column.Descending ? -comparison : comparison;
+        }
+
+        return 0;
+    }
+
+    private bool IndexPrefixesEqual(
+        EmbeddedTable table,
+        EmbeddedIndex index,
+        SqlValue[] left,
+        SqlValue[] right,
+        int prefixLength)
+    {
+        for (var columnIndex = 0; columnIndex < prefixLength; columnIndex++)
+        {
+            var column = index.Columns[columnIndex];
+            if (Compare(
+                    left[columnIndex],
+                    right[columnIndex],
+                    IndexExpressionSemantics.GetCollationName(table, column)) != 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void DeleteStatistics(EmbeddedTable statistics, string tableName, string? indexName)
+    {
+        for (var rowIndex = statistics.Rows.Count - 1; rowIndex >= 0; rowIndex--)
+        {
+            var row = statistics.Rows[rowIndex];
+            if (row[0].Kind != SqlValueKind.Text
+                || !string.Equals(row[0].AsText(), tableName, StringComparison.OrdinalIgnoreCase)
+                || (indexName is not null
+                    && (row[1].Kind != SqlValueKind.Text
+                        || !string.Equals(row[1].AsText(), indexName, StringComparison.OrdinalIgnoreCase))))
+            {
+                continue;
+            }
+
+            statistics.Rows.RemoveAt(rowIndex);
+            statistics.RowIds.RemoveAt(rowIndex);
+        }
+    }
+
+    private static void AddStatisticRow(
+        EmbeddedTable statistics,
+        string tableName,
+        SqlValue indexName,
+        string stat)
+    {
+        var rowId = statistics.RowIds.Count == 0
+            ? 1
+            : NextAutoRowId(statistics.RowIds.Max(), new HashSet<long>(statistics.RowIds));
+        statistics.Rows.Add([SqlValue.Text(tableName), indexName, SqlValue.Text(stat)]);
+        statistics.RowIds.Add(rowId);
+    }
+
+    private sealed record AnalyzeTarget(EmbeddedTable Table, EmbeddedIndex? Index);
 
     private bool IsRegisteredScalarFunction(string name, int arity)
     {
@@ -38613,8 +38848,6 @@ public sealed class EmbeddedConnection : IDisposable
                 // SQLite silently ignores unrecognized pragmas (Turso falls through its
                 // translate switch without emitting anything).
                 return ExecutionResult.Empty;
-            case AnalyzeStatement:
-                throw EmbeddedDatabase.AnalyzeNotSupported();
             case VacuumStatement vacuum:
                 return ExecuteVacuum(vacuum, parameters);
             case CreateTableAsSelectStatement createTableAs:
@@ -39297,6 +39530,7 @@ public sealed class EmbeddedConnection : IDisposable
                     _ => integrityCheck with { Schema = null }),
             PragmaTableListStatement { Schema: { } schema } tableList
                 => RouteSchema(schema, string.Empty, _ => tableList),
+            AnalyzeStatement analyze => RouteAnalyze(analyze),
             ReindexStatement reindex => RouteReindex(reindex),
             WithDmlStatement with => RouteDataStatement(with),
             InsertStatement insert => RouteDataStatement(insert),
@@ -39349,6 +39583,33 @@ public sealed class EmbeddedConnection : IDisposable
             && schema[0] != UnqualifiedSchemaMarker
             && !schema.Equals("main", StringComparison.OrdinalIgnoreCase)
             && !schema.Equals("temp", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private RoutedStatement RouteAnalyze(AnalyzeStatement statement)
+    {
+        if (statement.Target is null)
+            return new RoutedStatement(_database, statement, IsAttached: false);
+
+        if (ManagedSchemaName.TrySplit(statement.Target, out var schema, out var localName))
+            return RouteSchema(schema, localName, target => statement with { Target = target });
+
+        if (statement.Target.Equals("temp", StringComparison.OrdinalIgnoreCase))
+        {
+            return new RoutedStatement(
+                _tempDatabase,
+                statement with { Target = "main" },
+                IsAttached: false);
+        }
+
+        if (_attachedDatabases.TryGetValue(statement.Target, out var attachment))
+        {
+            return new RoutedStatement(
+                attachment.Database,
+                statement with { Target = "main" },
+                IsAttached: true);
+        }
+
+        return new RoutedStatement(_database, statement, IsAttached: false);
     }
 
     private RoutedStatement RouteReindex(ReindexStatement statement)

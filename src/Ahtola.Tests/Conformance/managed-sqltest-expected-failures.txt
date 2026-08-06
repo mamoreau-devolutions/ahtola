@@ -9,7 +9,6 @@ alter_table.sqltest::alter-table-rename-column-trigger-attached-db-same-db | exp
 alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 alter_table.sqltest::alter-table-rename-column-temp-trigger-attached-cross-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 alter_table.sqltest::temp-trigger-attached-read-cross-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-bracket-quoting.sqltest::bracket-analyze-table-name | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'memory'
 detach/transaction.sqltest::detach-fails-with-active-read-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
 detach/transaction.sqltest::detach-fails-with-active-write-transaction | error 'Managed ATTACH requires a file-backed managed primary database so attachments share its file system.' does not match pattern '.*database aux is locked.*'
@@ -17,8 +16,6 @@ detach/transaction.sqltest::detach-succeeds-after-commit | expected success but 
 foreign_keys.sqltest::fk-cascade-delete-self-referential-explain-terminates | expected success but got error: EXPLAIN is only supported for statements lowered to the bytecode compiler.
 indexed_by.sqltest::indexed-by-attached-qualified-table | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 indexed_by.sqltest::indexed-by-attached-update-delete | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-join/memory.sqltest::correlated-subquery-hash-join-reuse | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
-joins/derived_subquery_on_predicate.sqltest::issue-7372-text-range-join-after-analyze | setup 'issue-7372-schema' failed: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'
 mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'
 mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'
@@ -35,7 +32,6 @@ reindex.sqltest::reindex-attached-qualified-targets | expected success but got e
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-multi-partition | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-delete-scalar-subquery | expected success but got error: managed execution exceeded 30 seconds
 save-all-cursors.sqltest::save-all-cursors-window-triple-selfjoin-update-in-subquery | expected success but got error: managed execution exceeded 30 seconds
-snapshot_tests/analyze/stat1_rows.sqltest::analyze-indexed-table-does-not-insert-null-stat1-row | expected success but got error: Managed ANALYZE is not supported because sqlite_stat tables and planner statistics are not implemented; no statistics were changed.
 temp_tables.sqltest::temp-table-join-can-distinguish-main-and-temp | expected success but got error: Cross-database statements are not supported by managed ATTACH; every persistent table reference must resolve to one database.
 temp_tables_mvcc.sqltest::pragma-temp-journal-mode-mvcc-is-ignored | expected 2 row(s), got 2 row(s); row 0 expected 'wal' but was 'memory'
 temp_tables_mvcc.sqltest::temp-autoincrement-is-allowed-when-main-db-is-mvcc | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'wal'

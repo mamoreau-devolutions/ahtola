@@ -751,6 +751,7 @@ internal static class ManagedSnapshot
 
             var schema = ReadSchema(source);
             var sourceHasSqliteSequence = HasSqliteSequence(source);
+            var sourceHasSqliteStat1 = HasSqliteStat1(source);
             var pragmaHeader = ReadPragmaHeader(source);
             if (ForeignKeysEnabled(destination))
             {
@@ -782,6 +783,13 @@ internal static class ManagedSnapshot
                 {
                     Execute(destination, "DELETE FROM " + QuoteIdentifier(table.Name) + ";");
                     CopyRows(source, destination, table);
+                }
+                if (sourceHasSqliteStat1)
+                {
+                    // sqlite_stat1 is internal and therefore has no replayable CREATE TABLE entry.
+                    // Recreate it through ANALYZE, then preserve the source's exact persisted rows.
+                    Execute(destination, "ANALYZE;");
+                    CopySqliteStat1(source, destination);
                 }
 
                 foreach (var entry in schema.Where(entry => entry.Type is "index" or "view" or "trigger"))
@@ -820,6 +828,9 @@ internal static class ManagedSnapshot
 
     private static void ClearSchema(IManagedConnectionAdapter destination)
     {
+        if (HasSqliteStat1(destination))
+            Execute(destination, "DROP TABLE sqlite_stat1;");
+
         var schema = ReadSchema(destination);
         foreach (var type in new[] { "trigger", "view", "index", "table" })
         {
@@ -866,6 +877,15 @@ internal static class ManagedSnapshot
         return statement.GetValue(0).AsInteger() != 0;
     }
 
+    private static bool HasSqliteStat1(IManagedConnectionAdapter connection)
+    {
+        using var statement = connection.Prepare(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1';");
+        if (statement.Step() != StatementStepResult.Row)
+            throw new InvalidOperationException("sqlite_master did not return a sqlite_stat1 count.");
+        return statement.GetValue(0).AsInteger() != 0;
+    }
+
     private static void EnsureSqliteSequence(IManagedConnectionAdapter destination)
     {
         if (HasSqliteSequence(destination))
@@ -897,6 +917,23 @@ internal static class ManagedSnapshot
             insert.Bind(1, select.GetValue(0));
             insert.Bind(2, select.GetValue(1));
             insert.Bind(3, select.GetValue(2));
+            Execute(insert);
+        }
+    }
+
+    private static void CopySqliteStat1(
+        IManagedConnectionAdapter source,
+        IManagedConnectionAdapter destination)
+    {
+        Execute(destination, "DELETE FROM sqlite_stat1;");
+        using var select = source.Prepare(
+            "SELECT rowid, tbl, idx, stat FROM sqlite_stat1 ORDER BY rowid;");
+        while (select.Step() == StatementStepResult.Row)
+        {
+            using var insert = destination.Prepare(
+                "INSERT INTO sqlite_stat1(rowid, tbl, idx, stat) VALUES ($p0, $p1, $p2, $p3);");
+            for (var index = 0; index < 4; index++)
+                insert.Bind(index + 1, select.GetValue(index));
             Execute(insert);
         }
     }

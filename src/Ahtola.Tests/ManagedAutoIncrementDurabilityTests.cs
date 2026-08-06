@@ -441,6 +441,35 @@ public sealed class ManagedAutoIncrementDurabilityTests
     }
 
     [Test]
+    public void ManagedBackupPreservesAnalyzeStatistics()
+    {
+        using var source = OpenManagedConnection();
+        using var destination = OpenManagedConnection();
+        source.ExecuteNonQuery(
+            """
+            CREATE TABLE data(id INTEGER PRIMARY KEY, value TEXT);
+            CREATE INDEX data_value ON data(value);
+            INSERT INTO data VALUES (1, 'one'), (2, 'two'), (3, 'two');
+            ANALYZE data;
+            """);
+        destination.ExecuteNonQuery(
+            """
+            CREATE TABLE stale(id INTEGER PRIMARY KEY, value TEXT);
+            CREATE INDEX stale_value ON stale(value);
+            INSERT INTO stale VALUES (1, 'stale');
+            ANALYZE stale;
+            """);
+
+        source.BackupDatabase(destination);
+
+        destination.ExecuteScalar<string>(
+                "SELECT stat FROM sqlite_stat1 WHERE tbl = 'data' AND idx = 'data_value'")
+            .Should().Be("3 2");
+        destination.ExecuteScalar<long>("SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'stale'")
+            .Should().Be(0);
+    }
+
+    [Test]
     public void AttachedDatabasesKeepIndependentSequenceState()
     {
         var fileSystem = new InMemoryFileSystem();
