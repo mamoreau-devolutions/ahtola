@@ -767,13 +767,22 @@ internal static class ManagedSnapshot
                     EnsureSqliteSequence(destination);
                 else
                     ClearSqliteSequence(destination);
-                foreach (var entry in schema.Where(entry => entry.Type == "table"))
+                var tables = schema.Where(entry => entry.Type == "table").ToArray();
+                foreach (var entry in tables.Where(
+                             entry => !EmbeddedDatabase.IsAutoIncrementSequenceBackingTable(entry.Name)))
                     Execute(destination, entry.Sql);
 
-                foreach (var table in schema.Where(entry => entry.Type == "table"))
+                foreach (var table in tables.Where(
+                             entry => !EmbeddedDatabase.IsAutoIncrementSequenceBackingTable(entry.Name)))
                     CopyRows(source, destination, table);
                 if (sourceHasSqliteSequence)
                     CopySqliteSequence(source, destination);
+                foreach (var table in tables.Where(
+                             entry => EmbeddedDatabase.IsAutoIncrementSequenceBackingTable(entry.Name)))
+                {
+                    Execute(destination, "DELETE FROM " + QuoteIdentifier(table.Name) + ";");
+                    CopyRows(source, destination, table);
+                }
 
                 foreach (var entry in schema.Where(entry => entry.Type is "index" or "view" or "trigger"))
                     Execute(destination, entry.Sql);
@@ -815,7 +824,11 @@ internal static class ManagedSnapshot
         foreach (var type in new[] { "trigger", "view", "index", "table" })
         {
             foreach (var entry in schema.Where(entry => entry.Type == type))
+            {
+                if (type == "table" && EmbeddedDatabase.IsAutoIncrementSequenceBackingTable(entry.Name))
+                    continue;
                 Execute(destination, "DROP " + type.ToUpperInvariant() + " " + QuoteIdentifier(entry.Name) + ";");
+            }
         }
     }
 

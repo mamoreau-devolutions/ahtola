@@ -420,13 +420,20 @@ public sealed class ManagedAutoIncrementDurabilityTests
         using var source = OpenManagedConnection();
         using var destination = OpenManagedConnection();
         source.ExecuteNonQuery("CREATE TABLE data(id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)");
+        destination.ExecuteNonQuery("CREATE TABLE stale(id INTEGER PRIMARY KEY AUTOINCREMENT)");
         source.ExecuteNonQuery("INSERT INTO data(value) VALUES ('first')");
         source.ExecuteNonQuery("INSERT INTO data(id, value) VALUES (50, 'deleted')");
         source.ExecuteNonQuery("DELETE FROM data WHERE id = 50");
 
         source.BackupDatabase(destination);
+        destination.ExecuteScalar<long>(
+                "SELECT value FROM __turso_internal_seq___turso_internal_autoincrement_data")
+            .Should().Be(50);
         destination.ExecuteNonQuery("INSERT INTO data(value) VALUES ('after-backup')");
 
+        destination.ExecuteScalar<long>(
+                "SELECT value FROM __turso_internal_seq___turso_internal_autoincrement_data")
+            .Should().Be(51);
         destination.ExecuteScalar<long>("SELECT id FROM data WHERE value = 'after-backup'")
             .Should().Be(51);
         destination.ExecuteScalar<long>("SELECT seq FROM sqlite_sequence WHERE name = 'data'")

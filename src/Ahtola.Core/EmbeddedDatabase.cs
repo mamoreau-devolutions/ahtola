@@ -231,6 +231,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private static RecursiveTriggerCallbackDispatcher? s_recursiveTriggerCallbackDispatcher;
     private static readonly AsyncLocal<EmbeddedDatabase?> RecursiveTriggerCallbackDatabase = new();
     internal const string SqliteSequenceTableName = "sqlite_sequence";
+    private const string TursoSequenceBackingTablePrefix = "__turso_internal_seq_";
+    private const string TursoAutoIncrementSequencePrefix = "__turso_internal_autoincrement_";
     private static readonly ConditionalWeakTable<IFileSystem, FileCatalogWriteLockScope> FileCatalogWriteLocks = new();
     private static readonly ConditionalWeakTable<IFileSystem, FileCatalogWriterRegistry> FileCatalogWriterRegistries = new();
     private readonly object _gate = new();
@@ -785,7 +787,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
             var sequence = tables[SqliteSequenceTableName];
             var changed = false;
             foreach (var tracker in _trackers.Values)
+            {
                 changed |= tracker.Commit(sequence);
+                changed |= tracker.CommitBackingTable(tables);
+            }
             return changed;
         }
     }
@@ -866,6 +871,34 @@ public sealed partial class EmbeddedDatabase : IDisposable
             // Whole-row replacement so the RowStore revision (transient-lookup staleness
             // tracking) observes the mutation.
             sequence.Rows[sequenceRowIndex] = [SqlValue.Text(_tableName), SqlValue.Integer(_highWaterMark)];
+            return true;
+        }
+
+        public bool CommitBackingTable(IReadOnlyDictionary<string, EmbeddedTable> tables)
+        {
+            if (!HasAttempt
+                || _originalSequenceRowId is not null && _highWaterMark <= _originalSequence
+                || !tables.TryGetValue(GetAutoIncrementSequenceBackingTableName(_tableName), out var backing))
+            {
+                return false;
+            }
+
+            // Turso compacts the backing table to its latest allocation watermark. The managed
+            // allocator keeps sqlite_sequence as its compatibility source of truth, but preserving
+            // this physical row keeps the catalog and durable internal representation aligned.
+            backing.Rows.Clear();
+            backing.RowIds.Clear();
+            backing.Rows.Add(
+            [
+                SqlValue.Integer(_highWaterMark),
+                SqlValue.Integer(1),
+                SqlValue.Integer(1),
+                SqlValue.Integer(1),
+                SqlValue.Integer(1),
+                SqlValue.Integer(long.MaxValue),
+                SqlValue.Integer(0),
+            ]);
+            backing.RowIds.Add(_highWaterMark);
             return true;
         }
     }
@@ -3517,11 +3550,19 @@ public sealed partial class EmbeddedDatabase : IDisposable
             }
         }
         var requiredPages = 1;
-        if (table.IsAutoIncrement && !catalog.Tables.ContainsKey(SqliteSequenceTableName))
-            requiredPages++;
+        if (table.IsAutoIncrement)
+        {
+            if (!catalog.Tables.ContainsKey(SqliteSequenceTableName))
+                requiredPages++;
+            if (!catalog.Tables.ContainsKey(GetAutoIncrementSequenceBackingTableName(table.Name)))
+                requiredPages++;
+        }
         EnforceMaxPageCountForCatalogChange(requiredPages);
         if (table.IsAutoIncrement)
+        {
             EnsureSqliteSequenceTable(catalog);
+            EnsureAutoIncrementSequenceBackingTable(catalog, table.Name);
+        }
 
         table.Sql = statement.InitialRows is null
             ? statement.Sql
@@ -3647,7 +3688,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
             tables.Remove(statement.Name);
             if (table.IsAutoIncrement)
+            {
                 DeleteSqliteSequenceRows(tables, table.Name);
+                tables.Remove(GetAutoIncrementSequenceBackingTableName(table.Name));
+            }
             RemoveTriggersForTable(catalog, statement.Name);
             return new ExecutionResult([], [], 0, true);
         }
@@ -3695,6 +3739,48 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 ]));
     }
 
+    private static void EnsureAutoIncrementSequenceBackingTable(
+        SchemaCatalog catalog,
+        string tableName)
+    {
+        var backingName = GetAutoIncrementSequenceBackingTableName(tableName);
+        if (catalog.Tables.TryGetValue(backingName, out var existing))
+        {
+            ValidateAutoIncrementSequenceBackingTable(existing);
+            return;
+        }
+        if (catalog.Views.ContainsKey(backingName)
+            || catalog.Triggers.ContainsKey(backingName)
+            || TryFindIndex(catalog.Tables, backingName, out _, out _))
+        {
+            throw new EmbeddedSqlException($"object name reserved for internal use: {backingName}");
+        }
+
+        var backing = new EmbeddedTable(
+            backingName,
+            [
+                new EmbeddedColumn("value", "INTEGER", true, false, false, null),
+                new EmbeddedColumn("is_called", "INTEGER", false, false, false, null),
+                new EmbeddedColumn("start", "INTEGER", false, false, false, null),
+                new EmbeddedColumn("inc", "INTEGER", false, false, false, null),
+                new EmbeddedColumn("min", "INTEGER", false, false, false, null),
+                new EmbeddedColumn("max", "INTEGER", false, false, false, null),
+                new EmbeddedColumn("cycle", "INTEGER", false, false, false, null),
+            ]);
+        backing.Rows.Add(
+        [
+            SqlValue.Integer(1),
+            SqlValue.Integer(0),
+            SqlValue.Integer(1),
+            SqlValue.Integer(1),
+            SqlValue.Integer(1),
+            SqlValue.Integer(long.MaxValue),
+            SqlValue.Integer(0),
+        ]);
+        backing.RowIds.Add(1);
+        catalog.Tables.Add(backingName, backing);
+    }
+
     internal static void ValidateSqliteSequenceCatalog(
         IReadOnlyDictionary<string, EmbeddedTable> tables)
     {
@@ -3713,6 +3799,24 @@ public sealed partial class EmbeddedDatabase : IDisposable
             || !string.Equals(sequence.ColumnDefinitions[1].Name, "seq", StringComparison.OrdinalIgnoreCase)
             || sequence.PrimaryKeyColumns.Count != 0
             || sequence.Indexes.Count != 0)
+        {
+            throw new EmbeddedSqlException("database disk image is malformed");
+        }
+    }
+
+    private static void ValidateAutoIncrementSequenceBackingTable(EmbeddedTable backing)
+    {
+        string[] columns = ["value", "is_called", "start", "inc", "min", "max", "cycle"];
+        if (!backing.HasRowid || backing.ColumnDefinitions.Length != columns.Length)
+            throw new EmbeddedSqlException("database disk image is malformed");
+
+        var keyColumn = backing.ColumnDefinitions[0];
+        if (!keyColumn.PrimaryKey
+            || !string.Equals(keyColumn.DeclaredType, "INTEGER", StringComparison.OrdinalIgnoreCase)
+            || backing.ColumnDefinitions.Skip(1).Any(column => column.PrimaryKey)
+            || backing.Indexes.Count != 0
+            || !backing.ColumnDefinitions.Select(column => column.Name)
+                .SequenceEqual(columns, StringComparer.OrdinalIgnoreCase))
         {
             throw new EmbeddedSqlException("database disk image is malformed");
         }
@@ -4294,6 +4398,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (!hasQualifiedCheckReferences)
             candidateTable.Rename(statement.NewName);
         candidateTables.Add(statement.NewName, candidateTable);
+        if (candidateTable.IsAutoIncrement)
+        {
+            if (!candidateTables.TryGetValue(SqliteSequenceTableName, out var sequence))
+                throw new InvalidOperationException("An AUTOINCREMENT table is missing sqlite_sequence.");
+            candidateTables[SqliteSequenceTableName] = sequence.Clone();
+            RenameSqliteSequenceRows(candidateTables, table.Name, statement.NewName);
+            RenameAutoIncrementSequenceBackingTable(candidateTables, table.Name, statement.NewName);
+        }
 
         // Dependent views and triggers must follow the rename the way SQLite rewrites them
         // (sqlite3_rename_trigger): the stored SQL gets its table references rewritten in place
@@ -4374,7 +4486,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
         tables.Add(statement.NewName, candidateTable);
         RewriteRenamedTableSql(tables, candidateTable, previousName, statement.NewName);
         if (candidateTable.IsAutoIncrement)
+        {
             RenameSqliteSequenceRows(tables, previousName, statement.NewName);
+            RenameAutoIncrementSequenceBackingTable(tables, previousName, statement.NewName);
+        }
         if (candidateViews is not null)
         {
             foreach (var entry in candidateViews)
@@ -4530,6 +4645,25 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 row[0] = SqlValue.Text(newName);
             }
         }
+    }
+
+    private static void RenameAutoIncrementSequenceBackingTable(
+        Dictionary<string, EmbeddedTable> tables,
+        string previousName,
+        string newName)
+    {
+        var previousBackingName = GetAutoIncrementSequenceBackingTableName(previousName);
+        if (!tables.Remove(previousBackingName, out var backing))
+            return;
+
+        var newBackingName = GetAutoIncrementSequenceBackingTableName(newName);
+        if (tables.ContainsKey(newBackingName))
+            throw new EmbeddedSqlException($"table {newBackingName} already exists");
+
+        var replacement = backing.Clone();
+        replacement.Rename(newBackingName);
+        replacement.Sql = null;
+        tables.Add(newBackingName, replacement);
     }
 
     private ExecutionResult ExecuteAlterTableRenameColumn(
@@ -4833,6 +4967,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 throw new InvalidOperationException("An AUTOINCREMENT table is missing sqlite_sequence.");
             candidateTables[SqliteSequenceTableName] = sequence.Clone();
             DeleteSqliteSequenceRows(candidateTables, table.Name);
+            candidateTables.Remove(GetAutoIncrementSequenceBackingTableName(table.Name));
         }
 
         var candidateCatalog = new SchemaCatalog(
@@ -4874,6 +5009,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         foreach (var entry in candidateTables)
             catalog.Tables[entry.Key] = entry.Value;
+        if (table.IsAutoIncrement && !replacement.IsAutoIncrement)
+            catalog.Tables.Remove(GetAutoIncrementSequenceBackingTableName(table.Name));
         if (candidateViews is not null)
         {
             foreach (var entry in candidateViews)
@@ -24228,10 +24365,19 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private static bool IsSqliteSequenceTable(string name)
         => string.Equals(name, SqliteSequenceTableName, StringComparison.OrdinalIgnoreCase);
 
+    private static string GetAutoIncrementSequenceBackingTableName(string tableName)
+        => TursoSequenceBackingTablePrefix
+            + TursoAutoIncrementSequencePrefix
+            + tableName;
+
+    internal static bool IsAutoIncrementSequenceBackingTable(string name)
+        => name.StartsWith(TursoSequenceBackingTablePrefix, StringComparison.OrdinalIgnoreCase);
+
     // SQLite rejects any user-created object whose name begins with "sqlite_" (case
     // insensitive); those names are reserved for the internal schema.
     private static bool IsReservedObjectName(string name)
-        => name.StartsWith("sqlite_", StringComparison.OrdinalIgnoreCase);
+        => name.StartsWith("sqlite_", StringComparison.OrdinalIgnoreCase)
+            || IsAutoIncrementSequenceBackingTable(name);
 
     private static SourceData GetNamedTableRows(
         NamedTableSource source,
