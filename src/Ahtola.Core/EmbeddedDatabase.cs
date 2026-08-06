@@ -37333,6 +37333,75 @@ public sealed class EmbeddedConnection : IDisposable
             _tempDatabase.MarkSchemaMutated();
     }
 
+    private sealed record PendingTempTriggerTableRename(EmbeddedDatabase.SchemaCatalog Catalog);
+
+    // Temp triggers are connection-private, so the altered database cannot rewrite their stored
+    // definitions itself. Prepare their catalog replacement before the primary ALTER succeeds,
+    // then publish it with the same transaction lifetime as the table rename.
+    private PendingTempTriggerTableRename? PrepareTempTriggerTableRename(RoutedStatement routed)
+    {
+        if (!ReferenceEquals(routed.Database, _database)
+            || routed.Statement is not AlterTableRenameStatement rename)
+        {
+            return null;
+        }
+
+        var sourceCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
+        if (sourceCatalog.Triggers.Count == 0)
+            return null;
+
+        var candidateCatalog = sourceCatalog.Clone();
+        var includeUnqualifiedReferences = !sourceCatalog.Tables.ContainsKey(rename.TableName);
+        var changed = false;
+        foreach (var trigger in sourceCatalog.Triggers.Values)
+        {
+            var rewritten = AlterTableSqlRewriter.RenameTableReferences(
+                trigger.Sql,
+                rename.TableName,
+                rename.NewName,
+                targetSchema: "main",
+                includeUnqualifiedReferences);
+            if (rewritten is null || string.Equals(rewritten, trigger.Sql, StringComparison.Ordinal))
+                continue;
+
+            var parsed = (CreateTriggerStatement)SqlParser.Parse(rewritten, SqlParameterMap.Parse(rewritten));
+            var watchesRenamedMainTable = trigger.TargetSchema?.Equals(
+                "main",
+                StringComparison.OrdinalIgnoreCase) == true
+                && string.Equals(trigger.TableName, rename.TableName, StringComparison.OrdinalIgnoreCase);
+            candidateCatalog.Triggers[trigger.Name] = trigger with
+            {
+                TableName = watchesRenamedMainTable ? rename.NewName : trigger.TableName,
+                UpdateOfColumns = parsed.UpdateOfColumns,
+                When = parsed.When,
+                Body = parsed.Body,
+                Sql = parsed.Sql,
+            };
+            changed = true;
+        }
+
+        return changed ? new PendingTempTriggerTableRename(candidateCatalog) : null;
+    }
+
+    private void PublishTempTriggerTableRename(PendingTempTriggerTableRename pending)
+    {
+        if (GetTransactionState(_tempDatabase) is { } state)
+        {
+            state.Catalog = pending.Catalog;
+            state.HasChanges = true;
+            state.PragmaHeader = state.PragmaHeader with
+            {
+                SchemaVersion = unchecked(state.PragmaHeader.SchemaVersion + 1),
+            };
+        }
+        else
+        {
+            _tempDatabase.PublishTriggerBodyCatalog(pending.Catalog, forceFullRewrite: false);
+        }
+
+        _tempInitialized = true;
+    }
+
     private sealed class AttachedDatabase : IDisposable
     {
         public AttachedDatabase(
@@ -38006,6 +38075,7 @@ public sealed class EmbeddedConnection : IDisposable
                 EmbeddedDatabase.SchemaCatalog? statementCatalog = null;
                 HashSet<EmbeddedDatabase.ForeignKeyViolation>? deferredBefore = null;
                 var tempTriggers = CreateTempTriggerBridge(routed.Database, out var tempTriggerSession);
+                var pendingTempTriggerRename = PrepareTempTriggerTableRename(routed);
                 try
                 {
                     ExecutionResult result;
@@ -38123,6 +38193,9 @@ public sealed class EmbeddedConnection : IDisposable
                         _lastInsertRowId = insertedRowId;
                     if (ReferenceEquals(routed.Database, _tempDatabase))
                         _tempInitialized = true;
+
+                    if (result.Changed && pendingTempTriggerRename is not null)
+                        PublishTempTriggerTableRename(pendingTempTriggerRename);
 
                     tempTriggerSession?.Commit();
                     return result;

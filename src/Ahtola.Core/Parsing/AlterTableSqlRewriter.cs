@@ -118,7 +118,11 @@ internal static class AlterTableSqlRewriter
         {
             // A CHECK expression is evaluated against the renamed table's row, so table-qualified
             // references in it must follow the CREATE TABLE name token.
-            var collector = new TableReferenceCollector(spans, table.Name);
+            var collector = new TableReferenceCollector(
+                spans,
+                table.Name,
+                targetSchema: "main",
+                includeUnqualifiedReferences: true);
             foreach (var column in table.Columns)
             {
                 foreach (var check in column.CheckConstraints)
@@ -157,7 +161,11 @@ internal static class AlterTableSqlRewriter
             return null;
         }
 
-        var collector = new TableReferenceCollector(spans, oldName);
+        var collector = new TableReferenceCollector(
+            spans,
+            oldName,
+            targetSchema: "main",
+            includeUnqualifiedReferences: true);
         collector.CollectExpression(expression);
         if (collector.Aborted)
             return null;
@@ -252,7 +260,12 @@ internal static class AlterTableSqlRewriter
     /// and <see langword="null"/> when the stored text cannot be reparsed or a matching
     /// reference lacks a recorded token span.
     /// </summary>
-    public static string? RenameTableReferences(string sql, string oldName, string newName)
+    public static string? RenameTableReferences(
+        string sql,
+        string oldName,
+        string newName,
+        string targetSchema = "main",
+        bool includeUnqualifiedReferences = true)
     {
         ParsedStatement parsed;
         SqlSourceSpans spans;
@@ -265,7 +278,11 @@ internal static class AlterTableSqlRewriter
             return null;
         }
 
-        var collector = new TableReferenceCollector(spans, oldName);
+        var collector = new TableReferenceCollector(
+            spans,
+            oldName,
+            targetSchema,
+            includeUnqualifiedReferences);
         switch (parsed)
         {
             case CreateTriggerStatement trigger:
@@ -299,7 +316,11 @@ internal static class AlterTableSqlRewriter
     /// trigger or view definition. A matching reference without a recorded span aborts the whole
     /// rewrite (the caller then leaves the dependent object untouched rather than corrupting it).
     /// </summary>
-    private sealed class TableReferenceCollector(SqlSourceSpans spans, string oldName)
+    private sealed class TableReferenceCollector(
+        SqlSourceSpans spans,
+        string oldName,
+        string targetSchema,
+        bool includeUnqualifiedReferences)
     {
         private readonly HashSet<int> _seenStarts = [];
 
@@ -311,11 +332,12 @@ internal static class AlterTableSqlRewriter
         {
             if (ManagedSchemaName.TrySplit(writtenName, out var schema, out var name))
             {
-                return string.Equals(schema, "main", StringComparison.OrdinalIgnoreCase)
+                return string.Equals(schema, targetSchema, StringComparison.OrdinalIgnoreCase)
                     && string.Equals(name, oldName, StringComparison.OrdinalIgnoreCase);
             }
 
-            return string.Equals(writtenName, oldName, StringComparison.OrdinalIgnoreCase);
+            return includeUnqualifiedReferences
+                && string.Equals(writtenName, oldName, StringComparison.OrdinalIgnoreCase);
         }
 
         public void Add(SqlSourceSpan? span)
@@ -457,12 +479,14 @@ internal static class AlterTableSqlRewriter
             switch (expression)
             {
                 case ColumnExpression column:
-                    if (column.Qualifier is not null
+                    if (includeUnqualifiedReferences
+                        && column.Qualifier is not null
                         && string.Equals(column.Qualifier, oldName, StringComparison.OrdinalIgnoreCase))
                         Add(spans.GetQualifier(column));
                     break;
                 case QualifiedStarExpression star:
-                    if (string.Equals(star.Qualifier, oldName, StringComparison.OrdinalIgnoreCase))
+                    if (includeUnqualifiedReferences
+                        && string.Equals(star.Qualifier, oldName, StringComparison.OrdinalIgnoreCase))
                         Add(spans.GetQualifier(star));
                     break;
                 case BinaryExpression binary:

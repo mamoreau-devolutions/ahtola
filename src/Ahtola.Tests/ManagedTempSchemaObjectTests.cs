@@ -257,6 +257,73 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void RenamingMainTableRewritesTempTriggerBodiesLikeSqlite()
+    {
+        using var database = new EmbeddedDatabase();
+        using var managed = database.Connect();
+        using var sqlite = OpenSqlite();
+        var setup = new[]
+        {
+            "CREATE TABLE rename_src_main (x)",
+            "INSERT INTO rename_src_main VALUES (1)",
+            "CREATE TEMP TABLE temp_rename_driver (y)",
+            "INSERT INTO temp.temp_rename_driver VALUES (10)",
+            "CREATE TRIGGER trig_temp_table_rename AFTER UPDATE ON temp.temp_rename_driver BEGIN "
+                + "DELETE FROM rename_src_main WHERE x; END",
+        };
+        foreach (var sql in setup)
+        {
+            Execute(managed, sql);
+            Execute(sqlite, sql);
+        }
+
+        Execute(managed, "ALTER TABLE rename_src_main RENAME TO rename_dst_main");
+        Execute(sqlite, "ALTER TABLE rename_src_main RENAME TO rename_dst_main");
+        AssertQueriesMatch(
+            managed,
+            sqlite,
+            "SELECT instr(sql, 'rename_dst_main') > 0, instr(sql, 'rename_src_main') = 0 "
+                + "FROM temp.sqlite_schema WHERE name = 'trig_temp_table_rename'");
+
+        Execute(managed, "UPDATE temp.temp_rename_driver SET y = 11");
+        Execute(sqlite, "UPDATE temp.temp_rename_driver SET y = 11");
+        AssertQueriesMatch(managed, sqlite, "SELECT count(*) FROM rename_dst_main");
+    }
+
+    [Test]
+    public void FailedMainTableRenameDoesNotPublishATempTriggerRewrite()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE rename_src_main (x)");
+        Execute(connection, "INSERT INTO rename_src_main VALUES (1)");
+        Execute(connection, "CREATE TABLE rename_dst_main (x)");
+        Execute(connection, "CREATE TEMP TABLE temp_rename_driver (y)");
+        Execute(connection, "INSERT INTO temp.temp_rename_driver VALUES (0)");
+        Execute(
+            connection,
+            "CREATE TRIGGER trig_temp_table_rename AFTER UPDATE ON temp.temp_rename_driver BEGIN "
+                + "DELETE FROM rename_src_main WHERE x; END");
+
+        Assert.Throws<EmbeddedSqlException>(
+            () => Execute(connection, "ALTER TABLE rename_src_main RENAME TO rename_dst_main"));
+
+        ReadRows(
+            connection,
+            "SELECT instr(sql, 'rename_src_main') > 0, instr(sql, 'rename_dst_main') = 0 "
+                + "FROM temp.sqlite_schema WHERE name = 'trig_temp_table_rename'")
+            .Should()
+            .ContainSingle()
+            .Which
+            .Should()
+            .Equal(SqlValue.Integer(1), SqlValue.Integer(1));
+
+        Execute(connection, "UPDATE temp.temp_rename_driver SET y = 1");
+        ReadRows(connection, "SELECT count(*) FROM rename_src_main").Should().ContainSingle()
+            .Which[0].AsInteger().Should().Be(0);
+    }
+
+    [Test]
     public void TempViewBodyOutsideTheTempSchemaIsRejectedUpFront()
     {
         using var database = new EmbeddedDatabase();

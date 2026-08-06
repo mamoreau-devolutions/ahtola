@@ -10,7 +10,6 @@ alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db | expect
 alter_table.sqltest::alter-table-rename-column-temp-trigger-main-cross-table | expected success but got error: no such column: b
 alter_table.sqltest::alter-table-rename-column-temp-trigger-main-alias-cross-table | expected success but got error: no such column: u.b
 alter_table.sqltest::alter-table-rename-temp-table-invalid-temp-trigger-missing-main-table | expected an error but the statement succeeded
-alter_table.sqltest::alter-table-rename-table-rewrites-temp-trigger-on-temp-table | expected success but got error: no such table: rename_src_main
 alter_table.sqltest::alter-table-rename-column-temp-trigger-exists-result-expr-error | expected an error but the statement succeeded
 alter_table.sqltest::alter-table-rename-column-temp-trigger-result-scalar-subquery | expected success but got error: no such column: b
 alter_table.sqltest::alter-table-rename-column-temp-table-rejects-invalid-trigger-rewrite | expected an error but the statement succeeded
