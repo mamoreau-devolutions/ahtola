@@ -190,6 +190,18 @@ public class EmbeddedEngineTests
     }
 
     [Test]
+    public void CreateViewRejectsAggregateInternalOrderBy()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(value INTEGER);");
+
+        Assert.Throws<EmbeddedSqlException>(
+                () => Execute(connection, "CREATE VIEW v AS SELECT sum(value ORDER BY value) FROM t;"))!
+            .Message.Should().Be("ORDER BY clause is not supported yet in aggregate functions");
+    }
+
+    [Test]
     public void DistinctAggregateWithOrderByIsExplicitlyRejected()
     {
         using var connection = CreateOrderedAggregateTable();

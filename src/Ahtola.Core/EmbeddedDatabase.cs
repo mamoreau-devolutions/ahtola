@@ -4040,6 +4040,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (TryFindIndex(tables, statement.Name, out _, out _))
             throw new EmbeddedSqlException($"there is already an index named {statement.Name}");
 
+        // Turso validates aggregate-internal ORDER BY while compiling a view, even though
+        // ordinary queries retain the managed engine's supported aggregate ordering.
+        if (QueryContainsAggregateInternalOrderBy(statement.Query))
+        {
+            throw new EmbeddedSqlException(
+                "ORDER BY clause is not supported yet in aggregate functions");
+        }
+
         // SQLite defers view-body validation to query time: base tables and views may be
         // defined later (forward references), and column arity / unknown columns, tables, or
         // functions are reported when the view is queried, not when it is created. Circular
@@ -4049,6 +4057,93 @@ public sealed partial class EmbeddedDatabase : IDisposable
         catalog.Views.Add(statement.Name, view);
 
         return new ExecutionResult([], [], 0, true);
+    }
+
+    private static bool QueryContainsAggregateInternalOrderBy(QueryStatement query)
+    {
+        return query switch
+        {
+            SelectStatement select => SourceContainsAggregateInternalOrderBy(select.Source)
+                || select.Projections.Any(projection => ExpressionContainsAggregateInternalOrderBy(projection.Expression))
+                || ExpressionContainsAggregateInternalOrderBy(select.Where)
+                || select.GroupBy.Any(ExpressionContainsAggregateInternalOrderBy)
+                || ExpressionContainsAggregateInternalOrderBy(select.Having)
+                || select.NamedWindows.Any(window => WindowContainsAggregateInternalOrderBy(window.Specification))
+                || select.OrderBy.Any(orderBy => ExpressionContainsAggregateInternalOrderBy(orderBy.Expression))
+                || ExpressionContainsAggregateInternalOrderBy(select.Limit)
+                || ExpressionContainsAggregateInternalOrderBy(select.Offset),
+            ValuesClause values => values.Rows.SelectMany(row => row).Any(ExpressionContainsAggregateInternalOrderBy),
+            CompoundSelectStatement compound => compound.Terms.Any(QueryContainsAggregateInternalOrderBy)
+                || compound.OrderBy.Any(orderBy => ExpressionContainsAggregateInternalOrderBy(orderBy.Expression))
+                || ExpressionContainsAggregateInternalOrderBy(compound.Limit)
+                || ExpressionContainsAggregateInternalOrderBy(compound.Offset),
+            WithSelectStatement with => with.CommonTableExpressions.Any(commonTableExpression =>
+                    QueryContainsAggregateInternalOrderBy(commonTableExpression.Query))
+                || QueryContainsAggregateInternalOrderBy(with.Query),
+            _ => false,
+        };
+    }
+
+    private static bool SourceContainsAggregateInternalOrderBy(TableSource? source)
+    {
+        return source switch
+        {
+            null => false,
+            DerivedTableSource derived => QueryContainsAggregateInternalOrderBy(derived.Query),
+            JoinTableSource join => SourceContainsAggregateInternalOrderBy(join.Left)
+                || SourceContainsAggregateInternalOrderBy(join.Right)
+                || ExpressionContainsAggregateInternalOrderBy(join.Condition),
+            TableValuedFunctionSource function => function.Arguments.Any(ExpressionContainsAggregateInternalOrderBy),
+            _ => false,
+        };
+    }
+
+    private static bool ExpressionContainsAggregateInternalOrderBy(Expression? expression)
+    {
+        return expression switch
+        {
+            null => false,
+            ScalarSubqueryExpression scalarSubquery => QueryContainsAggregateInternalOrderBy(scalarSubquery.Query),
+            ExistsExpression exists => QueryContainsAggregateInternalOrderBy(exists.Query),
+            InSubqueryExpression inSubquery => QueryContainsAggregateInternalOrderBy(inSubquery.Query)
+                || ExpressionContainsAggregateInternalOrderBy(inSubquery.Value),
+            FunctionExpression function => function.AggregateOrderBy is { Count: > 0 }
+                || function.Arguments.Any(ExpressionContainsAggregateInternalOrderBy)
+                || ExpressionContainsAggregateInternalOrderBy(function.Filter)
+                || (function.AggregateOrderBy?.Any(orderBy =>
+                    ExpressionContainsAggregateInternalOrderBy(orderBy.Expression)) ?? false)
+                || WindowContainsAggregateInternalOrderBy(function.Window),
+            RowValueExpression rowValue => rowValue.Values.Any(ExpressionContainsAggregateInternalOrderBy),
+            CollationExpression collation => ExpressionContainsAggregateInternalOrderBy(collation.Expression),
+            CastExpression cast => ExpressionContainsAggregateInternalOrderBy(cast.Expression),
+            CaseExpression @case => ExpressionContainsAggregateInternalOrderBy(@case.Operand)
+                || @case.Clauses.Any(clause => ExpressionContainsAggregateInternalOrderBy(clause.When)
+                    || ExpressionContainsAggregateInternalOrderBy(clause.Then))
+                || ExpressionContainsAggregateInternalOrderBy(@case.Else),
+            LikeExpression like => ExpressionContainsAggregateInternalOrderBy(like.Value)
+                || ExpressionContainsAggregateInternalOrderBy(like.Pattern)
+                || ExpressionContainsAggregateInternalOrderBy(like.Escape),
+            InExpression @in => ExpressionContainsAggregateInternalOrderBy(@in.Value)
+                || @in.Values.Any(ExpressionContainsAggregateInternalOrderBy),
+            BetweenExpression between => ExpressionContainsAggregateInternalOrderBy(between.Value)
+                || ExpressionContainsAggregateInternalOrderBy(between.Lower)
+                || ExpressionContainsAggregateInternalOrderBy(between.Upper),
+            UnaryExpression unary => ExpressionContainsAggregateInternalOrderBy(unary.Operand),
+            GlobExpression glob => ExpressionContainsAggregateInternalOrderBy(glob.Value)
+                || ExpressionContainsAggregateInternalOrderBy(glob.Pattern),
+            BinaryExpression binary => ExpressionContainsAggregateInternalOrderBy(binary.Left)
+                || ExpressionContainsAggregateInternalOrderBy(binary.Right),
+            _ => false,
+        };
+    }
+
+    private static bool WindowContainsAggregateInternalOrderBy(WindowSpecification? window)
+    {
+        return window is not null
+            && (window.PartitionBy.Any(ExpressionContainsAggregateInternalOrderBy)
+                || window.OrderBy.Any(orderBy => ExpressionContainsAggregateInternalOrderBy(orderBy.Expression))
+                || ExpressionContainsAggregateInternalOrderBy(window.Frame?.Start.Offset)
+                || ExpressionContainsAggregateInternalOrderBy(window.Frame?.End.Offset));
     }
 
     private static ExecutionResult ExecuteDropView(DropViewStatement statement, SchemaCatalog catalog)

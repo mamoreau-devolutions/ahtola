@@ -99,4 +99,3 @@ update_attached_db_index.sqltest::update-attached-db-rowid-change-with-unique-in
 update_attached_db_index.sqltest::update-attached-db-rowid-with-where-subquery | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update_attached_db_index.sqltest::update-attached-db-integrity-after-rowid-change | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
 update_attached_db_index.sqltest::update-attached-db-non-rowid-column | expected success but got error: Managed ATTACH requires a file-backed managed primary database so attachments share its file system.
-views.sqltest::view-rejects-aggregate-order-by | expected an error but the statement succeeded
