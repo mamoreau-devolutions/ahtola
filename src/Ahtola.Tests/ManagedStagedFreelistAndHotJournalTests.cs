@@ -174,6 +174,51 @@ public sealed class ManagedStagedFreelistAndHotJournalTests
         }
 
         [Test]
+        public void UnderfullLeafRedistributesWithFullSiblingWhenMergeDoesNotFit()
+        {
+            var pages = CreateBlankPages(pageCount: 2);
+            var io = new SqliteStagedBtreePageIo(
+                pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
+                committedPageCount: 2,
+                pageSize: PageSize,
+                usableSpace: UsableSpace);
+            io.WritePage(2, new SqliteTableLeafPageBuilder(PageSize, UsableSpace).Build());
+
+            var writer = new SqliteIncrementalTableBtree(io);
+            // Large records fill leaves quickly so a nearly-full sibling cannot absorb a
+            // half-empty neighbor — force two-way redistribute instead of merge.
+            var record = new byte[200];
+            record.AsSpan().Fill(0x4D);
+            const int rowCount = 80;
+            for (var rowId = 1L; rowId <= rowCount; rowId++)
+                writer.Insert(2, rowId, record);
+
+            io.PageCount.Should().BeGreaterThan(3u);
+
+            // Delete most low rowids so the left leaf falls below half full while the right
+            // sibling stays too full for a one-page merge.
+            for (var rowId = 1L; rowId <= 30; rowId++)
+            {
+                if (rowId % 4 != 0)
+                    writer.Delete(2, rowId);
+            }
+
+            var cursor = new SqliteTableBtreeCursor(io);
+            for (var rowId = 1L; rowId <= rowCount; rowId++)
+            {
+                var deleted = rowId <= 30 && rowId % 4 != 0;
+                if (deleted)
+                {
+                    cursor.TrySeek(2, rowId, out _).Should().BeFalse($"deleted rowid {rowId}");
+                    continue;
+                }
+
+                cursor.TrySeek(2, rowId, out var found).Should().BeTrue($"rowid {rowId}");
+                found.Should().Equal(record);
+            }
+        }
+
+        [Test]
         public void UnderfullLeafMergesIntoSiblingWithoutGrowingOnRefill()
         {
             var pages = CreateBlankPages(pageCount: 2);

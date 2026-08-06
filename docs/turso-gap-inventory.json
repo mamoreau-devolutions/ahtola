@@ -174,7 +174,7 @@
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Partial 2026-08-06. Program + deferred recursive form lower trigger-free single self-referential ON DELETE CASCADE and ON DELETE SET NULL (SET NULL uses a non-recursive Update subprogram). Evidence: ManagedForeignKeyFullSemanticsTests.SelfReferentialCascadeIsBoundedAndMatchesSqlite, SelfReferentialSetNullOnDeleteMatchesSqlite. Residual: Gosub/Return/BeginSubrtn, SQL trigger program lowering, ON UPDATE CASCADE/SET NULL via Program, multi-FK and cross-table action programs, change-counter/error/rollback timing parity with Turso triggers.",
+      "notes": "Partial 2026-08-06. Program + deferred recursive form lower trigger-free single self-referential ON DELETE CASCADE/SET NULL and ON UPDATE CASCADE/SET NULL (SET NULL and UPDATE actions use non-recursive Update subprograms; DELETE CASCADE remains recursive). Evidence: ManagedForeignKeyFullSemanticsTests.SelfReferentialCascadeIsBoundedAndMatchesSqlite, SelfReferentialSetNullOnDeleteMatchesSqlite, SelfReferentialCascadeOnUpdateMatchesSqlite, SelfReferentialSetNullOnUpdateMatchesSqlite. Residual: Gosub/Return/BeginSubrtn, SQL trigger program lowering, multi-FK and cross-table action programs, change-counter/error/rollback timing parity with Turso triggers.",
       "status": "open"
     },
     {
@@ -2043,7 +2043,7 @@
       "severity": "s1-correctness",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Partial 2026-08-06 (still open). Growth half implemented (leaf/interior split, root deepen, quick-balance append packing). Shrink half now includes: (1) empty non-root table-leaf unlink+FreePage with single-child interior collapse into parent/root; (2) under-full non-empty table-leaf merge into left/right sibling when both cell sets fit on one page (TryMergeUnderfullLeaf). Covered by EmptyNonRootLeafDeleteFreesPageAndCollapsesRoot, BulkDeleteReclaimsLeafPagesOntoFreelistForLaterInserts, UnderfullLeafMergesIntoSiblingWithoutGrowingOnRefill. Still open: three-way sibling redistribution matching Turso balance_non_root; index b-tree empty-leaf/separator pull-down (index separators are live keys — not the same as table rowid bounds); interior under-full merge beyond single-child collapse. Callers still fall back to full catalog rewrite for those cases.",
+      "notes": "Partial 2026-08-06 (still open). Growth half implemented (leaf/interior split, root deepen, quick-balance append packing). Shrink half now includes: (1) empty non-root table-leaf unlink+FreePage with single-child interior collapse into parent/root; (2) under-full non-empty table-leaf merge into left/right sibling when both cell sets fit on one page (TryMergeUnderfullLeaf); (3) two-way sibling redistribute when the leaf is below half full and merge does not fit (TryRedistributeLeafPair). Covered by EmptyNonRootLeafDeleteFreesPageAndCollapsesRoot, BulkDeleteReclaimsLeafPagesOntoFreelistForLaterInserts, UnderfullLeafMergesIntoSiblingWithoutGrowingOnRefill, UnderfullLeafRedistributesWithFullSiblingWhenMergeDoesNotFit. Still open: three-way multi-sibling balance matching Turso balance_non_root; index b-tree empty-leaf/separator pull-down; interior under-full merge beyond single-child collapse. Callers still fall back to full catalog rewrite for those cases.",
       "status": "open"
     },
     {

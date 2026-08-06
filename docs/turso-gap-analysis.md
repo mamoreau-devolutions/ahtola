@@ -881,6 +881,8 @@ aggregates because the EF Core provider depends on them).
 | **F2.30 — access-method score + OR union** | 2026-08-06 | `compile-no-access-method-selection` partial (score competing indexes); `compile-no-or-clause-index-union` partial (MULTI-INDEX OR equality union in evaluator/EQP) | 11 → 11 |
 | **F2.31 — OR compile + COVERING OpenRead** | 2026-08-06 | OR union compiled Rewind path; OpenRead `USING COVERING INDEX` / `MULTI-INDEX OR` labels | 11 → 11 |
 | **F2.32 — self-ref ON DELETE SET NULL Program** | 2026-08-06 | `vdbe-trigger-subprogram-machinery` further partial — Program path for self-ref ON DELETE SET NULL | 11 → 11 |
+| **F2.33 — table-leaf two-way redistribute** | 2026-08-06 | `storage-no-btree-balancing` further partial — TryRedistributeLeafPair when under half full and merge does not fit | 11 → 11 |
+| **F2.34 — self-ref ON UPDATE CASCADE/SET NULL Program** | 2026-08-06 | `vdbe-trigger-subprogram-machinery` further partial — Program path for self-ref ON UPDATE CASCADE and SET NULL | 11 → 11 |
 
 Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
 redistributed onto a newly-unmasked blocker within the same commit group.

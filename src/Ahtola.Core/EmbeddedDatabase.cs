@@ -10207,6 +10207,22 @@ public sealed partial class EmbeddedDatabase : IDisposable
             context,
             new NamedTableSource(statement.TableName, statement.Alias));
         ValidateStandaloneUpdateAssignmentColumns(statement, context);
+        if (CanCompileForeignKeyCascadeDelete(context)
+            && TryCompileSelfReferentialCascadeUpdate(
+                statement,
+                parameters,
+                context,
+                out var foreignKeyCompiled,
+                out var foreignKeyColumns,
+                out var foreignKeyHasReturning))
+        {
+            return RunCompiledDml(
+                foreignKeyCompiled,
+                foreignKeyColumns,
+                foreignKeyHasReturning,
+                parameters);
+        }
+
         if (CanRouteUpdateThroughCompiler(statement, context)
             && TryCompileUpdate(statement, parameters, context, out var compiled, out var columns, out var hasReturning))
             return RunCompiledDml(compiled, columns, hasReturning, parameters);
@@ -19096,6 +19112,251 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 Array.Empty<DmlReturningExpression>(),
                 writeTarget);
         return true;
+    }
+
+    private bool TryCompileSelfReferentialCascadeUpdate(
+        UpdateStatement statement,
+        SqlValue[] parameters,
+        QueryContext context,
+        out CompiledDml compiled,
+        out string[] columns,
+        out bool hasReturning)
+    {
+        compiled = null!;
+        columns = [];
+        hasReturning = false;
+
+        if (statement.Limit is not null
+            || statement.Offset is not null
+            || statement.EffectiveOrderBy.Count != 0
+            || statement.Alias is not null
+            || statement.From is not null
+            || statement.Returning is not null
+            || statement.ConflictAlgorithm is not null
+            || context.CommonTableExpressions.Count != 0
+            || IsSchemaTable(statement.TableName)
+            || !context.Tables.TryGetValue(statement.TableName, out var table)
+            || !table.HasRowid)
+        {
+            return false;
+        }
+
+        if (table.ForeignKeys.Count != 1)
+            return false;
+
+        var foreignKey = table.ForeignKeys[0];
+        if (!string.Equals(foreignKey.ParentTable, statement.TableName, StringComparison.OrdinalIgnoreCase)
+            || foreignKey.OnUpdate is not (ForeignKeyAction.Cascade or ForeignKeyAction.SetNull))
+        {
+            return false;
+        }
+
+        foreach (var (_, candidateTable) in context.Tables)
+        {
+            foreach (var candidateForeignKey in candidateTable.ForeignKeys)
+            {
+                if (string.Equals(
+                        candidateForeignKey.ParentTable,
+                        statement.TableName,
+                        StringComparison.OrdinalIgnoreCase)
+                    && !ReferenceEquals(candidateForeignKey, foreignKey))
+                {
+                    return false;
+                }
+            }
+        }
+
+        DmlRowFilter? filter = null;
+        if (statement.Where is not null)
+        {
+            filter = CompileDmlRowPredicate(statement.Where, table, statement.TableName, parameters, context);
+            if (filter is null)
+                return false;
+        }
+
+        var plan = PrepareUpdate(statement, table, context);
+        var parent = ResolveForeignKeyParent(context.Tables, statement.TableName, foreignKey);
+        var assignedColumns = plan.ColumnAssignments
+            .Select(assignment => assignment.Index)
+            .ToHashSet();
+        table.ExpandAssignedColumnsThroughGeneratedColumns(assignedColumns);
+        // Action only matters when the parent key columns are assigned.
+        if (!parent.ColumnIndices.Any(assignedColumns.Contains)
+            && plan.RowidAssignment is null
+            && !(plan.AliasIndex >= 0 && assignedColumns.Contains(plan.AliasIndex)))
+        {
+            return false;
+        }
+
+        var keyCount = parent.ColumnIndices.Count;
+        var oldRegisters = new Register[keyCount];
+        var newRegisters = new Register[keyCount];
+        var allRegisters = new Register[keyCount * 2];
+        for (var index = 0; index < keyCount; index++)
+        {
+            oldRegisters[index] = new Register(index);
+            newRegisters[index] = new Register(keyCount + index);
+            allRegisters[index] = oldRegisters[index];
+            allRegisters[keyCount + index] = newRegisters[index];
+        }
+
+        var setNull = foreignKey.OnUpdate == ForeignKeyAction.SetNull;
+        var action = VdbeSubprogram.CreateDeferred(
+            allRegisters.Length,
+            binding => CreateCompiledUpdateActionWriteTargets(
+                context,
+                statement.TableName,
+                table,
+                foreignKey,
+                parent,
+                binding,
+                setNull));
+        // Non-recursive Update subprogram: children are patched in MutateRow only.
+        var actionProgram = DmlStatementCompiler.BuildProgramWithMutationPrograms(
+            DmlKind.Update,
+            statement.TableName,
+            table.Columns.Length,
+            filter: null,
+            beforeMutation: Array.Empty<VdbeInstruction>(),
+            afterMutation: Array.Empty<VdbeInstruction>(),
+            registerCount: 0,
+            parameterSlotCount: allRegisters.Length);
+        action.Resolve(actionProgram);
+
+        var rowCount = table.Rows.Count;
+        var writeTarget = new VdbeWriteTarget
+        {
+            TableName = statement.TableName,
+            RowCount = rowCount,
+            GetRow = index => table.Rows[index],
+            GetRowId = index => index < table.RowIds.Count ? table.RowIds[index] : index + 1,
+            MutateRow = index =>
+            {
+                var original = table.Rows[index];
+                var rowid = index < table.RowIds.Count ? table.RowIds[index] : index + 1;
+                var (updated, newRowid) = BuildUpdatedRow(
+                    statement,
+                    table,
+                    plan,
+                    original,
+                    rowid,
+                    parameters,
+                    context);
+                // Apply immediately so afterMutation Column reads and child FK actions
+                // observe the post-update parent key (same model as cascade DELETE).
+                table.Rows[index] = updated;
+                if (table.HasRowid)
+                    table.RowIds[index] = newRowid;
+                context.ReportRowChange(SqliteChangeOperation.Update, statement.TableName, table, newRowid);
+                return new VdbeRowMutation(updated, newRowid);
+            },
+            Commit = () =>
+            {
+                // Children already cascaded via Program; validate shape without re-firing actions.
+                ValidateRowIdsUnique(statement.TableName, table, table.RowIds.ToList(), plan.AliasIndex);
+                table.ValidateRows(statement.TableName, table.Rows);
+                ValidateColumnUniqueConstraints(table, table.Rows);
+                ValidatePrimaryKey(statement.TableName, table, table.Rows);
+                ValidateUniqueIndexes(statement.TableName, table, table.Rows);
+                ValidateChildForeignKeys(
+                    context,
+                    statement.TableName,
+                    table,
+                    table.Rows,
+                    statement.TableName,
+                    table.Rows);
+                return null;
+            },
+        };
+
+        var before = CreateParentKeyCaptureInstructions(parent, oldRegisters);
+        var after = new List<VdbeInstruction>(keyCount + 1);
+        for (var index = 0; index < keyCount; index++)
+        {
+            after.Add(new ColumnInstruction(
+                new Cursor(0),
+                parent.ColumnIndices[index],
+                newRegisters[index]));
+        }
+
+        after.Add(new ProgramInstruction(allRegisters, action));
+
+        var program = DmlStatementCompiler.BuildProgramWithMutationPrograms(
+            DmlKind.Update,
+            statement.TableName,
+            table.Columns.Length,
+            filter,
+            before,
+            after,
+            registerCount: allRegisters.Length);
+        compiled = new CompiledDml(program, [writeTarget]);
+        return true;
+    }
+
+    private IReadOnlyList<VdbeWriteTarget?> CreateCompiledUpdateActionWriteTargets(
+        QueryContext context,
+        string tableName,
+        EmbeddedTable table,
+        ForeignKeyDefinition foreignKey,
+        ForeignKeyParent parent,
+        VdbeParameterBinding? binding,
+        bool setNull)
+    {
+        if (binding is null || binding.Count < parent.ColumnIndices.Count * 2)
+            throw new InvalidOperationException("A compiled foreign-key UPDATE action requires old and new parent key bindings.");
+
+        var keyCount = parent.ColumnIndices.Count;
+        var oldValues = new SqlValue[keyCount];
+        var newValues = new SqlValue[keyCount];
+        for (var index = 0; index < keyCount; index++)
+        {
+            oldValues[index] = binding[index];
+            newValues[index] = binding[keyCount + index];
+        }
+
+        if (ForeignKeyValuesEqual(parent, oldValues, newValues))
+            return [null];
+
+        var childColumns = ResolveForeignKeyChildColumns(table, tableName, foreignKey);
+        var matchingPositions = FindForeignKeyChildPositions(
+            table,
+            tableName,
+            foreignKey,
+            parent,
+            oldValues);
+        var sourceRowIds = new long[matchingPositions.Count];
+        for (var index = 0; index < matchingPositions.Count; index++)
+            sourceRowIds[index] = table.RowIds[matchingPositions[index]];
+
+        return
+        [
+            new VdbeWriteTarget
+            {
+                TableName = tableName,
+                RowCount = sourceRowIds.Length,
+                GetRow = index =>
+                {
+                    var position = table.RowIds.IndexOf(sourceRowIds[index]);
+                    return position >= 0 ? table.Rows[position] : new SqlValue[table.Columns.Length];
+                },
+                GetRowId = index => sourceRowIds[index],
+                MutateRow = index =>
+                {
+                    var position = table.RowIds.IndexOf(sourceRowIds[index]);
+                    if (position < 0)
+                        return new VdbeRowMutation(new SqlValue[table.Columns.Length], sourceRowIds[index]);
+
+                    var updated = (SqlValue[])table.Rows[position].Clone();
+                    for (var key = 0; key < childColumns.Length; key++)
+                        updated[childColumns[key]] = setNull ? SqlValue.Null : newValues[key];
+                    table.Rows[position] = updated;
+                    context.ReportRowChange(SqliteChangeOperation.Update, tableName, table, sourceRowIds[index]);
+                    _totalChanges++;
+                    return new VdbeRowMutation(updated, sourceRowIds[index]);
+                },
+                Commit = () => null,
+            },
+        ];
     }
 
     private bool TryCompileSelfReferentialCascadeDelete(

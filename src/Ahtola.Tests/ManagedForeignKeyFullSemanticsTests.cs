@@ -331,6 +331,32 @@ public sealed class ManagedForeignKeyFullSemanticsTests
     }
 
     [Test]
+    public void SelfReferentialCascadeOnUpdateMatchesSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "PRAGMA foreign_keys = ON",
+                "CREATE TABLE node(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES node(id) ON UPDATE CASCADE)",
+                "INSERT INTO node VALUES (1, NULL), (2, 1), (3, 2)",
+                "UPDATE node SET id = 10 WHERE id = 1",
+            ],
+            "SELECT id, parent_id FROM node ORDER BY id");
+    }
+
+    [Test]
+    public void SelfReferentialSetNullOnUpdateMatchesSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "PRAGMA foreign_keys = ON",
+                "CREATE TABLE node(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES node(id) ON UPDATE SET NULL)",
+                "INSERT INTO node VALUES (1, NULL), (2, 1), (3, 2)",
+                "UPDATE node SET id = 10 WHERE id = 1",
+            ],
+            "SELECT id, parent_id FROM node ORDER BY id");
+    }
+
+    [Test]
     public void DeferredCascadeCyclesResolveWithoutRecursiveReentry()
     {
         AssertMatchesSqlite(
