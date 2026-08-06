@@ -491,6 +491,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         EmbeddedIndex Index,
         bool Search);
 
+    private sealed record ReturningTableSnapshot(SqlValue[][] Rows, long[] RowIds);
+
     private sealed record IndexConstraint(Expression Expression, bool RequiresNullRejection);
 
     // The rows of an enclosing aggregate evaluation (one GROUP BY group, or the whole
@@ -8757,6 +8759,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ? null
             : ExecuteQuery(statement.Source, parameters, context, outerRow: null).Rows;
         var rowCount = sourceRows?.Count ?? statement.Rows.Count;
+        var originalRows = statement.Returning is null ? null : table.Rows.ToArray();
+        var originalRowIds = statement.Returning is null ? null : table.RowIds.ToArray();
         var rowsToInsert = new List<SqlValue[]>(rowCount);
         var insertedRowIds = new List<long>(rowCount);
         if (sourceRows is not null)
@@ -8798,7 +8802,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 lastInsertRowId,
                 table.HasRowid
                     ? insertedRowIds.Cast<long?>().ToArray()
-                    : null);
+                    : null,
+                CaptureIncrementalInsertReturningSnapshots(
+                    originalRows!,
+                    originalRowIds!,
+                    rowsToInsert,
+                    insertedRowIds));
         }
 
         return new ExecutionResult([], [], rowsToInsert.Count, rowsToInsert.Count > 0)
@@ -8818,6 +8827,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ? null
             : ExecuteQuery(statement.Source, parameters, context, outerRow: null).Rows;
         var rowCount = sourceRows?.Count ?? statement.Rows.Count;
+        var originalRows = statement.Returning is null ? null : table.Rows.ToArray();
+        var originalRowIds = statement.Returning is null ? null : table.RowIds.ToArray();
         var rowsToInsert = new List<SqlValue[]>(rowCount);
         var insertedRowIds = new List<long>(rowCount);
         var backup = CloneTablesShallow(context.Tables);
@@ -8880,7 +8891,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 lastInsertRowId,
                 table.HasRowid
                     ? insertedRowIds.Cast<long?>().ToArray()
-                    : null);
+                    : null,
+                CaptureIncrementalInsertReturningSnapshots(
+                    originalRows!,
+                    originalRowIds!,
+                    rowsToInsert,
+                    insertedRowIds));
         }
 
         return new ExecutionResult([], [], rowsToInsert.Count, rowsToInsert.Count > 0)
@@ -9683,6 +9699,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var rowIds = table.RowIds.Count == table.Rows.Count
             ? table.RowIds.ToList()
             : Enumerable.Range(1, table.Rows.Count).Select(position => (long)position).ToList();
+        var originalRows = statement.Returning is null ? null : table.Rows.ToArray();
+        var originalRowIds = statement.Returning is null ? null : rowIds.ToArray();
         var updatedRows = statement.Returning is null ? null : new List<SqlValue[]>();
         var updatedRowIds = statement.Returning is null ? null : new List<long>();
         var updatedPositions = new List<int>();
@@ -9786,7 +9804,27 @@ public sealed partial class EmbeddedDatabase : IDisposable
             rowsAffected++;
         }
 
-        ExecutionResult? returningResult = null;
+        var returningSnapshots = statement.Returning is null
+            ? null
+            : CaptureIncrementalUpdateReturningSnapshots(
+                originalRows!,
+                originalRowIds!,
+                rows,
+                rowIds,
+                updatedPositions);
+        var returningResult = statement.Returning is null
+            ? null
+            : BuildReturningResult(
+                statement.Returning,
+                statement.TableName,
+                table,
+                updatedRows!,
+                updatedRowIds!,
+                rowsAffected,
+                rowsAffected > 0,
+                parameters,
+                context,
+                returningTableSnapshots: returningSnapshots);
         CommitUpdates(
             context,
             statement.TableName,
@@ -9795,19 +9833,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             rows,
             rowIds,
             plan,
-            updatedPositions,
-            statement.Returning is null
-                ? null
-                : () => returningResult = BuildReturningResult(
-                    statement.Returning,
-                    statement.TableName,
-                    table,
-                    updatedRows!,
-                    updatedRowIds!,
-                    rowsAffected,
-                    rowsAffected > 0,
-                    parameters,
-                    context));
+            updatedPositions);
         if (statement.Returning is not null)
             return returningResult!;
 
@@ -12088,6 +12114,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 context);
         var rows = new List<SqlValue[]>(table.Rows.Count);
         var rowIds = new List<long>(table.Rows.Count);
+        var originalRows = table.Rows.ToArray();
+        var originalRowIds = table.RowIds.Count == table.Rows.Count
+            ? table.RowIds.ToArray()
+            : Enumerable.Range(1, table.Rows.Count).Select(position => (long)position).ToArray();
         var deletedRows = new List<SqlValue[]>();
         var deletedRowIds = new List<long>();
         var rowsAffected = 0;
@@ -12111,7 +12141,6 @@ public sealed partial class EmbeddedDatabase : IDisposable
             rowIds.Add(rowid);
         }
 
-        var originalRows = table.Rows.ToArray();
         var returningResult = statement.Returning is null
             ? null
             : BuildReturningResult(
@@ -12123,7 +12152,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 rowsAffected,
                 rowsAffected > 0,
                 parameters,
-                context);
+                context,
+                returningTableSnapshots: CaptureIncrementalDeleteReturningSnapshots(
+                    originalRows,
+                    originalRowIds,
+                    deletedRows,
+                    deletedRowIds));
         table.Rows.Clear();
         table.Rows.AddRange(rows);
         table.RowIds.Clear();
@@ -12166,8 +12200,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
         SqlValue[] parameters,
         QueryContext context,
         long? lastInsertRowId = null,
-        IReadOnlyList<long?>? rowFailureLastInsertRowIds = null)
+        IReadOnlyList<long?>? rowFailureLastInsertRowIds = null,
+        IReadOnlyList<ReturningTableSnapshot>? returningTableSnapshots = null)
     {
+        if (returningTableSnapshots is not null
+            && returningTableSnapshots.Count != affectedRows.Count)
+        {
+            throw new InvalidOperationException(
+                "RETURNING table snapshots must have one entry for every affected row.");
+        }
+
         var outputColumns = BuildOutputColumns(tableName, table.Columns);
 
         foreach (var projection in returning)
@@ -12183,10 +12225,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var columnNames = GetColumnNames(returning, outputColumns, outputColumns);
         var resultRows = new List<SqlValue[]>(affectedRows.Count);
         var savedLastInsertRowId = GetLastInsertRowId(context);
+        var finalTableSnapshot = returningTableSnapshots is null
+            ? null
+            : new ReturningTableSnapshot(table.Rows.ToArray(), table.RowIds.ToArray());
         try
         {
             for (var rowIndex = 0; rowIndex < affectedRows.Count; rowIndex++)
             {
+                if (returningTableSnapshots is not null)
+                    RestoreReturningTableSnapshot(table, returningTableSnapshots[rowIndex]);
+
                 var rowValues = affectedRows[rowIndex];
                 var source = new SourceRow(
                     table.Columns,
@@ -12247,6 +12295,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
         finally
         {
+            if (finalTableSnapshot is not null)
+                RestoreReturningTableSnapshot(table, finalTableSnapshot);
             if (context.StatementState is not null)
                 context.StatementState.LastInsertRowId = savedLastInsertRowId;
         }
@@ -12255,6 +12305,83 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             LastInsertRowId = lastInsertRowId,
         };
+    }
+
+    private static IReadOnlyList<ReturningTableSnapshot> CaptureIncrementalInsertReturningSnapshots(
+        IReadOnlyList<SqlValue[]> originalRows,
+        IReadOnlyList<long> originalRowIds,
+        IReadOnlyList<SqlValue[]> insertedRows,
+        IReadOnlyList<long> insertedRowIds)
+    {
+        var rows = originalRows.ToList();
+        var rowIds = originalRowIds.ToList();
+        var snapshots = new List<ReturningTableSnapshot>(insertedRows.Count);
+        for (var index = 0; index < insertedRows.Count; index++)
+        {
+            rows.Add(insertedRows[index]);
+            if (index < insertedRowIds.Count)
+                rowIds.Add(insertedRowIds[index]);
+            snapshots.Add(new ReturningTableSnapshot([.. rows], [.. rowIds]));
+        }
+
+        return snapshots;
+    }
+
+    private static IReadOnlyList<ReturningTableSnapshot> CaptureIncrementalUpdateReturningSnapshots(
+        IReadOnlyList<SqlValue[]> originalRows,
+        IReadOnlyList<long> originalRowIds,
+        IReadOnlyList<SqlValue[]> postUpdateRows,
+        IReadOnlyList<long> postUpdateRowIds,
+        IReadOnlyList<int> updatedPositions)
+    {
+        var rows = originalRows.ToArray();
+        var rowIds = originalRowIds.ToArray();
+        var snapshots = new List<ReturningTableSnapshot>(updatedPositions.Count);
+        foreach (var position in updatedPositions)
+        {
+            rows[position] = postUpdateRows[position];
+            if (position < rowIds.Length && position < postUpdateRowIds.Count)
+                rowIds[position] = postUpdateRowIds[position];
+            snapshots.Add(new ReturningTableSnapshot([.. rows], [.. rowIds]));
+        }
+
+        return snapshots;
+    }
+
+    private static IReadOnlyList<ReturningTableSnapshot> CaptureIncrementalDeleteReturningSnapshots(
+        IReadOnlyList<SqlValue[]> originalRows,
+        IReadOnlyList<long> originalRowIds,
+        IReadOnlyList<SqlValue[]> deletedRows,
+        IReadOnlyList<long> deletedRowIds)
+    {
+        var rows = originalRows.ToList();
+        var rowIds = originalRowIds.ToList();
+        var snapshots = new List<ReturningTableSnapshot>(deletedRows.Count);
+        for (var deletedIndex = 0; deletedIndex < deletedRows.Count; deletedIndex++)
+        {
+            var position = deletedIndex < deletedRowIds.Count
+                ? rowIds.IndexOf(deletedRowIds[deletedIndex])
+                : rows.FindIndex(row => ReferenceEquals(row, deletedRows[deletedIndex]));
+            if (position < 0)
+                throw new InvalidOperationException("Deleted RETURNING row was not found in the original table image.");
+
+            rows.RemoveAt(position);
+            if (position < rowIds.Count)
+                rowIds.RemoveAt(position);
+            snapshots.Add(new ReturningTableSnapshot([.. rows], [.. rowIds]));
+        }
+
+        return snapshots;
+    }
+
+    private static void RestoreReturningTableSnapshot(
+        EmbeddedTable table,
+        ReturningTableSnapshot snapshot)
+    {
+        table.Rows.Clear();
+        table.Rows.AddRange(snapshot.Rows);
+        table.RowIds.Clear();
+        table.RowIds.AddRange(snapshot.RowIds);
     }
 
     // Runs a base INSERT/UPDATE/DELETE and, if the statement affects at least one row,

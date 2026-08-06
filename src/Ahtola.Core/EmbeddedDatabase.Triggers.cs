@@ -771,17 +771,22 @@ public sealed partial class EmbeddedDatabase
             }
             rowsAffected++;
             context.TriggerState!.Changed = true;
+            _ = FireRowTriggers(afterTriggers, frame, context);
+            position = FindTriggerRowPosition(table, identity);
+            var returningRow = position >= 0 ? table.Rows[position] : updated;
+            var returningRowId = position >= 0 && table.HasRowid
+                ? table.RowIds[position]
+                : newRowId;
             AppendReturningRow(
                 statement.Returning,
                 statement.TableName,
                 table,
-                updated,
-                newRowId,
+                returningRow,
+                returningRowId,
                 parameters,
                 context,
                 returningRows,
                 ref returningColumns);
-            _ = FireRowTriggers(afterTriggers, frame, context);
         }
 
         if (statement.Returning is not null && returningColumns is null)

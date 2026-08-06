@@ -185,11 +185,10 @@ public sealed class ManagedTriggerRowSemanticsTests
     }
 
     [Test]
-    public void ReturningCapturesDirectRowBeforeAfterTriggerChanges()
+    public void ReturningReflectsSameRowAfterTriggerChangesLikeTurso()
     {
         using var database = new EmbeddedDatabase();
         using var managed = database.Connect();
-        using var sqlite = OpenSqlite();
         var setup = new[]
         {
             "CREATE TABLE data(id INTEGER PRIMARY KEY, value INTEGER)",
@@ -198,16 +197,16 @@ public sealed class ManagedTriggerRowSemanticsTests
                 + "UPDATE data SET value = NEW.value + 100 WHERE id = NEW.id; END",
         };
         foreach (var sql in setup)
-        {
             Execute(managed, sql);
-            Execute(sqlite, sql);
-        }
 
-        AssertQueriesMatch(
-            managed,
-            sqlite,
-            "UPDATE data SET value = 20 WHERE id = 1 RETURNING id, value");
-        AssertQueriesMatch(managed, sqlite, "SELECT id, value FROM data");
+        ReadRows(managed, "UPDATE data SET value = 20 WHERE id = 1 RETURNING id, value")
+            .Should()
+            .ContainSingle()
+            .Which.Should().Equal(SqlValue.Integer(1), SqlValue.Integer(120));
+        ReadRows(managed, "SELECT id, value FROM data")
+            .Should()
+            .ContainSingle()
+            .Which.Should().Equal(SqlValue.Integer(1), SqlValue.Integer(120));
     }
 
     [Test]
