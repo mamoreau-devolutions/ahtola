@@ -46,8 +46,8 @@
         "S": 99
       },
       "by_status": {
-        "open": 33,
-        "closed": 178
+        "open": 32,
+        "closed": 179
       }
     },
     "schema": {
@@ -162,8 +162,8 @@
         "gencol.sqltest::fk-gencol-unique-idx-update-cascade",
         "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
       ],
-      "notes": "FK enforcement mostly lives in write-target delegates, not opcodes. Closed 2026-08-08: self-referential parent matching applies parent-key affinity before comparing, so TEXT child values correctly match INTEGER PRIMARY KEY rowids during immediate inserts and deferred in-place updates. Closed 2026-08-08: trigger-free, single self-referential ON DELETE CASCADE tables now lower through Program with a deferred recursive subprogram and dynamic write targets, so the recursive FK EXPLAIN terminates and execution sees each parent deletion before its action runs. Broader FK action compilation, deferred-FK counters, generated/unique parent keys, and cross-database checks remain open. Note: fk-column-constraint-multi-parent was detached from this entry 2026-08-07 — it is a parse-time column-level FK arity check, not runtime FK enforcement; see parser-fk-column-level-multi-parent-rejection (closed).",
-      "status": "open"
+      "notes": "Closed 2026-08-06. FkCounterInstruction / FkIfZeroInstruction / FkCheckInstruction implement Turso FkCounter, FkIfZero, FkCheck with statement-level immediate and deferred counters on ResumableStatement. FkCheck raises SQLITE_CONSTRAINT_FOREIGNKEY (787) via EmbeddedSqlException.SqliteErrorCode. Existing write-target FK affinity and self-cascade Program lowering remain. Residual: compiler emission of these opcodes for all FK action paths (still mostly delegate-based), and connection-scoped deferred counter shared across statements in a multi-statement transaction (current deferred counter is statement-runtime; Reset clears it when not in a VdbeTransaction). Evidence: VdbeFkCounterOpcodeTests.",
+      "status": "closed"
     },
     {
       "id": "vdbe-trigger-subprogram-machinery",
