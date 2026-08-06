@@ -1353,11 +1353,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
     /// Hooks scoped to <em>this</em> database: the update hook reports the schema that actually
     /// changed, so the caller rebuilds them rather than forwarding the firing database's.
     /// </param>
+    /// <param name="externalTables">
+    /// Read-only table snapshots from a foreign schema required by a narrowly routed temp-trigger
+    /// body statement.
+    /// </param>
     internal ExecutionResult ExecuteTriggerBodyStatement(
         ParsedStatement statement,
         SchemaCatalog catalog,
         QueryContext outer,
-        ManagedStatementHooks? hooks)
+        ManagedStatementHooks? hooks,
+        IReadOnlyDictionary<string, EmbeddedTable>? externalTables = null)
     {
         lock (_gate)
         {
@@ -1365,7 +1370,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 throw new EmbeddedSqlException("attempt to write a readonly database");
 
             var context = new QueryContext(
-                catalog.Tables,
+                CreateExecutionTables(catalog.Tables, externalTables),
                 new Dictionary<string, SourceData>(StringComparer.OrdinalIgnoreCase),
                 catalog.Views,
                 catalog.Triggers,
@@ -37884,7 +37889,10 @@ public sealed class EmbeddedConnection : IDisposable
         }
 
         public bool IsForeign(ParsedStatement statement)
-            => !ReferenceEquals(Resolve(statement).Database, executing);
+        {
+            var route = Resolve(statement);
+            return route.ExternalTables is not null || !ReferenceEquals(route.Database, executing);
+        }
 
         public ParsedStatement Localize(ParsedStatement statement) => Resolve(statement).Statement;
 
@@ -37893,6 +37901,23 @@ public sealed class EmbeddedConnection : IDisposable
             EmbeddedDatabase.QueryContext outer)
         {
             var route = Resolve(statement);
+            if (ReferenceEquals(route.Database, executing))
+            {
+                return route.Database.ExecuteTriggerBodyStatement(
+                    route.Statement,
+                    new EmbeddedDatabase.SchemaCatalog(
+                        outer.Tables,
+                        new Dictionary<string, ViewDefinition>(
+                            outer.Views ?? new Dictionary<string, ViewDefinition>(StringComparer.OrdinalIgnoreCase),
+                            StringComparer.OrdinalIgnoreCase),
+                        new Dictionary<string, TriggerDefinition>(
+                            outer.Triggers ?? new Dictionary<string, TriggerDefinition>(StringComparer.OrdinalIgnoreCase),
+                            StringComparer.OrdinalIgnoreCase)),
+                    outer,
+                    connection.CreateTriggerBodyHooks(route.Database, outer.Hooks),
+                    route.ExternalTables);
+            }
+
             if (!_foreignWrites.TryGetValue(route.Database, out var write))
             {
                 var transaction = connection.GetTransactionState(route.Database);
@@ -37904,7 +37929,8 @@ public sealed class EmbeddedConnection : IDisposable
                 route.Statement,
                 write.Catalog,
                 outer,
-                connection.CreateTriggerBodyHooks(route.Database, outer.Hooks));
+                connection.CreateTriggerBodyHooks(route.Database, outer.Hooks),
+                route.ExternalTables);
 
             write.Changed |= result.Changed;
             write.ForceFullCatalogRewrite |= result.ForceFullCatalogRewrite;
@@ -37944,9 +37970,22 @@ public sealed class EmbeddedConnection : IDisposable
             if (_routes.TryGetValue(statement, out var route))
                 return route;
 
-            route = connection.RouteStatement(statement);
+            route = connection.TryRouteTempTriggerInsertReadingForeignSchema(
+                statement,
+                GetCurrentCatalog,
+                out var crossSchemaRoute)
+                    ? crossSchemaRoute
+                    : connection.RouteStatement(statement);
             _routes.Add(statement, route);
             return route;
+        }
+
+        private EmbeddedDatabase.SchemaCatalog GetCurrentCatalog(EmbeddedDatabase database)
+        {
+            if (_foreignWrites.TryGetValue(database, out var write))
+                return write.Catalog;
+
+            return connection.GetTransactionState(database)?.Catalog ?? database.LiveCatalog;
         }
     }
 
@@ -38158,14 +38197,14 @@ public sealed class EmbeddedConnection : IDisposable
             return null;
         }
 
-        if (!ReferenceEquals(routed.Database, _database))
+        if (GetSchemaName(routed.Database) is not { } alteredSchema)
             return null;
 
         var tempCatalog = GetTransactionState(_tempDatabase)?.Catalog ?? _tempDatabase.LiveCatalog;
         if (tempCatalog.Triggers.Count == 0)
             return null;
 
-        var primaryCatalog = GetTransactionState(_database)?.Catalog ?? _database.LiveCatalog;
+        var primaryCatalog = GetTransactionState(routed.Database)?.Catalog ?? routed.Database.LiveCatalog;
         if (!primaryCatalog.Tables.TryGetValue(rename.TableName, out var renamedTable))
             return null;
 
@@ -38175,7 +38214,7 @@ public sealed class EmbeddedConnection : IDisposable
             primaryCatalog.Views,
             renamedTable.Name,
             renamedTable.Columns.ToArray());
-        var rewriteSchema = CreateTempTriggerRenameColumnSchema(primarySchema, tempCatalog);
+        var rewriteSchema = CreateTempTriggerRenameColumnSchema(primarySchema, tempCatalog, alteredSchema);
         var candidateCatalog = tempCatalog.Clone();
         var changed = false;
         foreach (var trigger in tempCatalog.Triggers.Values)
@@ -38211,13 +38250,16 @@ public sealed class EmbeddedConnection : IDisposable
             changed = true;
         }
 
-        ValidateTempTriggersAfterMainColumnRename(
-            rename,
-            renamedTable,
-            primaryCatalog,
-            tempCatalog,
-            candidateCatalog,
-            cancellationToken);
+        if (alteredSchema.Equals("main", StringComparison.OrdinalIgnoreCase))
+        {
+            ValidateTempTriggersAfterMainColumnRename(
+                rename,
+                renamedTable,
+                primaryCatalog,
+                tempCatalog,
+                candidateCatalog,
+                cancellationToken);
+        }
         return changed ? new PendingTempTriggerCatalogRewrite(candidateCatalog) : null;
     }
 
@@ -38466,7 +38508,8 @@ public sealed class EmbeddedConnection : IDisposable
 
     private static RenameColumnSchema CreateTempTriggerRenameColumnSchema(
         RenameColumnSchema primarySchema,
-        EmbeddedDatabase.SchemaCatalog tempCatalog)
+        EmbeddedDatabase.SchemaCatalog tempCatalog,
+        string primarySchemaName)
     {
         return new RenameColumnSchema(ResolveColumns, IsRenameTarget);
 
@@ -38476,7 +38519,7 @@ public sealed class EmbeddedConnection : IDisposable
             {
                 return schema.Equals("temp", StringComparison.OrdinalIgnoreCase)
                     ? ResolveTempColumns(localName)
-                    : schema.Equals("main", StringComparison.OrdinalIgnoreCase)
+                    : schema.Equals(primarySchemaName, StringComparison.OrdinalIgnoreCase)
                         ? primarySchema.ResolveColumns(name)
                         : null;
             }
@@ -38487,7 +38530,7 @@ public sealed class EmbeddedConnection : IDisposable
         bool IsRenameTarget(string name)
         {
             if (ManagedSchemaName.TrySplit(name, out var schema, out _))
-                return schema.Equals("main", StringComparison.OrdinalIgnoreCase)
+                return schema.Equals(primarySchemaName, StringComparison.OrdinalIgnoreCase)
                     && primarySchema.IsRenameTarget(name);
 
             return ResolveTempColumns(name) is null && primarySchema.IsRenameTarget(name);
@@ -40434,6 +40477,74 @@ public sealed class EmbeddedConnection : IDisposable
         return TryRouteAttachedUpdateReadingMain(statement, resolvedSchemas, out var routed)
             ? routed
             : RouteForSchemas(statement, schemas);
+    }
+
+    // Turso acquires the independent read and write databases needed by a temp trigger subprogram
+    // before entering it. This narrow route keeps one foreign schema read-only while the trigger
+    // body mutates exactly one non-temp target catalog.
+    private bool TryRouteTempTriggerInsertReadingForeignSchema(
+        ParsedStatement statement,
+        Func<EmbeddedDatabase, EmbeddedDatabase.SchemaCatalog> getCatalog,
+        out RoutedStatement routed)
+    {
+        routed = default;
+        if (statement is not InsertStatement { Source: { } source, Returning: null, Upsert: null } insert
+            || insert.Rows.Count != 0)
+        {
+            return false;
+        }
+
+        var sourceSchemas = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        CollectQuerySchemas(source, sourceSchemas, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        var resolvedSourceSchemas = sourceSchemas
+            .Select(ResolveCollectedSchema)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (resolvedSourceSchemas.Count != 1)
+            return false;
+
+        var sourceSchema = resolvedSourceSchemas.Single();
+        var targetSchema = ManagedSchemaName.TrySplit(insert.TableName, out var qualifiedTargetSchema, out var targetTableName)
+            ? qualifiedTargetSchema
+            : ResolveCollectedSchema(UnqualifiedSchemaMarker + insert.TableName);
+        if (!ManagedSchemaName.TrySplit(insert.TableName, out _, out targetTableName))
+            targetTableName = insert.TableName;
+
+        if (sourceSchema.Equals("temp", StringComparison.OrdinalIgnoreCase)
+            || targetSchema.Equals("temp", StringComparison.OrdinalIgnoreCase)
+            || sourceSchema.Equals(targetSchema, StringComparison.OrdinalIgnoreCase)
+            || FindSchemaDatabase(sourceSchema) is not { } sourceDatabase
+            || FindSchemaDatabase(targetSchema) is not { } targetDatabase)
+        {
+            return false;
+        }
+
+        var sourceCatalog = getCatalog(sourceDatabase);
+        var targetCatalog = getCatalog(targetDatabase);
+        var sourceTables = sourceCatalog.Clone().Tables;
+        var externalTables = new Dictionary<string, EmbeddedTable>(StringComparer.OrdinalIgnoreCase);
+        var sourceNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in sourceTables)
+        {
+            var sourceName = targetCatalog.Tables.ContainsKey(pair.Key)
+                ? "\u0001" + sourceSchema + ":" + pair.Key
+                : pair.Key;
+            externalTables.Add(sourceName, pair.Value);
+            sourceNames.Add(MainTempSourceKey(sourceSchema, pair.Key), sourceName);
+        }
+
+        routed = new RoutedStatement(
+            targetDatabase,
+            insert with
+            {
+                TableName = targetTableName,
+                Source = RewriteMainTempReadQuery(
+                    source,
+                    sourceNames,
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+            },
+            IsAttached: !ReferenceEquals(targetDatabase, _database),
+            ExternalTables: externalTables);
+        return true;
     }
 
     // Turso plans an UPDATE target and every table read with independent database IDs. Keep the

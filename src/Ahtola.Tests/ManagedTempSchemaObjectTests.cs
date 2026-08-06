@@ -124,6 +124,48 @@ public sealed class ManagedTempSchemaObjectTests
     }
 
     [Test]
+    public void TempTriggerMayInsertIntoMainFromAnAttachedRead()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "ATTACH ':memory:' AS aux");
+        Execute(connection, "CREATE TABLE audit(value INTEGER)");
+        Execute(connection, "CREATE TABLE aux.audit(id INTEGER PRIMARY KEY, value INTEGER)");
+        Execute(connection, "CREATE TEMP TABLE driver(id INTEGER)");
+        Execute(connection, "INSERT INTO aux.audit VALUES (1, 900)");
+        Execute(
+            connection,
+            "CREATE TEMP TRIGGER copy_attached AFTER INSERT ON temp.driver BEGIN "
+                + "INSERT INTO audit SELECT value FROM aux.audit WHERE id = NEW.id; END");
+
+        Execute(connection, "INSERT INTO temp.driver VALUES (1)");
+
+        ReadRows(connection, "SELECT value FROM audit")
+            .Should().ContainSingle().Which[0].Should().Be(SqlValue.Integer(900));
+    }
+
+    [Test]
+    public void TempTriggerOnMainMayInsertIntoMainFromAnAttachedRead()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "ATTACH ':memory:' AS aux");
+        Execute(connection, "CREATE TABLE driver(id INTEGER)");
+        Execute(connection, "CREATE TABLE audit(value INTEGER)");
+        Execute(connection, "CREATE TABLE aux.source(id INTEGER PRIMARY KEY, value INTEGER)");
+        Execute(connection, "INSERT INTO aux.source VALUES (1, 901)");
+        Execute(
+            connection,
+            "CREATE TEMP TRIGGER copy_attached AFTER INSERT ON main.driver BEGIN "
+                + "INSERT INTO audit SELECT value FROM aux.source WHERE id = NEW.id; END");
+
+        Execute(connection, "INSERT INTO driver VALUES (1)");
+
+        ReadRows(connection, "SELECT value FROM audit")
+            .Should().ContainSingle().Which[0].Should().Be(SqlValue.Integer(901));
+    }
+
+    [Test]
     public void FailedStatementDiscardsTheTempTriggersCrossSchemaWrites()
     {
         using var database = new EmbeddedDatabase();

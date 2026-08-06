@@ -14,7 +14,7 @@
       "commit_at_analysis": "56cd79b"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
-    "current_conformance_expected_failures": 13,
+    "current_conformance_expected_failures": 11,
     "last_reconciled": "2026-08-08",
     "entry_count": 211,
     "counts": {
@@ -1150,7 +1150,7 @@
         "alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db",
         "reindex.sqltest::reindex-attached-qualified-targets"
       ],
-      "notes": "Managed ATTACH requires a file-backed primary except for connection-owned :memory: attachments. Most cross-database statements remain rejected because their independent catalogs cannot be committed atomically. Closed 2026-08-08: an attached-table UPDATE with no FROM, RETURNING, ORDER BY, LIMIT, OFFSET, or index directive can read main-schema tables through its predicate while mutating only the attached catalog. This aligns the target/read database separation Turso uses for update_attached_db_index.sqltest::update-attached-db-rowid-with-where-subquery without widening multi-database writes. Temp/main mixed statements and broader attached reads remain separate work.",
+      "notes": "Managed ATTACH requires a file-backed primary except for connection-owned :memory: attachments. Most cross-database statements remain rejected because their independent catalogs cannot be committed atomically. Closed 2026-08-08: an attached-table UPDATE with no FROM, RETURNING, ORDER BY, LIMIT, OFFSET, or index directive can read main-schema tables through its predicate while mutating only the attached catalog. Temp-trigger INSERT...SELECT statements may also mutate one non-temp target catalog while reading one foreign persistent schema snapshot; this closes update_attached_db_index.sqltest::update-attached-db-rowid-with-where-subquery and the two temp-trigger attached-read alter_table cases without widening multi-database writes. Temp/main mixed statements and broader attached reads remain separate work.",
       "status": "open"
     },
     {
