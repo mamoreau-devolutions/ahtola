@@ -562,7 +562,7 @@
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Turso's order.rs decides, per join order and access method, whether the chosen index already produces the required ORDER BY/GROUP BY order and elides the sort step. Ahtola only special-cases a single ORDER BY term matching the primary key/rowid for a single-table backward scan (SelectStatementCompiler ~line 132); any other case -- including index-satisfied ORDER BY on a secondary index, or GROUP BY order elision -- always materializes through a Sorter (SortedScanProgramBuilder). The listed conformance failures show sort-elision expectations not met for window/CTE queries. (Previously linked keys cleared by earlier wave work: window-partial-not-elided, window-no-cte-order-not-elided.)",
+      "notes": "Partial 2026-08-06 (still open). Bare rowid ORDER BY is now elided without a sorter: ASC uses the plain Rewind/Next scan (physical rowid order); DESC uses Last/Prev reverse scan (existing path). Evidence: CompiledSortedScanExecutionTests.OrderByRowidAscElidesSorterAndUsesForwardScan + DESC reverse-scan tests. Still open: secondary-index ORDER BY/GROUP BY elision (needs access-method / covering-index planner), INTEGER PRIMARY KEY alias column as order key, and elision combined with WHERE predicates. Turso order.rs eliminate_order_by remains the full target.",
       "status": "open"
     },
     {
