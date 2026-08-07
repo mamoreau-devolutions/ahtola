@@ -111,6 +111,31 @@ public sealed class VdbeFkCounterOpcodeTests
     }
 
     [Test]
+    public void DeferredCounterSurvivesUntilTransactionCommit()
+    {
+        // Begin txn, bump deferred counter, FkCheck deferred is a no-op in-txn,
+        // Commit fails with FOREIGN KEY.
+        VdbeInstruction[] instructions =
+        [
+            new BeginTransactionInstruction(),
+            new FkCounterInstruction(Increment: 1, Deferred: true),
+            new FkCheckInstruction(Deferred: true),
+            new CommitTransactionInstruction(),
+            new HaltInstruction(),
+        ];
+
+        var program = new VdbeProgram(registerCount: 0, cursorCount: 0, instructions);
+        using var statement = new ResumableStatement(program);
+        var error = Assert.Throws<EmbeddedSqlException>(() =>
+        {
+            while (statement.StepResumable() != ResumableStatementStepResult.Done)
+            {
+            }
+        });
+        error!.Message.Should().Contain("FOREIGN KEY");
+    }
+
+    [Test]
     public void ExplainRendersFkOpcodes()
     {
         var counter = new FkCounterInstruction(3, Deferred: true);

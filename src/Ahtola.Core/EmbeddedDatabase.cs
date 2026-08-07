@@ -19432,6 +19432,25 @@ public sealed partial class EmbeddedDatabase : IDisposable
         out CompiledDml compiled,
         out string[] columns,
         out bool hasReturning)
+        => TryCompileForeignKeyActionDelete(
+            statement,
+            parameters,
+            context,
+            out compiled,
+            out columns,
+            out hasReturning);
+
+    /// <summary>
+    /// Compiles DELETE with a single ON DELETE CASCADE/SET NULL foreign-key action:
+    /// self-referential or one distinct child table referencing this parent.
+    /// </summary>
+    private bool TryCompileForeignKeyActionDelete(
+        DeleteStatement statement,
+        SqlValue[] parameters,
+        QueryContext context,
+        out CompiledDml compiled,
+        out string[] columns,
+        out bool hasReturning)
     {
         compiled = null!;
         columns = [];
@@ -19444,75 +19463,91 @@ public sealed partial class EmbeddedDatabase : IDisposable
             || statement.Returning is not null
             || context.CommonTableExpressions.Count != 0
             || IsSchemaTable(statement.TableName)
-            || !context.Tables.TryGetValue(statement.TableName, out var table)
-            || !table.HasRowid)
+            || !context.Tables.TryGetValue(statement.TableName, out var parentTable)
+            || !parentTable.HasRowid)
         {
             return false;
         }
 
-        if (table.ForeignKeys.Count != 1)
-            return false;
-
-        var foreignKey = table.ForeignKeys[0];
-        if (!string.Equals(foreignKey.ParentTable, statement.TableName, StringComparison.OrdinalIgnoreCase)
-            || foreignKey.OnDelete is not (ForeignKeyAction.Cascade or ForeignKeyAction.SetNull))
-        {
-            return false;
-        }
-
-        foreach (var (_, candidateTable) in context.Tables)
+        // Collect every FK that treats the deleted table as parent.
+        string? childTableName = null;
+        EmbeddedTable? childTable = null;
+        ForeignKeyDefinition? foreignKey = null;
+        foreach (var (candidateName, candidateTable) in context.Tables)
         {
             foreach (var candidateForeignKey in candidateTable.ForeignKeys)
             {
-                if (string.Equals(
+                if (!string.Equals(
                         candidateForeignKey.ParentTable,
                         statement.TableName,
-                        StringComparison.OrdinalIgnoreCase)
-                    && !ReferenceEquals(candidateForeignKey, foreignKey))
+                        StringComparison.OrdinalIgnoreCase))
                 {
-                    return false;
+                    continue;
                 }
+
+                if (candidateForeignKey.OnDelete is not (ForeignKeyAction.Cascade or ForeignKeyAction.SetNull))
+                    return false;
+
+                if (foreignKey is not null)
+                    return false; // more than one action FK → evaluator
+
+                foreignKey = candidateForeignKey;
+                childTableName = candidateName;
+                childTable = candidateTable;
             }
         }
+
+        if (foreignKey is null || childTable is null || childTableName is null || !childTable.HasRowid)
+            return false;
 
         DmlRowFilter? filter = null;
         if (statement.Where is not null)
         {
-            filter = CompileDmlRowPredicate(statement.Where, table, statement.TableName, parameters, context);
+            filter = CompileDmlRowPredicate(
+                statement.Where,
+                parentTable,
+                statement.TableName,
+                parameters,
+                context);
             if (filter is null)
                 return false;
         }
 
-        var parent = ResolveForeignKeyParent(context.Tables, statement.TableName, foreignKey);
+        var parent = ResolveForeignKeyParent(context.Tables, childTableName, foreignKey);
         var parentRegisters = new Register[parent.ColumnIndices.Count];
         for (var index = 0; index < parentRegisters.Length; index++)
             parentRegisters[index] = new Register(index);
 
         var setNull = foreignKey.OnDelete == ForeignKeyAction.SetNull;
+        var selfReferential = string.Equals(
+            childTableName,
+            statement.TableName,
+            StringComparison.OrdinalIgnoreCase);
+
         var cascadeAction = VdbeSubprogram.CreateDeferred(
             parentRegisters.Length,
             binding => setNull
                 ? CreateCompiledSetNullWriteTargets(
                     context,
-                    statement.TableName,
-                    table,
+                    childTableName,
+                    childTable,
                     foreignKey,
                     parent,
                     binding)
                 : CreateCompiledCascadeWriteTargets(
                     context,
-                    statement.TableName,
-                    table,
+                    childTableName,
+                    childTable,
                     foreignKey,
                     parent,
                     binding));
-        // CASCADE may recurse (child delete re-enters the same Program). SET NULL only
-        // nulls direct children — no nested ProgramInstruction after each mutation.
-        var actionProgram = setNull
+        // Self-ref CASCADE may recurse (child delete re-enters the same Program). SET NULL and
+        // cross-table CASCADE only act on direct children — no nested Program after each mutation.
+        var actionProgram = setNull || !selfReferential
             ? DmlStatementCompiler.BuildProgramWithMutationPrograms(
-                DmlKind.Update,
-                statement.TableName,
-                table.Columns.Length,
+                setNull ? DmlKind.Update : DmlKind.Delete,
+                childTableName,
+                childTable.Columns.Length,
                 filter: null,
                 beforeMutation: Array.Empty<VdbeInstruction>(),
                 afterMutation: Array.Empty<VdbeInstruction>(),
@@ -19520,8 +19555,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 parameterSlotCount: parentRegisters.Length)
             : DmlStatementCompiler.BuildProgramWithMutationPrograms(
                 DmlKind.Delete,
-                statement.TableName,
-                table.Columns.Length,
+                childTableName,
+                childTable.Columns.Length,
                 filter: null,
                 CreateParentKeyCaptureInstructions(parent, parentRegisters),
                 [new ProgramInstruction(parentRegisters, cascadeAction)],
@@ -19529,8 +19564,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 parameterSlotCount: parentRegisters.Length);
         cascadeAction.Resolve(actionProgram);
 
-        var sourceRows = table.Rows.ToArray();
-        var sourceRowIds = table.RowIds.ToArray();
+        var sourceRows = parentTable.Rows.ToArray();
+        var sourceRowIds = parentTable.RowIds.ToArray();
         var writeTarget = new VdbeWriteTarget
         {
             TableName = statement.TableName,
@@ -19540,7 +19575,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             TryDeleteRow = index => DeleteCompiledCascadeRow(
                 context,
                 statement.TableName,
-                table,
+                parentTable,
                 sourceRowIds[index],
                 countAsCascade: false),
             Commit = () => null,
@@ -19548,7 +19583,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var program = DmlStatementCompiler.BuildProgramWithMutationPrograms(
             DmlKind.Delete,
             statement.TableName,
-            table.Columns.Length,
+            parentTable.Columns.Length,
             filter,
             CreateParentKeyCaptureInstructions(parent, parentRegisters),
             [new ProgramInstruction(parentRegisters, cascadeAction)],
@@ -21036,7 +21071,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 continue;
 
             var plan = new ManagedIndexScanPlan(source, table, index, search);
-            var score = ScoreManagedIndexPlan(plan, statement, ordered, scansOnlyPartialPredicate);
+            var score = ScoreManagedIndexPlan(
+                plan,
+                statement,
+                ordered,
+                scansOnlyPartialPredicate,
+                context);
             if (score > bestScore
                 || (score == bestScore
                     && best is not null
@@ -21053,12 +21093,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
     /// <summary>
     /// Heuristic access-method score (higher wins). Not a full cost model — enough to
     /// prefer multi-column equality prefixes and covering indexes over name order.
+    /// When ANALYZE has populated <c>sqlite_stat1</c>, equality SEARCH gains a selectivity
+    /// bonus from the leading-prefix average-rows figure (lower avg ⇒ higher score).
     /// </summary>
     private static int ScoreManagedIndexPlan(
         ManagedIndexScanPlan plan,
         SelectStatement statement,
         bool ordered,
-        bool scansOnlyPartialPredicate)
+        bool scansOnlyPartialPredicate,
+        QueryContext context)
     {
         var score = 0;
         if (plan.Search)
@@ -21067,6 +21110,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
             score += CountLeadingEqualityIndexTerms(statement.Where, plan.Table, plan.Index) * 100;
             if (WhereUsesIndexEqualityTerm(statement.Where, plan.Table, plan.Index.Columns[0]))
                 score += 50;
+
+            // sqlite_stat1: "N avg1 avg2 …" — avg1 is mean rows per distinct leading key.
+            if (TryGetSqliteStat1LeadingAverage(
+                    context,
+                    plan.Table.Name,
+                    plan.Index.Name,
+                    out var leadingAverage)
+                && leadingAverage > 0)
+            {
+                // Cap bonus so stats refine ranking without drowning structural signals.
+                score += Math.Min(300, 300 / leadingAverage);
+            }
         }
 
         if (ordered)
@@ -21081,6 +21136,56 @@ public sealed partial class EmbeddedDatabase : IDisposable
         // Prefer narrower keys when utility is otherwise equal.
         score -= plan.Index.Columns.Count;
         return score;
+    }
+
+    /// <summary>
+    /// Reads the leading-prefix average from <c>sqlite_stat1.stat</c> for
+    /// <paramref name="tableName"/> / <paramref name="indexName"/> when present.
+    /// </summary>
+    private static bool TryGetSqliteStat1LeadingAverage(
+        QueryContext context,
+        string tableName,
+        string indexName,
+        out int leadingAverage)
+    {
+        leadingAverage = 0;
+        if (!context.Tables.TryGetValue(SqliteStat1TableName, out var stat1)
+            || stat1.Columns.Length < 3)
+        {
+            return false;
+        }
+
+        // Columns: tbl, idx, stat
+        foreach (var row in stat1.Rows)
+        {
+            if (row.Length < 3
+                || row[0].Kind != SqlValueKind.Text
+                || row[1].Kind != SqlValueKind.Text
+                || row[2].Kind != SqlValueKind.Text)
+            {
+                continue;
+            }
+
+            if (!string.Equals(row[0].AsText(), tableName, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(row[1].AsText(), indexName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // Format: "rowCount avgPrefix1 avgPrefix2 …"
+            var parts = row[2].AsText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2)
+                return false;
+            if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out leadingAverage)
+                || leadingAverage <= 0)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     private static int CountLeadingEqualityIndexTerms(
@@ -22765,7 +22870,70 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (!TryCompileValues(values, out var compiled, out var slotParameterIndices))
             return false;
 
+        // Top-level multi-row VALUES is a production consumer of OpenEphemeral/EphemeralInsert.
+        // Single-row and compound-composed VALUES keep the cursor-less LoadConstant program.
+        if (values.Rows.Count > 1
+            && TryBuildEphemeralValuesProgram(values, out var ephemeralProgram, out var ephemeralSlots))
+        {
+            compiled = new CompiledSelect(
+                ephemeralProgram,
+                [new VdbeCursorSource([])],
+                ephemeralSlots);
+            slotParameterIndices = ephemeralSlots;
+        }
+
         lowering = new PreparedValuesLowering(compiled, slotParameterIndices, DescribeValues(values));
+        return true;
+    }
+
+    private static bool TryBuildEphemeralValuesProgram(
+        ValuesClause values,
+        out VdbeProgram program,
+        out IReadOnlyList<int> slotParameterIndices)
+    {
+        program = null!;
+        slotParameterIndices = [];
+        var parameterSlots = new Dictionary<int, int>();
+        var slotToParameter = new List<int>();
+        var cellRows = new List<IReadOnlyList<ValuesCell>>(values.Rows.Count);
+        foreach (var row in values.Rows)
+        {
+            var cells = new ValuesCell[row.Count];
+            for (var index = 0; index < row.Count; index++)
+            {
+                switch (row[index])
+                {
+                    case LiteralExpression literal:
+                        cells[index] = ValuesCell.Constant(literal.Value);
+                        break;
+                    case ParameterExpression parameter:
+                        if (!parameterSlots.TryGetValue(parameter.Index, out var slot))
+                        {
+                            slot = slotToParameter.Count;
+                            parameterSlots.Add(parameter.Index, slot);
+                            slotToParameter.Add(parameter.Index);
+                        }
+
+                        cells[index] = ValuesCell.Parameter(slot);
+                        break;
+                    default:
+                        return false;
+                }
+            }
+
+            cellRows.Add(cells);
+        }
+
+        try
+        {
+            program = ValuesProgramBuilder.BuildEphemeralCells(cellRows);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        slotParameterIndices = slotToParameter;
         return true;
     }
 
@@ -22848,6 +23016,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         VdbeProgram program;
         try
         {
+            // Shared lowering stays cursor-less so compound/LIMIT composition keeps working.
+            // Top-level multi-row VALUES switches to OpenEphemeral in TryPrepareValuesLowering.
             program = ValuesProgramBuilder.BuildCells(cellRows);
         }
         catch (ArgumentException exception)

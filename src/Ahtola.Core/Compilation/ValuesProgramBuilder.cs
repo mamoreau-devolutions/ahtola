@@ -95,6 +95,21 @@ public static class ValuesProgramBuilder
     }
 
     /// <summary>
+    /// Builds a multi-row VALUES-style stream that materializes rows into an
+    /// <see cref="OpenEphemeralInstruction"/> table, then Rewind/Next scans it.
+    /// Used for paths that own a dedicated cursor (not LimitOffset/compound composition).
+    /// </summary>
+    public static VdbeProgram BuildEphemeralCells(IReadOnlyList<IReadOnlyList<ValuesCell>> rows)
+    {
+        var (instructions, width, parameterSlotCount) = LowerEphemeral(rows);
+        return new VdbeProgram(
+            registerCount: width,
+            cursorCount: 1,
+            instructions,
+            parameterSlotCount: parameterSlotCount);
+    }
+
+    /// <summary>
     /// Builds the same program as <see cref="Build(IReadOnlyList{IReadOnlyList{SqlValue}})"/> wrapped as a
     /// <see cref="CompoundTerm"/> with an empty cursor-source list, so a <c>VALUES</c> row list can be
     /// sequenced directly by <see cref="CompoundProgramBuilder"/> (a source-less term iterates no cursors).
@@ -191,6 +206,70 @@ public static class ValuesProgramBuilder
             instructions.Add(new ResultRowInstruction(outputRange));
         }
 
+        instructions.Add(new HaltInstruction());
+        return (instructions, width, maxSlot + 1);
+    }
+
+    private static (List<VdbeInstruction> Instructions, int Width, int ParameterSlotCount) LowerEphemeral(
+        IReadOnlyList<IReadOnlyList<ValuesCell>> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        if (rows.Count == 0)
+            throw new ArgumentException("A VALUES program needs at least one row.", nameof(rows));
+
+        var width = -1;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i]
+                ?? throw new ArgumentException($"VALUES row {i} must not be null.", nameof(rows));
+            if (width < 0)
+            {
+                width = row.Count;
+                if (width == 0)
+                    throw new ArgumentException("A VALUES row must have at least one term.", nameof(rows));
+            }
+            else if (row.Count != width)
+            {
+                throw new ArgumentException(
+                    $"all VALUES must have the same number of terms (row 0 has {width}, row {i} has {row.Count}).",
+                    nameof(rows));
+            }
+        }
+
+        var cursor = new Cursor(0);
+        var outputRange = new RegisterRange(new Register(0), width);
+        var maxSlot = -1;
+        var instructions = new List<VdbeInstruction>(checked(1 + rows.Count * (width + 1) + width + 5));
+        instructions.Add(new OpenEphemeralInstruction(cursor, width));
+        foreach (var row in rows)
+        {
+            for (var column = 0; column < width; column++)
+            {
+                var cell = row[column];
+                var destination = new Register(column);
+                if (cell.IsParameter)
+                {
+                    if (cell.Slot.Index > maxSlot)
+                        maxSlot = cell.Slot.Index;
+                    instructions.Add(new LoadParameterInstruction(destination, cell.Slot));
+                }
+                else
+                {
+                    instructions.Add(new LoadConstantInstruction(destination, cell.Value));
+                }
+            }
+
+            instructions.Add(new EphemeralInsertInstruction(cursor, outputRange));
+        }
+
+        var columnStart = instructions.Count + 1;
+        var closeIndex = columnStart + width + 2;
+        instructions.Add(new RewindCursorInstruction(cursor, new ProgramCounter(closeIndex)));
+        for (var column = 0; column < width; column++)
+            instructions.Add(new ColumnInstruction(cursor, column, new Register(column)));
+        instructions.Add(new ResultRowInstruction(outputRange));
+        instructions.Add(new NextInstruction(cursor, new ProgramCounter(columnStart)));
+        instructions.Add(new CloseCursorInstruction(cursor));
         instructions.Add(new HaltInstruction());
         return (instructions, width, maxSlot + 1);
     }

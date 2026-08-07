@@ -769,6 +769,27 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
+    public void AccessMethodPrefersSelectiveIndexUsingSqliteStat1()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b INT, c TEXT);");
+        Execute(connection, "CREATE INDEX idx_a ON t(a);");
+        Execute(connection, "CREATE INDEX idx_b ON t(b);");
+        // Many distinct a values (selective), few distinct b values (unselective).
+        for (var i = 1; i <= 40; i++)
+            Execute(connection, $"INSERT INTO t VALUES ({i}, {(i % 2) + 1}, 'r{i}');");
+        Execute(connection, "ANALYZE;");
+
+        // With both predicates either index is SEARCH-able; stat1 leading-avg should prefer
+        // selective idx_a (avg≈1) over unselective idx_b (avg≈20).
+        var planBoth = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT c FROM t WHERE a = 7 AND b = 1;");
+        planBoth.Should().ContainSingle();
+        planBoth[0][3].AsText().Should().Contain("USING INDEX idx_a");
+        planBoth[0][3].AsText().Should().NotContain("idx_b");
+    }
+
+    [Test]
     public void CoveringIndexIsReportedInExplainQueryPlan()
     {
         var database = new EmbeddedDatabase();

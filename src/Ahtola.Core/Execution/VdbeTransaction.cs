@@ -55,6 +55,12 @@ public sealed class VdbeTransactionContext
 
     private readonly List<SavepointFrame> _frames = [];
 
+    /// <summary>
+    /// Connection/statement-transaction deferred foreign-key violation counter (SQLite deferred FK).
+    /// Survives statement reset while <see cref="InTransaction"/>; cleared on commit/rollback.
+    /// </summary>
+    public int DeferredForeignKeyViolations { get; set; }
+
     /// <summary>Whether a transaction is currently open (at least one frame on the stack).</summary>
     public bool InTransaction => _frames.Count > 0;
 
@@ -99,7 +105,16 @@ public sealed class VdbeTransactionContext
         if (!InTransaction)
             throw new VdbeTransactionException("cannot commit - no transaction is active");
 
+        if (DeferredForeignKeyViolations != 0)
+        {
+            throw new EmbeddedSqlException(
+                "FOREIGN KEY constraint failed",
+                SqliteResultCode.ConstraintForeignKey,
+                InsertConflictAlgorithm.Abort);
+        }
+
         _frames.Clear();
+        DeferredForeignKeyViolations = 0;
     }
 
     /// <summary>Rolls the active transaction back, restoring the outermost snapshot into
@@ -112,6 +127,7 @@ public sealed class VdbeTransactionContext
 
         Restore(registers, _frames[0].Snapshot);
         _frames.Clear();
+        DeferredForeignKeyViolations = 0;
     }
 
     /// <summary>Releases the named savepoint and every frame above it without restoring registers.</summary>
@@ -142,7 +158,11 @@ public sealed class VdbeTransactionContext
     }
 
     /// <summary>Clears all frames, abandoning any open transaction. Used by statement reset/dispose.</summary>
-    public void Reset() => _frames.Clear();
+    public void Reset()
+    {
+        _frames.Clear();
+        DeferredForeignKeyViolations = 0;
+    }
 
     private int FindTopmost(string name)
     {

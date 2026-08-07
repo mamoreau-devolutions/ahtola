@@ -435,15 +435,32 @@ public sealed class ResumableStatement : IDisposable
                 case FkCounterInstruction fkCounter:
                     {
                         if (fkCounter.Deferred)
-                            _fkDeferredViolations = checked(_fkDeferredViolations + fkCounter.Increment);
+                        {
+                            // Deferred counters live on the transaction while one is open so they
+                            // survive statement Reset and are checked at Commit.
+                            if (_transaction.InTransaction)
+                            {
+                                _transaction.DeferredForeignKeyViolations = checked(
+                                    _transaction.DeferredForeignKeyViolations + fkCounter.Increment);
+                            }
+                            else
+                            {
+                                _fkDeferredViolations = checked(_fkDeferredViolations + fkCounter.Increment);
+                            }
+                        }
                         else
+                        {
                             _fkImmediateViolations = checked(_fkImmediateViolations + fkCounter.Increment);
+                        }
+
                         AdvanceInstructionPointer();
                         break;
                     }
                 case FkIfZeroInstruction fkIfZero:
                     {
-                        var count = fkIfZero.Deferred ? _fkDeferredViolations : _fkImmediateViolations;
+                        var count = fkIfZero.Deferred
+                            ? GetDeferredForeignKeyViolations()
+                            : _fkImmediateViolations;
                         if (count == 0)
                             _instructionPointer = fkIfZero.Target;
                         else
@@ -452,7 +469,17 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case FkCheckInstruction fkCheck:
                     {
-                        var count = fkCheck.Deferred ? _fkDeferredViolations : _fkImmediateViolations;
+                        // Deferred checks inside a transaction are deferred to Commit; only
+                        // autocommit statements enforce deferred counters at statement end.
+                        if (fkCheck.Deferred && _transaction.InTransaction)
+                        {
+                            AdvanceInstructionPointer();
+                            break;
+                        }
+
+                        var count = fkCheck.Deferred
+                            ? GetDeferredForeignKeyViolations()
+                            : _fkImmediateViolations;
                         if (count != 0)
                         {
                             throw new EmbeddedSqlException(
@@ -1341,8 +1368,8 @@ public sealed class ResumableStatement : IDisposable
         _instructionPointer = default;
         _hasExecutedInstruction = false;
         _fkImmediateViolations = 0;
-        // Deferred FK violations survive statement Reset within a transaction, matching
-        // SQLite's database-level deferred counter. Clear only when not in a transaction.
+        // Deferred FK violations live on the transaction while open; the statement-local
+        // copy is only used in autocommit and is cleared on every Reset.
         if (!_transaction.InTransaction)
             _fkDeferredViolations = 0;
         RowsAffected = 0;
@@ -1352,6 +1379,11 @@ public sealed class ResumableStatement : IDisposable
         // parameters. Rebind replaces it explicitly.
         State = ResumableStatementState.Ready;
     }
+
+    private int GetDeferredForeignKeyViolations()
+        => _transaction.InTransaction
+            ? _transaction.DeferredForeignKeyViolations
+            : _fkDeferredViolations;
 
     /// <summary>
     /// Replaces the statement's parameter binding, so the next run reads fresh late-bound values without

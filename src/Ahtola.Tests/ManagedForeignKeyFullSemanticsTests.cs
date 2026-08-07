@@ -331,6 +331,21 @@ public sealed class ManagedForeignKeyFullSemanticsTests
     }
 
     [Test]
+    public void CrossTableCascadeOnDeleteMatchesSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "PRAGMA foreign_keys = ON",
+                "CREATE TABLE parent(id INTEGER PRIMARY KEY)",
+                "CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) ON DELETE CASCADE)",
+                "INSERT INTO parent VALUES (1), (2)",
+                "INSERT INTO child VALUES (10, 1), (11, 1), (20, 2)",
+                "DELETE FROM parent WHERE id = 1",
+            ],
+            "SELECT id, parent_id FROM child ORDER BY id");
+    }
+
+    [Test]
     public void SelfReferentialCascadeOnUpdateMatchesSqlite()
     {
         AssertMatchesSqlite(

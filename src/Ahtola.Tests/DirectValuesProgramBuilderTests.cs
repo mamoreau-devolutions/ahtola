@@ -52,6 +52,34 @@ public class DirectValuesProgramBuilderTests
     }
 
     [Test]
+    public void BuildEphemeralCellsMaterializesMultiRowValues()
+    {
+        var cells = new IReadOnlyList<ValuesCell>[]
+        {
+            [ValuesCell.Constant(SqlValue.Integer(1)), ValuesCell.Constant(SqlValue.Text("a"))],
+            [ValuesCell.Constant(SqlValue.Integer(2)), ValuesCell.Constant(SqlValue.Text("b"))],
+        };
+        var program = ValuesProgramBuilder.BuildEphemeralCells(cells);
+
+        Opcodes(program).Should().ContainInOrder(
+            VdbeOpcode.OpenEphemeral,
+            VdbeOpcode.EphemeralInsert,
+            VdbeOpcode.EphemeralInsert,
+            VdbeOpcode.Rewind,
+            VdbeOpcode.ResultRow,
+            VdbeOpcode.Next,
+            VdbeOpcode.CloseCursor,
+            VdbeOpcode.Halt);
+        program.CursorCount.Should().Be(1);
+
+        using var statement = new ResumableStatement(program, cursorSources: null);
+        var rows = new List<(long, string)>();
+        while (statement.StepResumable() == ResumableStatementStepResult.Row)
+            rows.Add((statement.CurrentRow![0].AsInteger(), statement.CurrentRow[1].AsText()));
+        rows.Should().Equal((1L, "a"), (2L, "b"));
+    }
+
+    [Test]
     public void BuildLoadsEachCellValueInColumnOrder()
     {
         var program = ValuesProgramBuilder.Build(Rows(
