@@ -23,11 +23,12 @@ public sealed class SqliteWalReadSnapshotBusyException : InvalidOperationExcepti
 /// physical WAL and shared-memory artifacts.
 /// </summary>
 /// <remarks>
-/// This component is intentionally not connected to <see cref="SqlitePager"/>.
-/// It pins a validated committed WAL frame boundary under a real shared
-/// <c>WAL_READ_LOCK</c>, but it does not own managed main-file ownership,
-/// recovery, cache invalidation, WAL writes, or checkpointing. Callers must not
-/// treat it as concurrent managed-pager or stock-SQLite interoperability.
+/// The physical <see cref="SqlitePager"/> may compose this coordinator for
+/// Stage 2 read-mark pinning under Stage 0 ownership. Detached construction
+/// (over SQLite-produced artifacts without a pager) remains supported for
+/// protocol tests. This type still does not relax main-file ownership, perform
+/// recovery/checkpoint, or establish stock-SQLite concurrent interoperability
+/// by itself — Stages 3–6 remain separate.
 /// </remarks>
 public sealed class SqliteWalReadSnapshotCoordinator : IDisposable
 {

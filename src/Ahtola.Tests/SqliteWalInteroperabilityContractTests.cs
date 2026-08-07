@@ -70,6 +70,37 @@ public class SqliteWalInteroperabilityContractTests
 
     [Test]
     [NonParallelizable]
+    public void ManagedReadersPinSharedWalIndexReadMarks()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x41));
+
+            using var first = pager.BeginReadTransaction();
+            using var second = pager.BeginReadTransaction();
+
+            first.WalIndexReadMarkIndex.Should().NotBeNull();
+            second.WalIndexReadMarkIndex.Should().NotBeNull();
+            first.WalIndexMaximumFrame.Should().Be(second.WalIndexMaximumFrame);
+            first.WalIndexMaximumFrame.Should().BeGreaterThan(0u);
+            first.ReadPage(2)[0].Should().Be(0x41);
+            second.ReadPage(2)[0].Should().Be(0x41);
+
+            // Writers still proceed while readers hold shared marks.
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x42));
+            first.ReadPage(2)[0].Should().Be(0x41, "pinned Stage 2 snapshots must not observe later commits");
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
     public void ManagedWriterClaimsSqliteWalWriteLockByte()
     {
         var workDirectory = CreateWorkDirectory();
@@ -263,17 +294,21 @@ public class SqliteWalInteroperabilityContractTests
         {
             var databasePath = Path.Combine(workDirectory, "main.db");
             using var pager = CreatePhysicalPager(databasePath);
+            // Nonzero mxFrame uses writable marks 1..4 (bytes 124-127). Mark 0
+            // (byte 123) is reserved for fully backfilled database-only snapshots.
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x47));
             using var probe = OpenSharedMemoryLockCarrier(databasePath);
 
             using var holder = HoldSharedMemoryRanges(
                 workDirectory,
                 databasePath,
-                $"{FirstReadMarkLockOffset}:1");
+                $"{FirstReadMarkLockOffset + 1}:1");
             using var reader = pager.BeginReadTransaction(TimeSpan.Zero);
+            reader.WalIndexReadMarkIndex.Should().Be(2);
 
-            Assert.Throws<IOException>(() => LockRange(probe, FirstReadMarkLockOffset + 1, 1));
-            LockRange(probe, FirstReadMarkLockOffset + 2, 1);
-            UnlockRange(probe, FirstReadMarkLockOffset + 2, 1);
+            Assert.Throws<IOException>(() => LockRange(probe, FirstReadMarkLockOffset + 2, 1));
+            LockRange(probe, FirstReadMarkLockOffset + 3, 1);
+            UnlockRange(probe, FirstReadMarkLockOffset + 3, 1);
         }
         finally
         {

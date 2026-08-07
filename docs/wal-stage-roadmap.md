@@ -17,14 +17,14 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 
 | Piece | Status |
 | --- | --- |
-| Stage 0 process-exclusive ownership + lock-only zero-length `-shm` | **Live** on physical pager |
-| Stage 1 format + `PhysicalSqliteWalSharedMemoryMapping` + `SqliteWalIndexSharedMemory` | **Detached** (tests only) |
-| Stage 2 `SqliteWalReadSnapshotCoordinator` | **Detached** |
-| Stage 3 `SqliteWalWriterCheckpointCoordinator` | **Detached** |
+| Stage 0 process-exclusive ownership | **Live** on physical pager |
+| Stage 1 WAL-index mapped + published from pager | **Attached** (under ownership) |
+| Stage 2 read marks via `SqliteWalReadSnapshotCoordinator` | **Attached** for physical WAL readers |
+| Stage 3 `SqliteWalWriterCheckpointCoordinator` | **Detached** (next) |
 | Stages 4–6 | Not started |
 | Foreign read-only guest (§1.9) | Live; not full interop |
 
-**Pager gate (contract § Stage 1 remaining):** attach reader protocol, writer/checkpointer coordination, and differential stress while mechanisms are on the pager.
+**Pager gate:** Stage 3 writer/checkpointer attach, then Stages 4–6; no stock-SQLite concurrent interop until Stage 6.
 
 ---
 
@@ -71,9 +71,11 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 
 **Exit criteria**
 
-- [ ] Multiple managed readers coexist on the same mark.
-- [ ] Snapshot boundary is the mark’s `mxFrame`, not a later writer append.
-- [ ] Ownership still exclusive for production opens.
+- [x] Multiple managed readers coexist on the same mark.
+- [x] Snapshot boundary is the mark’s `mxFrame`, not a later writer append.
+- [x] Ownership still exclusive for production opens.
+
+**Landed:** physical pager `BeginReadTransaction` uses `SqliteWalReadSnapshotCoordinator` when a Stage 1 index is attached; overlay is pinned (or rebuilt) to the mark; busy maps to `SqlitePagerBusyException`.
 
 **Deferred to Stage 6 tests:** true managed+SQLite reader coexistence on one mark (requires no ownership).
 

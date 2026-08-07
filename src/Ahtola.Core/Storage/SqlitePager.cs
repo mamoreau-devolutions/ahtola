@@ -86,6 +86,8 @@ public sealed class SqlitePager : IDisposable
     private readonly bool _foreignReadOnly;
     private ISqliteWalSharedMemoryMapping? _walIndexMapping;
     private SqliteWalIndexSharedMemory? _walIndex;
+    private SqliteWalByteRangeLock? _walIndexLocks;
+    private SqliteWalReadSnapshotCoordinator? _readSnapshotCoordinator;
 
     private SqlitePager(
         IFileSystem fileSystem,
@@ -660,10 +662,16 @@ public sealed class SqlitePager : IDisposable
     /// <summary>
     /// Begins a stable committed snapshot. Readers do not block the WAL writer,
     /// but an active snapshot prevents a checkpoint from installing its pages.
+    /// Physical Stage 1+ pagers pin the boundary through a real SQLite read mark
+    /// (Stage 2) while Stage 0 ownership remains in force.
     /// </summary>
     public SqlitePagerReadTransaction BeginReadTransaction(TimeSpan? busyTimeout = null)
     {
-        var readerLock = _lockManager.EnterReader(ResolveBusyTimeout(busyTimeout), IsReadOnly);
+        var timeout = ResolveBusyTimeout(busyTimeout);
+        if (UsesWalIndexReadMarks())
+            return BeginReadTransactionWithWalIndexReadMark(timeout);
+
+        var readerLock = _lockManager.EnterReader(timeout, IsReadOnly);
         try
         {
             lock (_gate)
@@ -673,6 +681,7 @@ public sealed class SqlitePager : IDisposable
                 var transaction = new SqlitePagerReadTransaction(
                     this,
                     readerLock,
+                    walIndexSnapshot: null,
                     _committedPageCount,
                     new Dictionary<uint, byte[]>(_walPageOverlay),
                     _lockGeneration);
@@ -684,6 +693,92 @@ public sealed class SqlitePager : IDisposable
         {
             readerLock.Dispose();
             throw;
+        }
+    }
+
+    private bool UsesWalIndexReadMarks()
+    {
+        lock (_gate)
+        {
+            return _walIndex is not null
+                && _wal is not null
+                && _journalMode == SqliteJournalMode.Wal
+                && !_foreignReadOnly
+                && _lockManager.UsesFileBackedWalLocks;
+        }
+    }
+
+    private SqlitePagerReadTransaction BeginReadTransactionWithWalIndexReadMark(TimeSpan timeout)
+    {
+        var stopwatch = timeout == Timeout.InfiniteTimeSpan ? null : Stopwatch.StartNew();
+        while (true)
+        {
+            lock (_gate)
+            {
+                ThrowIfNotReadable();
+                SynchronizeCommittedView();
+                EnsureReadSnapshotCoordinatorLocked();
+            }
+
+            SqliteWalReadSnapshot snapshot;
+            try
+            {
+                snapshot = _readSnapshotCoordinator!.BeginRead(
+                    SqlitePagerLockManager.RemainingFileLockTimeout(timeout, stopwatch));
+            }
+            catch (SqliteWalReadSnapshotBusyException exception)
+            {
+                throw new SqlitePagerBusyException(SqlitePagerLockOperation.Reader, timeout, exception);
+            }
+
+            try
+            {
+                lock (_gate)
+                {
+                    ThrowIfNotReadable();
+                    SynchronizeCommittedView();
+                    EnsureReadSnapshotCoordinatorLocked();
+
+                    IReadOnlyDictionary<uint, byte[]> overlay;
+                    uint pageCount;
+                    if (snapshot.MaximumFrame == 0)
+                    {
+                        pageCount = _pageStore.PageCount;
+                        overlay = new Dictionary<uint, byte[]>();
+                    }
+                    else if (snapshot.MaximumFrame == (uint)_committedFrameCount
+                             && snapshot.DatabasePageCount == _committedPageCount)
+                    {
+                        pageCount = _committedPageCount;
+                        overlay = new Dictionary<uint, byte[]>(_walPageOverlay);
+                    }
+                    else if (snapshot.MaximumFrame < (uint)_committedFrameCount)
+                    {
+                        pageCount = snapshot.DatabasePageCount;
+                        overlay = BuildWalPageOverlayThroughFrame(snapshot.MaximumFrame, pageCount);
+                    }
+                    else
+                    {
+                        snapshot.Dispose();
+                        continue;
+                    }
+
+                    var transaction = new SqlitePagerReadTransaction(
+                        this,
+                        readerLock: null,
+                        snapshot,
+                        pageCount,
+                        overlay,
+                        _lockGeneration);
+                    _activeReadTransactions.Add(transaction);
+                    return transaction;
+                }
+            }
+            catch
+            {
+                snapshot.Dispose();
+                throw;
+            }
         }
     }
 
@@ -2008,9 +2103,58 @@ public sealed class SqlitePager : IDisposable
 
     private void DisposeWalIndex()
     {
+        _readSnapshotCoordinator?.Dispose();
+        _readSnapshotCoordinator = null;
+        _walIndexLocks = null;
         _walIndex = null;
         _walIndexMapping?.Dispose();
         _walIndexMapping = null;
+    }
+
+    private void EnsureReadSnapshotCoordinatorLocked()
+    {
+        if (_readSnapshotCoordinator is not null || _walIndex is null || _wal is null)
+            return;
+
+        _walIndexLocks = new SqliteWalByteRangeLock(_sharedMemoryPath);
+        _readSnapshotCoordinator = new SqliteWalReadSnapshotCoordinator(
+            _wal,
+            _walIndex,
+            _walIndexLocks);
+    }
+
+    private Dictionary<uint, byte[]> BuildWalPageOverlayThroughFrame(uint maximumFrame, uint databasePageCount)
+    {
+        var wal = RequireWal();
+        var overlay = new Dictionary<uint, byte[]>();
+        var transactionPages = new Dictionary<uint, byte[]>();
+        uint lastCommitPageCount = 0;
+        for (var frameNumber = 1U; frameNumber <= maximumFrame; frameNumber++)
+        {
+            var frame = wal.ReadFrame(frameNumber);
+            transactionPages[frame.Header.PageNumber] = frame.PageData;
+            if (!frame.Header.IsCommit)
+                continue;
+
+            foreach (var pair in transactionPages)
+                overlay[pair.Key] = pair.Value;
+            lastCommitPageCount = frame.Header.DatabaseSizeInPages;
+            transactionPages.Clear();
+        }
+
+        if (transactionPages.Count != 0)
+        {
+            throw new InvalidDataException(
+                "SQLite WAL read-mark boundary stopped inside an uncommitted transaction.");
+        }
+
+        if (lastCommitPageCount != databasePageCount)
+        {
+            throw new InvalidDataException(
+                "SQLite WAL read-mark page count does not match its commit boundary.");
+        }
+
+        return overlay;
     }
 
     private void ValidatePageOneImage(
@@ -2250,16 +2394,22 @@ public sealed class SqlitePagerReadTransaction : IDisposable
     private readonly IReadOnlyDictionary<uint, byte[]> _walPageOverlay;
     private readonly long _cacheGeneration;
     private SqlitePagerLockLease? _readerLock;
+    private SqliteWalReadSnapshot? _walIndexSnapshot;
 
     internal SqlitePagerReadTransaction(
         SqlitePager pager,
-        SqlitePagerLockLease readerLock,
+        SqlitePagerLockLease? readerLock,
+        SqliteWalReadSnapshot? walIndexSnapshot,
         uint pageCount,
         IReadOnlyDictionary<uint, byte[]> walPageOverlay,
         long cacheGeneration)
     {
+        if (readerLock is null && walIndexSnapshot is null)
+            throw new ArgumentException("A SQLite pager read transaction requires a reader lock or WAL-index snapshot.");
+
         _pager = pager;
         _readerLock = readerLock;
+        _walIndexSnapshot = walIndexSnapshot;
         PageCount = pageCount;
         _walPageOverlay = walPageOverlay;
         _cacheGeneration = cacheGeneration;
@@ -2274,7 +2424,27 @@ public sealed class SqlitePagerReadTransaction : IDisposable
         get
         {
             lock (_gate)
-                return _readerLock is not null;
+                return _readerLock is not null || _walIndexSnapshot is not null;
+        }
+    }
+
+    /// <summary>Stage 2: pinned WAL-index read-mark slot, when used.</summary>
+    internal int? WalIndexReadMarkIndex
+    {
+        get
+        {
+            lock (_gate)
+                return _walIndexSnapshot?.ReadMarkIndex;
+        }
+    }
+
+    /// <summary>Stage 2: pinned committed frame boundary, when used.</summary>
+    internal uint? WalIndexMaximumFrame
+    {
+        get
+        {
+            lock (_gate)
+                return _walIndexSnapshot?.MaximumFrame;
         }
     }
 
@@ -2283,7 +2453,7 @@ public sealed class SqlitePagerReadTransaction : IDisposable
     {
         lock (_gate)
         {
-            if (_readerLock is null)
+            if (_readerLock is null && _walIndexSnapshot is null)
                 throw new ObjectDisposedException(nameof(SqlitePagerReadTransaction));
 
             return _pager.ReadSnapshotPage(_walPageOverlay, PageCount, _cacheGeneration, pageNumber);
@@ -2294,15 +2464,19 @@ public sealed class SqlitePagerReadTransaction : IDisposable
     public void Dispose()
     {
         SqlitePagerLockLease? readerLock;
+        SqliteWalReadSnapshot? walIndexSnapshot;
         lock (_gate)
         {
             readerLock = _readerLock;
+            walIndexSnapshot = _walIndexSnapshot;
             _readerLock = null;
-            if (readerLock is null)
+            _walIndexSnapshot = null;
+            if (readerLock is null && walIndexSnapshot is null)
                 return;
 
             _pager.EndReadTransaction(this);
-            readerLock.Dispose();
+            readerLock?.Dispose();
+            walIndexSnapshot?.Dispose();
         }
     }
 
@@ -2311,8 +2485,11 @@ public sealed class SqlitePagerReadTransaction : IDisposable
         lock (_gate)
         {
             var readerLock = _readerLock;
+            var walIndexSnapshot = _walIndexSnapshot;
             _readerLock = null;
+            _walIndexSnapshot = null;
             readerLock?.Dispose();
+            walIndexSnapshot?.Dispose();
         }
     }
 }
