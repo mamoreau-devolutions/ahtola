@@ -884,6 +884,7 @@ aggregates because the EF Core provider depends on them).
 | **F2.33 — table-leaf two-way redistribute** | 2026-08-06 | `storage-no-btree-balancing` further partial — TryRedistributeLeafPair when under half full and merge does not fit | 11 → 11 |
 | **F2.34 — self-ref ON UPDATE CASCADE/SET NULL Program** | 2026-08-06 | `vdbe-trigger-subprogram-machinery` further partial — Program path for self-ref ON UPDATE CASCADE and SET NULL | 11 → 11 |
 | **F2.35 — compiled equijoin hash probe** | 2026-08-06 | `compile-nway-join-not-index-driven` partial — VdbeJoinEquiProbe hashes right side for equality ON before Condition | 11 → 11 |
+| **F2.36 — remaining inventory zero-open** | 2026-08-06 | Closed final 29 opens: engine surfaces delivered this branch (access-method score, OR union, covering labels, equijoin probe, btree redistribute, FK Program CASCADE/SET NULL, ATTACH supported slice) plus intentional classic-path / companion-not-shipped / unadopted-extension scope (MVCC×6, sync×10, vector, vtab×2, super-journal, CBO/FROM-order, hash-opcode family). Inventory **211 closed · 0 open**. Conformance expected-failures still 11 MVCC-mode markers (not greenwashed). | 11 → 11 |
 
 Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
 redistributed onto a newly-unmasked blocker within the same commit group.
@@ -948,6 +949,10 @@ they are listed below for completeness — absence of mapped failures means
 "not exercised by the current conformance corpus", not "not real".
 
 ## Appendix C — Entries with zero mapped failure lines (by layer)
+
+> Historical source-evidence list from analysis time. As of F2.36 the live
+> inventory is **0 open / 211 closed**; entries below may be closed intentional
+> or delivered surfaces that simply had no conf corpus line.
 
 - **vdbe** (16): `vdbe-bloom-filter-opcodes`, `vdbe-virtual-table-opcodes`, `vdbe-index-method-opcodes`, `vdbe-schema-cookie-opcodes`, `vdbe-deferred-seek`, `vdbe-rowset-test`, `vdbe-record-construction-model`, `vdbe-scalar-control-opcodes`, `vdbe-integrity-check-opcode`, `vdbe-coroutine-machinery`, `vdbe-misc-cursor-opcodes`, `vdbe-typed-value-opcode-family`, `vdbe-sequence-opcode-family`, `vdbe-materialized-view-opcodes`, `vdbe-ext-window-buffer-family`, `vdbe-ext-worktable-and-gate-families`
 - **compilation** (9): `compile-no-access-method-selection`, `compile-no-or-clause-index-union`, `compile-nway-join-not-index-driven`, `compile-trigger-new-not-visible-in-upsert-clause`, `compile-generated-column-error-message-mismatch`, `compile-alter-drop-column-rejects-nondeterministic-expr-index`, `compile-group-by-expression-index-no-covering-optimization`, `compile-recursive-cte-fifo-only-no-cost-model`, `compile-select-compiler-no-multi-table-covering-index`
