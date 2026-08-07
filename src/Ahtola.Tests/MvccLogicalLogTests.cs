@@ -37,6 +37,31 @@ public sealed class MvccLogicalLogTests
     }
 
     [Test]
+    public void TruncateAfterCheckpointDropsFrames()
+    {
+        var fs = new InMemoryFileSystem();
+        const string dbPath = "mvcc-ckpt.db";
+
+        using (var log = MvccLogicalLog.CreateOrOpen(fs, dbPath))
+        {
+            var store = new MvStore(logicalLog: log);
+            var table = store.GetOrCreateTableId("t");
+            var tx = store.BeginTransaction();
+            store.Insert(tx.Id, new MvccRowId(table, 1), [SqlValue.Integer(1)]);
+            store.Commit(tx.Id);
+            log.Offset.Should().BeGreaterThan(56);
+            log.TruncateAfterCheckpoint();
+            log.Offset.Should().Be(56);
+        }
+
+        using var reopened = MvccLogicalLog.CreateOrOpen(fs, dbPath);
+        var recovered = new MvStore();
+        reopened.ReplayInto(recovered);
+        var reader = recovered.BeginTransaction();
+        recovered.ScanVisible(reader.Id).Should().BeEmpty();
+    }
+
+    [Test]
     public void DeleteOpsReplayAsTombstones()
     {
         var fs = new InMemoryFileSystem();

@@ -43875,6 +43875,18 @@ public sealed class EmbeddedConnection : IDisposable
         }
 
         ValidatePragmaSchema(statement.Schema);
+        var database = ResolvePragmaDatabase(statement.Schema);
+        // After a TRUNCATE/RESTART-style checkpoint, discard MVCC logical-log frames
+        // that have been "materialized" (Phase 2: catalog already holds committed
+        // rows for classic path; full b-tree SM lands later).
+        if (database.IsMvccEnabled
+            && statement.Mode is { } checkpointMode
+            && (checkpointMode.Equals("TRUNCATE", StringComparison.OrdinalIgnoreCase)
+                || checkpointMode.Equals("RESTART", StringComparison.OrdinalIgnoreCase)))
+        {
+            database.MvStore?.LogicalLog?.TruncateAfterCheckpoint();
+        }
+
         // The managed engine commits inline and keeps no persistent WAL frames,
         // so every checkpoint completes trivially with nothing left in the log.
         return new ExecutionResult(columns, [[SqlValue.Integer(0), SqlValue.Integer(0), SqlValue.Integer(0)]], 0);
