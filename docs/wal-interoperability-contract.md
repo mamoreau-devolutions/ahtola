@@ -143,9 +143,10 @@ Phase 1 scope and limits:
 - Classic catalog DML still mutates `EmbeddedDatabase` table snapshots; full
   row-version chains and dual-cursor isolation land in later phases.
 - File-backed MVCC keeps a WAL open underneath for page durability (matching
-  Turso). The on-disk header version `255` marker and durable logical log
-  (`db-log`) are **not** persisted yet — reopen falls back to classic WAL until
-  Phase 2.
+  Turso). A durable logical log (`<db>-log`, Turso LML2/MVTX framing) is written
+  on `MvStore` commits and replayed when MVCC is re-enabled. The on-disk SQLite
+  header version `255` marker and checkpoint-into-b-tree SM are **not** complete
+  yet — a cold open without re-enabling MVCC still reports classic WAL.
 - `PRAGMA temp.journal_mode=mvcc` is ignored (temp stays `wal`), matching Turso.
 - MVCC is process-local and does not replace Stage 6 WAL interop. Cross-process
   MVCC is unsupported (same as Turso v0.7.2).

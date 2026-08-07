@@ -25,6 +25,7 @@ internal sealed class MvccTransaction
 {
     private readonly object _gate = new();
     private readonly HashSet<MvccRowId> _writeSet = [];
+    private readonly List<MvccLogOp> _logOps = [];
     private MvccTransactionState _state = MvccTransactionState.Active;
     private ulong? _commitTimestamp;
 
@@ -57,10 +58,26 @@ internal sealed class MvccTransaction
         }
     }
 
+    internal void RecordLogOp(MvccLogOp op)
+    {
+        lock (_gate)
+        {
+            ThrowIfNotActive();
+            _writeSet.Add(op.RowId);
+            _logOps.Add(op);
+        }
+    }
+
     internal IReadOnlyCollection<MvccRowId> SnapshotWriteSet()
     {
         lock (_gate)
             return _writeSet.ToArray();
+    }
+
+    internal IReadOnlyList<MvccLogOp> SnapshotLogOps()
+    {
+        lock (_gate)
+            return _logOps.ToArray();
     }
 
     internal void MarkPreparing(ulong commitTimestamp)
@@ -118,13 +135,66 @@ internal sealed class MvStore
     private ulong _nextTxId = 1;
     private ulong _nextVersionId = 1;
     private ulong? _exclusiveTxId;
+    private MvccLogicalLog? _logicalLog;
 
-    internal MvStore(ILogicalClock? clock = null)
+    internal MvStore(ILogicalClock? clock = null, MvccLogicalLog? logicalLog = null)
     {
         _clock = clock ?? new MvccClock();
+        _logicalLog = logicalLog;
     }
 
     internal ILogicalClock Clock => _clock;
+
+    internal MvccLogicalLog? LogicalLog => _logicalLog;
+
+    /// <summary>Attach durable log after construction (file-backed enable path).</summary>
+    internal void AttachLogicalLog(MvccLogicalLog log)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        lock (_gate)
+            _logicalLog = log;
+    }
+
+    /// <summary>Replay a recovered commit frame into the version store.</summary>
+    internal void ApplyRecoveredCommit(ulong commitTs, IReadOnlyList<MvccLogOp> ops)
+    {
+        ArgumentNullException.ThrowIfNull(ops);
+        lock (_gate)
+        {
+            foreach (var op in ops)
+            {
+                if (!_rows.TryGetValue(op.RowId, out var chain))
+                {
+                    chain = [];
+                    _rows[op.RowId] = chain;
+                }
+
+                if (op.IsDelete)
+                {
+                    // End the latest live version at commitTs.
+                    for (var i = chain.Count - 1; i >= 0; i--)
+                    {
+                        if (chain[i].End is null)
+                        {
+                            chain[i].End = MvccStamp.FromTimestamp(commitTs);
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    chain.Add(new MvccRowVersion(
+                        _nextVersionId++,
+                        begin: MvccStamp.FromTimestamp(commitTs),
+                        end: null,
+                        cells: (SqlValue[])(op.Cells ?? []).Clone()));
+                }
+            }
+
+            // Advance clock past recovered commits so new txs get higher timestamps.
+            _clock.Reset(commitTs + 1);
+        }
+    }
 
     /// <summary>Stable negative table id for <paramref name="tableName"/>.</summary>
     internal long GetOrCreateTableId(string tableName)
@@ -213,7 +283,7 @@ internal sealed class MvStore
             }
 
             chain.Add(version);
-            tx.RecordWrite(rowId);
+            tx.RecordLogOp(MvccLogOp.Upsert(rowId, version.Cells));
         }
     }
 
@@ -238,7 +308,7 @@ internal sealed class MvStore
                     throw new EmbeddedWriteWriteConflictException();
 
                 version.End = MvccStamp.FromTxId(txId);
-                tx.RecordWrite(rowId);
+                tx.RecordLogOp(MvccLogOp.Delete(rowId));
                 return true;
             }
 
@@ -364,12 +434,18 @@ internal sealed class MvStore
             }
 
             RewriteStampsLocked(id, commitTs);
+            var logOps = tx.SnapshotLogOps();
             tx.MarkCommitted();
             _finalizedStates[id.Value] = MvccTransactionState.Committed;
             _finalizedCommitTimestamps[id.Value] = commitTs;
             ClearExclusive(id);
             _transactions.Remove(id.Value);
             PruneHistoryLocked(tx.BeginTimestamp);
+
+            // Durable log after in-memory commit is published (Turso flushes then
+            // advances visibility; we keep the store already committed and append).
+            if (logOps.Count != 0)
+                _logicalLog?.AppendCommit(commitTs, logOps);
         }
     }
 

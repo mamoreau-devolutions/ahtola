@@ -2074,7 +2074,27 @@ public sealed partial class EmbeddedDatabase : IDisposable
             }
         }
 
-        _mvStore = new MvStore();
+        MvccLogicalLog? logicalLog = null;
+        if (_fileStore is not null && _fileSystem is not null && !string.IsNullOrEmpty(_databasePath))
+        {
+            logicalLog = MvccLogicalLog.CreateOrOpen(_fileSystem, _databasePath);
+            try
+            {
+                var store = new MvStore(logicalLog: logicalLog);
+                logicalLog.ReplayInto(store);
+                _mvStore = store;
+            }
+            catch
+            {
+                logicalLog.Dispose();
+                throw;
+            }
+        }
+        else
+        {
+            _mvStore = new MvStore();
+        }
+
         _version++;
         return SqliteJournalMode.Mvcc;
     }
