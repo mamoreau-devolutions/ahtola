@@ -20,11 +20,13 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 | Stage 0 process-exclusive ownership | **Live** on physical pager |
 | Stage 1 WAL-index mapped + published from pager | **Attached** (under ownership) |
 | Stage 2 read marks via `SqliteWalReadSnapshotCoordinator` | **Attached** for physical WAL readers |
-| Stage 3 writer publish + CKPT_LOCK checkpoint/`nBackfill` | **Attached** (under ownership; coordinator still also usable detached) |
-| Stages 4–6 | Not started |
+| Stage 3 writer publish + CKPT_LOCK checkpoint/`nBackfill` | **Attached** |
+| Stage 4 busy taxonomy + SQLite backoff | **Attached** |
+| Stage 5 recovery + `iChange` invalidation | **Attached** (ownership remains; `-shm` unlink deferred) |
+| Stage 6 ownership retirement | Not started |
 | Foreign read-only guest (§1.9) | Live; not full interop |
 
-**Pager gate:** Stage 3 writer/checkpointer attach, then Stages 4–6; no stock-SQLite concurrent interop until Stage 6.
+**Pager gate:** Stage 6 ownership retirement + concurrent SQLite/Turso interop proof. Stages 1–5 attached under Stage 0 ownership.
 
 ---
 
@@ -133,10 +135,13 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 2. Replace process-local `LockManager.Generation` invalidation with `iChange` / `mxFrame` / salts comparisons for physical WAL.
 3. Handle last-connection `-shm` unlink, exclusive locking mode, heap WAL-index fallback where required.
 
+**Landed:** pager recovery takes CKPT + exclusive read marks (reuses lock-manager writer/recovery bytes when already held), repairs dirty tails, `RebuildFromWal` bumps `iChange`; `SynchronizeCommittedView` invalidates on shared header identity change. Ownership still Stage 0. Deferred: last-connection `-shm` unlink, heap WAL-index fallback (Stage 6-adjacent).
+
 **Exit criteria**
 
-- [ ] Torn/corrupt publication fail-closed; clean WAL rebuilds index.
-- [ ] Cache does not serve stale pages across `iChange` bumps.
+- [x] Torn/corrupt publication fail-closed; clean WAL rebuilds index with bumped `iChange`.
+- [x] Committed-view rescan when `iChange`/`mxFrame`/salts advance.
+- [ ] Last-connection `-shm` unlink + heap fallback (deferred with Stage 6).
 
 ---
 

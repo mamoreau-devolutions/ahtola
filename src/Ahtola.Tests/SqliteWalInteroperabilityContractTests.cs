@@ -257,6 +257,66 @@ public class SqliteWalInteroperabilityContractTests
 
     [Test]
     [NonParallelizable]
+    public void ManagedRecoveryRebuildsWalIndexAndBumpsChangeCounter()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x61));
+
+            var before = pager.ReadValidatedWalIndexHeader().Header.ChangeCounter;
+            pager.AppendUncommittedWalFrameForTesting(pageNumber: 2, CreatePage(pager.PageSize, 0x62));
+            pager.RecoverUncommittedWalTail(TimeSpan.Zero);
+
+            var after = pager.ReadValidatedWalIndexHeader();
+            after.Header.ChangeCounter.Should().BeGreaterThan(before);
+            after.Header.MaximumFrame.Should().BeGreaterThan(0u);
+            pager.FindWalIndexFrame(2).Should().NotBeNull();
+            // Uncommitted page image must not be visible after recovery.
+            pager.ReadCommittedPage(2)[0].Should().Be(0x61);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void ManagedCacheInvalidatesWhenWalIndexChangeCounterAdvances()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x71));
+
+            // Pin the observed index identity via a committed-view capture.
+            _ = pager.CaptureCommittedViewToken();
+            var beforeRescans = pager.CommittedViewRescanCount;
+            var before = pager.ReadValidatedWalIndexHeader().Header.ChangeCounter;
+
+            // Recovery-style rebuild bumps iChange without refreshing the pager's
+            // observed identity.
+            pager.RebuildAttachedWalIndexForTesting();
+            pager.ReadValidatedWalIndexHeader().Header.ChangeCounter.Should().BeGreaterThan(before);
+
+            // Next capture must resynchronize from the shared header identity.
+            _ = pager.CaptureCommittedViewToken();
+            pager.CommittedViewRescanCount.Should().BeGreaterThan(beforeRescans);
+            pager.ReadCommittedPage(2)[0].Should().Be(0x71);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
     public void ManagedReaderReportsSnapshotBusyWhenReadMarkIsRewritten()
     {
         var workDirectory = CreateWorkDirectory();

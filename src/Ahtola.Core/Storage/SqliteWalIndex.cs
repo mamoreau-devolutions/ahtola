@@ -1048,9 +1048,12 @@ public sealed class SqliteWalIndexSharedMemory
             }
 
             var maximumFrame = checked((uint)recovery.LastCommittedFrameNumber);
+            // Stage 5: recovery always advances iChange so peer caches cannot keep
+            // serving pre-recovery pages against a rebuilt index.
+            var changeCounter = ResolveRecoveryChangeCounter();
             var header = maximumFrame == 0
                 ? SqliteWalIndexHeader.Create(
-                    changeCounter: 1,
+                    changeCounter,
                     wal.Header.ChecksumByteOrder,
                     wal.PageSize,
                     maximumFrame: 0,
@@ -1059,7 +1062,11 @@ public sealed class SqliteWalIndexSharedMemory
                     frameChecksum2: 0,
                     wal.Header.Salt1,
                     wal.Header.Salt2)
-                : CreateHeaderFromCommittedWal(wal, maximumFrame, recovery.LastCommittedDatabaseSizeInPages);
+                : CreateHeaderFromCommittedWal(
+                    wal,
+                    maximumFrame,
+                    recovery.LastCommittedDatabaseSizeInPages,
+                    changeCounter);
 
             EnsureWritableBlocks(SqliteWalIndexLayout.GetRequiredBlockCount(maximumFrame));
             ClearFrameIndex();
@@ -1073,6 +1080,26 @@ public sealed class SqliteWalIndexSharedMemory
 
             _mapping.MemoryBarrier();
             PublishHeaderWithoutWalValidation(header);
+        }
+    }
+
+    private uint ResolveRecoveryChangeCounter()
+    {
+        try
+        {
+            EnsureMappedBlocks(blockCount: 1);
+            var prior = ReadStableHeaderRegion().Header.ChangeCounter;
+            return unchecked(prior + 1);
+        }
+        catch (InvalidDataException)
+        {
+            return 1;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Zero-length carriers grow during EnsureWritableBlocks; first recovery
+            // still starts at iChange=1.
+            return 1;
         }
     }
 
@@ -1258,7 +1285,8 @@ public sealed class SqliteWalIndexSharedMemory
     private static SqliteWalIndexHeader CreateHeaderFromCommittedWal(
         SqliteWalFile wal,
         uint maximumFrame,
-        uint databasePageCount)
+        uint databasePageCount,
+        uint changeCounter = 1)
     {
         var committedFrame = wal.ReadFrame(maximumFrame).Header;
         if (!committedFrame.IsCommit || committedFrame.DatabaseSizeInPages != databasePageCount)
@@ -1268,7 +1296,7 @@ public sealed class SqliteWalIndexSharedMemory
         }
 
         return SqliteWalIndexHeader.Create(
-            changeCounter: 1,
+            changeCounter,
             wal.Header.ChecksumByteOrder,
             wal.PageSize,
             maximumFrame,
