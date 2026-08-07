@@ -351,6 +351,48 @@ internal sealed class MvStore
     }
 
     /// <summary>
+    /// True when the version store says a classic base-table row must be hidden
+    /// from <paramref name="txId"/> (deleted or superseded for this snapshot).
+    /// Turso dual-cursor "btree invalidating" simplified.
+    /// </summary>
+    internal bool IsBaseRowInvalidated(MvccTxId txId, MvccRowId rowId)
+    {
+        lock (_gate)
+        {
+            var tx = RequireActive(txId);
+            if (!_rows.TryGetValue(rowId, out var chain) || chain.Count == 0)
+                return false;
+
+            // A live visible store version always overrides the base image.
+            for (var i = chain.Count - 1; i >= 0; i--)
+            {
+                if (IsVisibleTo(chain[i], tx))
+                    return true;
+            }
+
+            // Deletion visible to this reader (end stamp at/before begin) invalidates base.
+            foreach (var version in chain)
+            {
+                if (version.End is null)
+                    continue;
+                var end = version.End.Value;
+                if (end.IsTimestamp)
+                {
+                    if (end.Value <= tx.BeginTimestamp)
+                        return true;
+                }
+                else if (end.Value == tx.Id.Value
+                    || LookupCreatorVisibility(end.Value, tx))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Scan every row id that has at least one version visible to
     /// <paramref name="txId"/> (newest visible non-tombstone wins).
     /// </summary>

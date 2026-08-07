@@ -38,11 +38,11 @@ public sealed class ManagedAdvancedFeatureBoundaryTests
             Execute(connection, "COMMIT;");
         }
 
-        // Phase 1 does not yet persist the MVCC header marker; reopen is classic WAL.
+        // Header version 255 + log restore MVCC on cold open.
         using var reopened = EmbeddedDatabase.OpenFile(path, fileSystem);
         using var reopenedConnection = reopened.Connect();
-        ReadValue(reopenedConnection, "PRAGMA journal_mode;").Should().Be(SqlValue.Text("wal"));
-        reopened.IsMvccEnabled.Should().BeFalse();
+        ReadValue(reopenedConnection, "PRAGMA journal_mode;").Should().Be(SqlValue.Text("mvcc"));
+        reopened.IsMvccEnabled.Should().BeTrue();
     }
 
     private static void Execute(EmbeddedConnection connection, string sql)

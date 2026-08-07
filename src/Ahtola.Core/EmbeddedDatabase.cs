@@ -361,7 +361,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 // A foreign read-only open holds no ownership, but the version read
                 // is a self-contained snapshot and only feeds catalog-cache reuse.
                 var catalogVersion = ReadFileCatalogVersion(effectiveFileSystem, path, foreignReadOnly);
-                return new EmbeddedDatabase(
+                var database = new EmbeddedDatabase(
                     store,
                     catalog,
                     path,
@@ -370,6 +370,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     fileCatalogWriteLock,
                     readOnly,
                     foreignReadOnly);
+                // Cold-open restore: header version 255 means MVCC was last active.
+                if (!readOnly && store.JournalMode == SqliteJournalMode.Mvcc)
+                    database.AttachMvStoreFromDurableLog();
+                return database;
             }
             catch
             {
@@ -2035,14 +2039,38 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     /// <summary>
     /// Enables Turso MVCC mode. Attaches an <see cref="MvStore"/> and reports
-    /// <c>journal_mode=mvcc</c>. File-backed databases keep their durable WAL/DELETE
-    /// pager underneath for page I/O; the MVCC header marker (version 255) and
-    /// logical-log durability land in a later phase.
+    /// <c>journal_mode=mvcc</c>. File-backed databases keep WAL page I/O and
+    /// persist header version <c>255</c> plus a durable <c>db-log</c>.
     /// </summary>
     internal SqliteJournalMode EnableMvccMode()
     {
         lock (_gate)
             return EnableMvccModeLocked(BusyTimeout);
+    }
+
+    /// <summary>
+    /// Restores the in-process <see cref="MvStore"/> from the durable log when
+    /// the on-disk header already marks MVCC (cold open). Does not rewrite the header.
+    /// </summary>
+    internal void AttachMvStoreFromDurableLog()
+    {
+        lock (_gate)
+        {
+            if (_mvStore is not null || _fileSystem is null || string.IsNullOrEmpty(_databasePath))
+                return;
+            var logicalLog = MvccLogicalLog.CreateOrOpen(_fileSystem, _databasePath);
+            try
+            {
+                var store = new MvStore(logicalLog: logicalLog);
+                logicalLog.ReplayInto(store);
+                _mvStore = store;
+            }
+            catch
+            {
+                logicalLog.Dispose();
+                throw;
+            }
+        }
     }
 
     private SqliteJournalMode EnableMvccModeLocked(TimeSpan busyTimeout)
@@ -2058,9 +2086,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (_mvStore is not null)
             return SqliteJournalMode.Mvcc;
 
-        // File-backed MVCC still needs a WAL open for page durability (Turso).
+        // Persist header version 255 and ensure WAL page storage (Turso).
         if (_fileStore is not null
-            && _fileStore.JournalMode != SqliteJournalMode.Wal
             && _fileSystem is not null
             && _fileCatalogWriteLock is not null)
         {
@@ -2069,15 +2096,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 using var catalogWriteLease = EnterPhysicalFileCatalogWriteLock(_fileSystem, _databasePath);
                 EnsureFileCatalogVersionCurrent(busyTimeout);
                 using var writeRegistration = RegisterCatalogWrite(_databasePath);
-                _ = _fileStore.SwitchJournalMode(SqliteJournalMode.Wal);
+                if (_fileStore.JournalMode != SqliteJournalMode.Mvcc)
+                    _ = _fileStore.SwitchJournalMode(SqliteJournalMode.Mvcc);
                 _fileCatalogVersion = ReadFileCatalogVersion(_fileSystem, _databasePath);
             }
         }
 
-        MvccLogicalLog? logicalLog = null;
         if (_fileStore is not null && _fileSystem is not null && !string.IsNullOrEmpty(_databasePath))
         {
-            logicalLog = MvccLogicalLog.CreateOrOpen(_fileSystem, _databasePath);
+            var logicalLog = MvccLogicalLog.CreateOrOpen(_fileSystem, _databasePath);
             try
             {
                 var store = new MvStore(logicalLog: logicalLog);
@@ -2119,8 +2146,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
             if (_fileSystem is null || _fileCatalogWriteLock is null)
                 throw new InvalidOperationException("The managed file catalog persistence state is not initialized.");
 
-            // Leaving MVCC returns to the underlying durable pager mode.
-            _mvStore = null;
+            // Leaving MVCC returns to the requested durable pager mode (header 2 or 1).
+            if (_mvStore is { } leaving)
+            {
+                leaving.LogicalLog?.Dispose();
+                _mvStore = null;
+            }
 
             lock (_fileCatalogWriteLock)
             {

@@ -39,8 +39,8 @@ Pinned submodule: `turso-src/` @ **v0.7.2** (`046e9cbf6`).
 | --- | --- |
 | **1** | Clock, `MvStore` tx registry + write-set WW conflicts, pragma/BEGIN surface, classic catalog DML under concurrent txs |
 | **1.5** | Row-version chains (`Insert`/`Update`/`Delete`/`TryRead`/`ScanVisible`), visibility + WW on chains, commit stamp rewrite, rollback drop |
-| **2 (current)** | Durable logical log (`*.db-log`) with Turso LML2/MVTX framing constants, CRC32C, upsert/delete ops, replay into `MvStore` on enable; header version 255 + checkpoint SM + catalog row merge still open |
-| **3** | GC polish, dual-cursor isolation vs classic path, schema generation cookie |
+| **2** | Durable logical log (`*.db-log`) with Turso LML2/MVTX framing constants, CRC32C, upsert/delete ops, replay into `MvStore` on enable; checkpoint TRUNCATE clears log |
+| **3 (current)** | Header version **255** persisted via pager `SwitchJournalMode(Mvcc)`; cold open restores `MvStore` from log; `MvccDualCursor` merge primitive + invalidation; full b-tree checkpoint SM and SQL-path dual-cursor routing still open |
 
 ## Testing
 
