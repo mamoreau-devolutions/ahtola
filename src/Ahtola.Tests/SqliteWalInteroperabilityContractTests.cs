@@ -7,12 +7,10 @@ namespace Ahtola.Tests;
 
 /// <summary>
 /// Characterizes the WAL interoperability contract documented in
-/// <c>docs/wal-interoperability-contract.md</c>. These tests pin the observable
-/// Stage 0 boundary between the managed pager and ordinary SQLite / Turso
-/// clients: the <c>-shm</c> file is a byte-lock carrier only, managed roles
-/// occupy exactly SQLite's reserved lock-byte range, and managed lock demands
-/// are deliberately stricter than the shared Turso/SQLite WAL protocol until
-/// later stages land.
+/// <c>docs/wal-interoperability-contract.md</c>. These tests pin Stage 0
+/// ownership and lock-byte roles, plus Stage 1 pager WAL-index publication
+/// under that ownership. Concurrent stock-SQLite interoperability still waits
+/// on Stages 2–6.
 /// </summary>
 /// <remarks>
 /// External contention is produced from a worker process because POSIX record
@@ -27,11 +25,13 @@ public class SqliteWalInteroperabilityContractTests
     private const long RecoveryLockOffset = 122;
     private const long FirstReadMarkLockOffset = 123;
     private const int ReadMarkLockCount = 5;
-    private const long SharedMemoryLockAreaLength = 8;
+        // SQLite reserves bytes 120-127 for write/ckpt/recovery/readers and byte 128
+        // for the WAL-index dead-man switch (WIN_SHM_DMS / unix DMS).
+        private const long SharedMemoryLockAreaLength = 9;
 
     [Test]
     [NonParallelizable]
-    public void ManagedWalActivityNeverMaterializesASqliteWalIndex()
+    public void ManagedWalCommitPublishesValidatedSqliteWalIndex()
     {
         var workDirectory = CreateWorkDirectory();
         try
@@ -47,15 +47,53 @@ public class SqliteWalInteroperabilityContractTests
                 SqliteWalHeader.Size,
                 "the managed pager must have appended WAL frames for this characterization to be meaningful");
             File.Exists(sharedMemoryPath).Should().BeTrue();
-            new FileInfo(sharedMemoryPath).Length.Should().Be(
-                0,
-                "the managed pager uses -shm purely as a byte-lock carrier and never writes a WAL-index");
+            new FileInfo(sharedMemoryPath).Length.Should().BeGreaterThanOrEqualTo(
+                SqliteWalIndexLayout.HeaderRegionSize,
+                "Stage 1 physical pager publishes a real SQLite WAL-index into -shm under ownership");
+
+            pager.WalIndex.Should().NotBeNull();
+            var region = pager.ReadValidatedWalIndexHeader();
+            region.Header.MaximumFrame.Should().BeGreaterThan(0u);
+            pager.FindWalIndexFrame(pageNumber: 2).Should().NotBeNull(
+                "frame lookup via the published index must agree with the committed page");
 
             pager.CheckpointToMainStoreAndResetWal();
 
-            new FileInfo(sharedMemoryPath).Length.Should().Be(
-                0,
-                "checkpointing publishes no WAL-index header, read marks, or backfill counter");
+            new FileInfo(sharedMemoryPath).Length.Should().BeGreaterThanOrEqualTo(
+                SqliteWalIndexLayout.HeaderRegionSize,
+                "checkpoint/reset republishes a coherent zero-frame WAL-index rather than truncating -shm to a lock-only carrier");
+            pager.ReadValidatedWalIndexHeader().Header.MaximumFrame.Should().Be(0u);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void ManagedReadersPinSharedWalIndexReadMarks()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x41));
+
+            using var first = pager.BeginReadTransaction();
+            using var second = pager.BeginReadTransaction();
+
+            first.WalIndexReadMarkIndex.Should().NotBeNull();
+            second.WalIndexReadMarkIndex.Should().NotBeNull();
+            first.WalIndexMaximumFrame.Should().Be(second.WalIndexMaximumFrame);
+            first.WalIndexMaximumFrame.Should().BeGreaterThan(0u);
+            first.ReadPage(2)[0].Should().Be(0x41);
+            second.ReadPage(2)[0].Should().Be(0x41);
+
+            // Writers still proceed while readers hold shared marks.
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x42));
+            first.ReadPage(2)[0].Should().Be(0x41, "pinned Stage 2 snapshots must not observe later commits");
         }
         finally
         {
@@ -157,7 +195,7 @@ public class SqliteWalInteroperabilityContractTests
 
     [Test]
     [NonParallelizable]
-    public void ManagedCheckpointDemandsTheEntireSqliteWalLockArea()
+    public void ManagedPassiveCheckpointHonorsHeldReadMarksWithoutCoarseLockArea()
     {
         var workDirectory = CreateWorkDirectory();
         try
@@ -166,15 +204,21 @@ public class SqliteWalInteroperabilityContractTests
             using var pager = CreatePhysicalPager(databasePath);
             CommitPageTwo(pager, CreatePage(pager.PageSize, 0x43));
 
+            // An unused held mark slot must not block PASSIVE (SQLite leaves
+            // mxSafeFrame unchanged for READMARK_NOT_USED). Reset still needs
+            // exclusive ownership of every mark.
             var lastReadMarkOffset = FirstReadMarkLockOffset + ReadMarkLockCount - 1;
             using (HoldSharedMemoryRanges(workDirectory, databasePath, $"{lastReadMarkOffset}:1"))
             {
+                pager.CheckpointToMainStore(TimeSpan.Zero).InstalledPageCount.Should().BeGreaterThan(0);
+
                 var busy = Assert.Throws<SqlitePagerBusyException>(
-                    () => pager.CheckpointToMainStore(TimeSpan.Zero));
+                    () => pager.CheckpointToMainStoreAndResetWal(TimeSpan.Zero));
                 busy!.Operation.Should().Be(SqlitePagerLockOperation.Checkpoint);
             }
 
-            pager.CheckpointToMainStore(TimeSpan.Zero).InstalledPageCount.Should().BeGreaterThan(0);
+            pager.CheckpointToMainStoreAndResetWal(TimeSpan.Zero)
+                .RetainedCommittedFrameCount.Should().Be(0);
         }
         finally
         {
@@ -184,7 +228,7 @@ public class SqliteWalInteroperabilityContractTests
 
     [Test]
     [NonParallelizable]
-    public void ManagedRolesNeverClaimSqliteCheckpointLockByteAlone()
+    public void ManagedCheckpointClaimsSqliteCheckpointLockByte()
     {
         var workDirectory = CreateWorkDirectory();
         try
@@ -202,9 +246,127 @@ public class SqliteWalInteroperabilityContractTests
                 reader.ReadPage(2).Should().NotBeNull();
             }
 
+            // Stage 3: PASSIVE/FULL take WAL_CKPT_LOCK (byte 121) alone.
             var busy = Assert.Throws<SqlitePagerBusyException>(
                 () => pager.CheckpointToMainStore(TimeSpan.Zero));
             busy!.Operation.Should().Be(SqlitePagerLockOperation.Checkpoint);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void ManagedRecoveryRebuildsWalIndexAndBumpsChangeCounter()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x61));
+
+            var before = pager.ReadValidatedWalIndexHeader().Header.ChangeCounter;
+            pager.AppendUncommittedWalFrameForTesting(pageNumber: 2, CreatePage(pager.PageSize, 0x62));
+            pager.RecoverUncommittedWalTail(TimeSpan.Zero);
+
+            var after = pager.ReadValidatedWalIndexHeader();
+            after.Header.ChangeCounter.Should().BeGreaterThan(before);
+            after.Header.MaximumFrame.Should().BeGreaterThan(0u);
+            pager.FindWalIndexFrame(2).Should().NotBeNull();
+            // Uncommitted page image must not be visible after recovery.
+            pager.ReadCommittedPage(2)[0].Should().Be(0x61);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void ManagedCacheInvalidatesWhenWalIndexChangeCounterAdvances()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x71));
+
+            // Pin the observed index identity via a committed-view capture.
+            _ = pager.CaptureCommittedViewToken();
+            var beforeRescans = pager.CommittedViewRescanCount;
+            var before = pager.ReadValidatedWalIndexHeader().Header.ChangeCounter;
+
+            // Recovery-style rebuild bumps iChange without refreshing the pager's
+            // observed identity.
+            pager.RebuildAttachedWalIndexForTesting();
+            pager.ReadValidatedWalIndexHeader().Header.ChangeCounter.Should().BeGreaterThan(before);
+
+            // Next capture must resynchronize from the shared header identity.
+            _ = pager.CaptureCommittedViewToken();
+            pager.CommittedViewRescanCount.Should().BeGreaterThan(beforeRescans);
+            pager.ReadCommittedPage(2)[0].Should().Be(0x71);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void ManagedReaderReportsSnapshotBusyWhenReadMarkIsRewritten()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x51));
+
+            using var reader = pager.BeginReadTransaction();
+            reader.WalIndexReadMarkIndex.Should().NotBeNull();
+            var mark = reader.WalIndexReadMarkIndex!.Value;
+            mark.Should().BeGreaterThan(0);
+
+            // Simulate a checkpointer/recovery rewriting the pinned mark while the
+            // shared lock is still held — Stage 4 SQLITE_BUSY_SNAPSHOT.
+            pager.WalIndex!.PublishReadMark(mark, maximumFrame: 1);
+
+            var busy = Assert.Throws<SqlitePagerBusyException>(() => reader.ReadPage(2));
+            busy!.Operation.Should().Be(SqlitePagerLockOperation.Reader);
+            busy.Reason.Should().Be(SqlitePagerBusyReason.Snapshot);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void ManagedCheckpointPublishesWalIndexBackfillProgress()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x49));
+
+            var before = pager.ReadValidatedWalIndexHeader();
+            before.Header.MaximumFrame.Should().BeGreaterThan(0u);
+            before.CheckpointInfo.BackfilledFrameCount.Should().Be(0u);
+
+            pager.CheckpointToMainStore(TimeSpan.Zero).InstalledPageCount.Should().BeGreaterThan(0);
+
+            var after = pager.ReadValidatedWalIndexHeader();
+            after.CheckpointInfo.BackfilledFrameCount.Should().Be(after.Header.MaximumFrame);
+            after.CheckpointInfo.BackfillAttemptedFrameCount.Should().Be(after.Header.MaximumFrame);
         }
         finally
         {
@@ -258,17 +420,21 @@ public class SqliteWalInteroperabilityContractTests
         {
             var databasePath = Path.Combine(workDirectory, "main.db");
             using var pager = CreatePhysicalPager(databasePath);
+            // Nonzero mxFrame uses writable marks 1..4 (bytes 124-127). Mark 0
+            // (byte 123) is reserved for fully backfilled database-only snapshots.
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x47));
             using var probe = OpenSharedMemoryLockCarrier(databasePath);
 
             using var holder = HoldSharedMemoryRanges(
                 workDirectory,
                 databasePath,
-                $"{FirstReadMarkLockOffset}:1");
+                $"{FirstReadMarkLockOffset + 1}:1");
             using var reader = pager.BeginReadTransaction(TimeSpan.Zero);
+            reader.WalIndexReadMarkIndex.Should().Be(2);
 
-            Assert.Throws<IOException>(() => LockRange(probe, FirstReadMarkLockOffset + 1, 1));
-            LockRange(probe, FirstReadMarkLockOffset + 2, 1);
-            UnlockRange(probe, FirstReadMarkLockOffset + 2, 1);
+            Assert.Throws<IOException>(() => LockRange(probe, FirstReadMarkLockOffset + 2, 1));
+            LockRange(probe, FirstReadMarkLockOffset + 3, 1);
+            UnlockRange(probe, FirstReadMarkLockOffset + 3, 1);
         }
         finally
         {

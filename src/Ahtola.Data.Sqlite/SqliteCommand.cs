@@ -1087,6 +1087,14 @@ public class SqliteCommand : DbCommand
         if (ex is EmbeddedBusyException)
             return new SqliteException(Properties.Resources.SqliteNativeError(5, ex.Message), 5);
 
+        if (TryGetSqliteErrorCode(ex) is { } sqliteErrorCode)
+        {
+            var codedMessage = UnwrapMessage(ex);
+            return new SqliteException(
+                Properties.Resources.SqliteNativeError(sqliteErrorCode, codedMessage),
+                sqliteErrorCode);
+        }
+
         var message = ex.Message;
         foreach (var prefix in new[] { "Unable to prepare statement: Parse error: ", "Parse error: " })
         {
@@ -1116,6 +1124,28 @@ public class SqliteCommand : DbCommand
             message = PreserveNoSuchTableCase(message, sql);
 
         return new SqliteException(Properties.Resources.SqliteNativeError(1, message), 1);
+    }
+
+    private static int? TryGetSqliteErrorCode(Exception ex)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is EmbeddedSqlException { SqliteErrorCode: int code })
+                return code;
+        }
+
+        return null;
+    }
+
+    private static string UnwrapMessage(Exception ex)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is EmbeddedSqlException { SqliteErrorCode: not null })
+                return current.Message;
+        }
+
+        return ex.Message;
     }
 
     private static string PreserveNoSuchTableCase(string message, string sql)

@@ -169,6 +169,88 @@ public static class VdbeExplain
                 seekRowid.RowIdRegister.Index,
                 null,
                 seekRowid.Description),
+            NotExistsInstruction notExists => (
+                notExists.Cursor.Index,
+                notExists.JumpTarget.Offset,
+                notExists.RowIdRegister.Index,
+                null,
+                notExists.Description),
+            FoundInstruction found => (
+                found.Cursor.Index,
+                found.FoundTarget.Offset,
+                found.RowIdRegister.Index,
+                null,
+                found.Description),
+            OpenEphemeralInstruction openEphemeral => (
+                openEphemeral.Cursor.Index,
+                openEphemeral.ColumnCount,
+                0,
+                null,
+                $"open ephemeral cursor {openEphemeral.Cursor.Index} cols={openEphemeral.ColumnCount}"),
+            EphemeralInsertInstruction ephemeralInsert => (
+                ephemeralInsert.Cursor.Index,
+                ephemeralInsert.Values.Start.Index,
+                ephemeralInsert.Values.Count,
+                null,
+                $"insert into ephemeral cursor {ephemeralInsert.Cursor.Index} from {FormatRange(ephemeralInsert.Values)}"),
+            NoConflictInstruction noConflict => (
+                noConflict.Cursor.Index,
+                noConflict.NoConflictTarget.Offset,
+                noConflict.Key.Start.Index,
+                FormatRange(noConflict.Key),
+                noConflict.Description),
+            FkCounterInstruction fkCounter => (
+                fkCounter.Deferred ? 1 : 0,
+                fkCounter.Increment,
+                0,
+                null,
+                fkCounter.Deferred
+                    ? $"fk deferred counter += {fkCounter.Increment}"
+                    : $"fk statement counter += {fkCounter.Increment}"),
+            FkIfZeroInstruction fkIfZero => (
+                fkIfZero.Deferred ? 1 : 0,
+                fkIfZero.Target.Offset,
+                0,
+                null,
+                fkIfZero.Deferred
+                    ? $"if deferred fk counter == 0 goto {fkIfZero.Target.Offset}"
+                    : $"if statement fk counter == 0 goto {fkIfZero.Target.Offset}"),
+            FkCheckInstruction fkCheck => (
+                fkCheck.Deferred ? 1 : 0,
+                0,
+                0,
+                null,
+                fkCheck.Deferred ? "check deferred fk counter" : "check statement fk counter"),
+            SeekKeyInstruction seekKey => (
+                seekKey.Cursor.Index,
+                seekKey.NotFoundTarget.Offset,
+                seekKey.Key.Start.Index,
+                $"{seekKey.Operator}{(seekKey.EqOnly ? " eq_only" : string.Empty)} {FormatRange(seekKey.Key)}",
+                seekKey.Description),
+            IdxRowIdInstruction idxRowId => (
+                idxRowId.Cursor.Index,
+                idxRowId.Destination.Index,
+                0,
+                null,
+                $"r[{idxRowId.Destination.Index}]=idx rowid c[{idxRowId.Cursor.Index}]"),
+            RowDataInstruction rowData => (
+                rowData.Cursor.Index,
+                rowData.Destination.Start.Index,
+                rowData.Destination.Count,
+                null,
+                $"rowdata c[{rowData.Cursor.Index}] -> {FormatRange(rowData.Destination)}"),
+            IdxInsertInstruction idxInsert => (
+                idxInsert.Cursor.Index,
+                (long)idxInsert.Flags,
+                idxInsert.Key.Count,
+                FormatRange(idxInsert.Key),
+                $"idx insert c[{idxInsert.Cursor.Index}] flags={idxInsert.Flags}"),
+            IdxDeleteInstruction idxDelete => (
+                idxDelete.Cursor.Index,
+                0,
+                idxDelete.Key?.Count ?? 0,
+                idxDelete.Key is { } k ? FormatRange(k) : null,
+                $"idx delete c[{idxDelete.Cursor.Index}]"),
             SeekRowidRangeInstruction seekRowidRange => (
                 seekRowidRange.Cursor.Index,
                 seekRowidRange.NotFoundTarget.Offset,
@@ -294,16 +376,20 @@ public static class VdbeExplain
                 $"delete current row of cursor {delete.Cursor.Index}"),
             InsertInstruction insert => (
                 insert.Cursor.Index,
+                (long)insert.Flags,
                 0,
-                0,
-                null,
-                $"insert row into cursor {insert.Cursor.Index}"),
+                insert.Flags == VdbeInsertFlags.None ? null : insert.Flags.ToString(),
+                insert.Flags == VdbeInsertFlags.None
+                    ? $"insert row into cursor {insert.Cursor.Index}"
+                    : $"insert row into cursor {insert.Cursor.Index} flags={insert.Flags}"),
             UpdateInstruction update => (
                 update.Cursor.Index,
+                (long)update.Flags,
                 0,
-                0,
-                null,
-                $"update current row of cursor {update.Cursor.Index}"),
+                update.Flags == VdbeInsertFlags.None ? null : update.Flags.ToString(),
+                update.Flags == VdbeInsertFlags.None
+                    ? $"update current row of cursor {update.Cursor.Index}"
+                    : $"update current row of cursor {update.Cursor.Index} flags={update.Flags}"),
             ProgramInstruction program => (
                 program.ParameterRegisters.Count,
                 0,
@@ -461,7 +547,20 @@ public static class VdbeExplain
                 null,
                 $"close window buffer {closeWindowBuffer.Buffer.Index}"),
             YieldInstruction => (0, 0, 0, null, "yield"),
-            HaltInstruction => (0, 0, 0, null, "halt"),
+            HaltInstruction halt => (
+                halt.ErrorCode,
+                0,
+                halt.DescriptionRegister?.Index ?? 0,
+                halt.OnError?.ToString() ?? halt.Description,
+                halt.ErrorCode == 0
+                    ? "halt"
+                    : $"halt error {halt.ErrorCode}" + (halt.Description is null ? string.Empty : $": {halt.Description}")),
+            HaltIfNullInstruction haltIfNull => (
+                haltIfNull.ErrorCode,
+                0,
+                haltIfNull.Target.Index,
+                haltIfNull.Description,
+                $"halt if r[{haltIfNull.Target.Index}] is null"),
             _ => throw new VdbeProgramValidationException(
                 $"Cannot describe unsupported opcode {instruction.Opcode}."),
         };

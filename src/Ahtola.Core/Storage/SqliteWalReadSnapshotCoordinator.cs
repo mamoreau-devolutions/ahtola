@@ -19,21 +19,49 @@ public sealed class SqliteWalReadSnapshotBusyException : InvalidOperationExcepti
 }
 
 /// <summary>
+/// Raised when a held WAL read mark is reset or rewritten while a snapshot is
+/// still active (Stage 4 <c>SQLITE_BUSY_SNAPSHOT</c>).
+/// </summary>
+public sealed class SqliteWalReadSnapshotInvalidatedException : InvalidOperationException
+{
+    internal SqliteWalReadSnapshotInvalidatedException(
+        int readMarkIndex,
+        uint expectedMaximumFrame,
+        uint actualMaximumFrame)
+        : base(
+            $"SQLite WAL read mark {readMarkIndex} changed from frame {expectedMaximumFrame} to {actualMaximumFrame} while its shared lock was held.")
+    {
+        ReadMarkIndex = readMarkIndex;
+        ExpectedMaximumFrame = expectedMaximumFrame;
+        ActualMaximumFrame = actualMaximumFrame;
+    }
+
+    /// <summary>The read-mark slot that was invalidated.</summary>
+    public int ReadMarkIndex { get; }
+
+    /// <summary>The frame boundary pinned when the snapshot began.</summary>
+    public uint ExpectedMaximumFrame { get; }
+
+    /// <summary>The frame boundary observed after the mark changed.</summary>
+    public uint ActualMaximumFrame { get; }
+}
+
+/// <summary>
 /// Establishes detached, SQLite-compatible WAL read snapshots over existing
 /// physical WAL and shared-memory artifacts.
 /// </summary>
 /// <remarks>
-/// This component is intentionally not connected to <see cref="SqlitePager"/>.
-/// It pins a validated committed WAL frame boundary under a real shared
-/// <c>WAL_READ_LOCK</c>, but it does not own managed main-file ownership,
-/// recovery, cache invalidation, WAL writes, or checkpointing. Callers must not
-/// treat it as concurrent managed-pager or stock-SQLite interoperability.
+/// The physical <see cref="SqlitePager"/> may compose this coordinator for
+/// Stage 2 read-mark pinning under Stage 0 ownership. Detached construction
+/// (over SQLite-produced artifacts without a pager) remains supported for
+/// protocol tests. This type still does not relax main-file ownership, perform
+/// recovery/checkpoint, or establish stock-SQLite concurrent interoperability
+/// by itself — Stages 3–6 remain separate.
 /// </remarks>
 public sealed class SqliteWalReadSnapshotCoordinator : IDisposable
 {
     private const long FirstReadMarkLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 3;
     private const int ReadMarkCount = SqliteWalIndexCheckpointInfo.ReadMarkCount;
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
 
     private readonly object _gate = new();
     private readonly SqliteWalFile _wal;
@@ -428,16 +456,8 @@ public sealed class SqliteWalReadSnapshotCoordinator : IDisposable
         Stopwatch? stopwatch,
         CancellationToken cancellationToken)
     {
-        var delay = timeout == Timeout.InfiniteTimeSpan
-            ? RetryDelay
-            : timeout - stopwatch!.Elapsed;
-        if (delay <= TimeSpan.Zero)
+        if (!SqliteBusyBackoff.Wait(timeout, stopwatch, cancellationToken))
             throw new SqliteWalReadSnapshotBusyException(timeout);
-
-        if (delay > RetryDelay)
-            delay = RetryDelay;
-        cancellationToken.WaitHandle.WaitOne(delay);
-        cancellationToken.ThrowIfCancellationRequested();
     }
 
     private void ThrowIfDisposed()
@@ -552,6 +572,22 @@ public sealed class SqliteWalReadSnapshot : IDisposable
     /// <inheritdoc />
     public void Dispose() => EndRead();
 
+    /// <summary>
+    /// Re-checks the pinned mark/header for Stage 4 snapshot-invalidated busy.
+    /// </summary>
+    internal void EnsureStillValid()
+    {
+        try
+        {
+            ValidatePinnedBoundary();
+        }
+        catch (Exception exception)
+        {
+            Fault(exception);
+            throw;
+        }
+    }
+
     private void ValidatePinnedBoundary()
     {
         ThrowIfUnavailable();
@@ -564,8 +600,10 @@ public sealed class SqliteWalReadSnapshot : IDisposable
         if (ReadMarkIndex != 0
             && region.CheckpointInfo.GetReadMark(ReadMarkIndex) != MaximumFrame)
         {
-            throw new InvalidDataException(
-                $"SQLite WAL read mark {ReadMarkIndex} changed while its shared lock was held.");
+            throw new SqliteWalReadSnapshotInvalidatedException(
+                ReadMarkIndex,
+                MaximumFrame,
+                region.CheckpointInfo.GetReadMark(ReadMarkIndex));
         }
     }
 

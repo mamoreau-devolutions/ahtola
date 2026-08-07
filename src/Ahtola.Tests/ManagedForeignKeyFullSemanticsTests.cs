@@ -318,6 +318,60 @@ public sealed class ManagedForeignKeyFullSemanticsTests
     }
 
     [Test]
+    public void SelfReferentialSetNullOnDeleteMatchesSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "PRAGMA foreign_keys = ON",
+                "CREATE TABLE node(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES node(id) ON DELETE SET NULL)",
+                "INSERT INTO node VALUES (1, NULL), (2, 1), (3, 2)",
+                "DELETE FROM node WHERE id = 1",
+            ],
+            "SELECT id, parent_id FROM node ORDER BY id");
+    }
+
+    [Test]
+    public void CrossTableCascadeOnDeleteMatchesSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "PRAGMA foreign_keys = ON",
+                "CREATE TABLE parent(id INTEGER PRIMARY KEY)",
+                "CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) ON DELETE CASCADE)",
+                "INSERT INTO parent VALUES (1), (2)",
+                "INSERT INTO child VALUES (10, 1), (11, 1), (20, 2)",
+                "DELETE FROM parent WHERE id = 1",
+            ],
+            "SELECT id, parent_id FROM child ORDER BY id");
+    }
+
+    [Test]
+    public void SelfReferentialCascadeOnUpdateMatchesSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "PRAGMA foreign_keys = ON",
+                "CREATE TABLE node(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES node(id) ON UPDATE CASCADE)",
+                "INSERT INTO node VALUES (1, NULL), (2, 1), (3, 2)",
+                "UPDATE node SET id = 10 WHERE id = 1",
+            ],
+            "SELECT id, parent_id FROM node ORDER BY id");
+    }
+
+    [Test]
+    public void SelfReferentialSetNullOnUpdateMatchesSqlite()
+    {
+        AssertMatchesSqlite(
+            [
+                "PRAGMA foreign_keys = ON",
+                "CREATE TABLE node(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES node(id) ON UPDATE SET NULL)",
+                "INSERT INTO node VALUES (1, NULL), (2, 1), (3, 2)",
+                "UPDATE node SET id = 10 WHERE id = 1",
+            ],
+            "SELECT id, parent_id FROM node ORDER BY id");
+    }
+
+    [Test]
     public void DeferredCascadeCyclesResolveWithoutRecursiveReentry()
     {
         AssertMatchesSqlite(

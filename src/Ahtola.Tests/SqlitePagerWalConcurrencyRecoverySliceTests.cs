@@ -37,7 +37,7 @@ public class SqlitePagerWalConcurrencyRecoverySliceTests
 
     [Test]
     [NonParallelizable]
-    public void PhysicalPagerRetriesCrossProcessOwnershipUntilOwnerDisposes()
+    public void PhysicalPagerRetriesCrossProcessWalWriterUntilOwnerReleases()
     {
         if (!OperatingSystem.IsWindows())
             Assert.Ignore("Physical SQLite WAL shared-memory locks are only enabled on Windows.");
@@ -54,13 +54,14 @@ public class SqlitePagerWalConcurrencyRecoverySliceTests
                 databasePath + "-wal",
                 CreateWalHeader());
             using (pager)
+            using (var writer = pager.BeginTransaction(targetDatabaseSizeInPages: 1))
             using (var worker = StartRetryWorker(databasePath, waitingPath, resultPath))
             {
                 try
                 {
                     SpinWait.SpinUntil(() => File.Exists(waitingPath), TimeSpan.FromSeconds(10))
                         .Should()
-                        .BeTrue("the worker must first observe the parent writer lock as busy");
+                        .BeTrue("the worker must first observe the parent WAL writer lock as busy");
 
                     SpinWait.SpinUntil(() => File.Exists(resultPath), TimeSpan.FromSeconds(1))
                         .Should()
@@ -68,6 +69,7 @@ public class SqlitePagerWalConcurrencyRecoverySliceTests
                 }
                 finally
                 {
+                    writer.Dispose();
                     pager.Dispose();
                     if (!worker.HasExited
                         && !worker.WaitForExit(TimeSpan.FromSeconds(10)))
@@ -104,12 +106,15 @@ public class SqlitePagerWalConcurrencyRecoverySliceTests
 
         try
         {
-            var initialContention = Assert.Throws<SqlitePagerClientOwnershipException>(() => SqlitePager.Open(
+            // Writable open takes WAL_WRITE_LOCK briefly for recovery. With the
+            // parent holding the writer, zero-timeout open is immediately busy —
+            // signal that, then retry open until the parent releases.
+            var openBusy = Assert.Throws<SqlitePagerBusyException>(() => SqlitePager.Open(
                 PhysicalFileSystem.Instance,
                 databasePath,
                 databasePath + "-wal",
                 busyTimeout: TimeSpan.Zero));
-            initialContention!.DatabasePath.Should().Be(Path.GetFullPath(databasePath));
+            openBusy!.Operation.Should().Be(SqlitePagerLockOperation.Writer);
             File.WriteAllText(waitingPath, "waiting");
 
             using var pager = SqlitePager.Open(
@@ -117,6 +122,8 @@ public class SqlitePagerWalConcurrencyRecoverySliceTests
                 databasePath,
                 databasePath + "-wal",
                 busyTimeout: TimeSpan.FromSeconds(5));
+            using var transaction = pager.BeginTransaction(targetDatabaseSizeInPages: 1, TimeSpan.Zero);
+            transaction.Rollback();
             File.WriteAllText(resultPath, "acquired");
         }
         catch (Exception exception)

@@ -1,13 +1,10 @@
-using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
 
 namespace Ahtola.Core.Storage;
 
 /// <summary>
-/// Raised when a physical managed database cannot obtain its required exclusive
-/// client-ownership lock.
+/// Raised when a physical managed database cannot obtain its required main-file
+/// SQLite SHARED lock (Stage 6).
 /// </summary>
 public sealed class SqlitePagerClientOwnershipException : InvalidOperationException
 {
@@ -16,44 +13,51 @@ public sealed class SqlitePagerClientOwnershipException : InvalidOperationExcept
         TimeSpan timeout,
         Exception innerException)
         : base(
-            $"Managed WAL ownership for database '{databasePath}' could not be acquired within {timeout}. "
-            + "Concurrent access from another process or an ordinary SQLite client is unsupported because "
-            + "the managed pager does not maintain SQLite's WAL-index. Close the other client and reopen.",
+            $"Managed main-file SHARED lock for database '{databasePath}' could not be acquired within {timeout}. "
+            + "Another client likely holds PENDING/RESERVED/EXCLUSIVE on the main database file.",
             innerException)
     {
         DatabasePath = databasePath;
         Timeout = timeout;
     }
 
-    /// <summary>The fully qualified database path whose ownership was rejected.</summary>
+    /// <summary>The fully qualified database path whose lock was rejected.</summary>
     public string DatabasePath { get; }
 
-    /// <summary>The configured ownership acquisition timeout.</summary>
+    /// <summary>The configured acquisition timeout.</summary>
     public TimeSpan Timeout { get; }
 }
 
 /// <summary>
-/// Owns SQLite's complete main-file lock-byte range for every physical pager in
-/// this process. This excludes ordinary SQLite and other managed processes while
-/// allowing all managed pagers in the owning process to share one carrier lock.
-/// Linux uses an open-file-description lock because closing any unrelated
-/// descriptor releases every process-owned POSIX record lock for that file.
+/// Stage 6 main-file lock broker. Every physical pager in this process shares one
+/// SQLite SHARED lock on a stable byte in the 510-byte shared range. This coexists
+/// with ordinary SQLite/Turso SHARED readers; exclusive PENDING/RESERVED/EXCLUSIVE
+/// holders still block open. WAL write exclusion remains on <c>-shm</c> (Stages 1–5).
 /// </summary>
 internal sealed class SqliteManagedFileOwnership
 {
     private const long PendingByte = 0x4000_0000;
-    private const long LockRangeLength = 512;
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
+    private const long SharedFirstByte = PendingByte + 2;
+    private const long SharedSize = 510;
 
     private readonly object _gate = new();
     private readonly string _databasePath;
-    private FileStream? _carrierStream;
+    private readonly long _sharedLockOffset;
+    private SqliteWalByteRangeLock? _locks;
+    private SqliteWalByteRangeLockLease? _sharedLease;
     private int _referenceCount;
     private bool _acquiring;
     private Exception? _failure;
 
     internal SqliteManagedFileOwnership(string databasePath)
-        => _databasePath = databasePath;
+    {
+        _databasePath = databasePath;
+        // Stable FNV-1a slot inside SQLite's SHARED range (not randomized hash codes).
+        uint hash = 2166136261;
+        foreach (var ch in databasePath)
+            hash = (hash ^ ch) * 16777619;
+        _sharedLockOffset = SharedFirstByte + (hash % SharedSize);
+    }
 
     internal IDisposable Acquire(bool createNew, bool readOnly, TimeSpan timeout)
     {
@@ -89,30 +93,61 @@ internal sealed class SqliteManagedFileOwnership
 
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
         {
-            CompleteAcquisition(null);
+            CompleteAcquisitionFailed();
             throw new PlatformNotSupportedException(
                 "Managed physical databases require SQLite main-file byte-range locks, "
                 + "which are supported here only on Windows and Linux.");
         }
 
-        var mode = createNew ? FileMode.CreateNew : FileMode.Open;
-        FileStream? stream = null;
+        FileStream? ensureStream = null;
         try
         {
-            stream = new FileStream(
-                _databasePath,
-                mode,
-                OperatingSystem.IsWindows() && readOnly ? FileAccess.Read : FileAccess.ReadWrite,
-                FileShare.ReadWrite | FileShare.Delete,
-                bufferSize: 1,
-                FileOptions.None);
-            AcquireRange(stream, timeout, stopwatch);
+            // Ensure the main file exists before locking it.
+            if (createNew || !File.Exists(_databasePath))
+            {
+                ensureStream = new FileStream(
+                    _databasePath,
+                    createNew ? FileMode.CreateNew : FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: 1,
+                    FileOptions.None);
+            }
+            else if (!readOnly)
+            {
+                ensureStream = new FileStream(
+                    _databasePath,
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: 1,
+                    FileOptions.None);
+            }
+
+            ensureStream?.Dispose();
+            ensureStream = null;
+
+            var locks = new SqliteWalByteRangeLock(_databasePath);
+            SqliteWalByteRangeLockLease sharedLease;
+            try
+            {
+                sharedLease = locks.AcquireShared(
+                    _sharedLockOffset,
+                    length: 1,
+                    RemainingTimeout(timeout, stopwatch));
+            }
+            catch (SqliteWalByteRangeLockBusyException exception)
+            {
+                throw CreateOwnershipException(timeout, exception);
+            }
+
             lock (_gate)
             {
-                if (!_acquiring || _referenceCount != 0 || _carrierStream is not null)
+                if (!_acquiring || _referenceCount != 0 || _sharedLease is not null)
                     throw new InvalidOperationException("Managed SQLite client ownership acquisition state is inconsistent.");
 
-                _carrierStream = stream;
+                _locks = locks;
+                _sharedLease = sharedLease;
                 _referenceCount = 1;
                 _acquiring = false;
                 Monitor.PulseAll(_gate);
@@ -121,40 +156,18 @@ internal sealed class SqliteManagedFileOwnership
         }
         catch
         {
-            stream?.Dispose();
-            CompleteAcquisition(null);
+            ensureStream?.Dispose();
+            CompleteAcquisitionFailed();
             throw;
         }
     }
 
-    private void AcquireRange(FileStream stream, TimeSpan timeout, Stopwatch? stopwatch)
-    {
-        IOException? contention;
-        while (true)
-        {
-            try
-            {
-                Lock(stream);
-                return;
-            }
-            catch (IOException exception)
-            {
-                contention = exception;
-            }
-
-            if (!WaitForRetry(timeout, stopwatch))
-                throw CreateOwnershipException(timeout, contention);
-        }
-    }
-
-    private void CompleteAcquisition(FileStream? stream)
+    private void CompleteAcquisitionFailed()
     {
         lock (_gate)
         {
             if (!_acquiring)
-                throw new InvalidOperationException("Managed SQLite client ownership acquisition is not active.");
-
-            _carrierStream = stream;
+                return;
             _acquiring = false;
             Monitor.PulseAll(_gate);
         }
@@ -171,21 +184,18 @@ internal sealed class SqliteManagedFileOwnership
             if (_referenceCount != 0)
                 return;
 
-            var stream = _carrierStream
-                ?? throw new InvalidOperationException("Managed SQLite client ownership stream is missing.");
-            _carrierStream = null;
+            var sharedLease = _sharedLease
+                ?? throw new InvalidOperationException("Managed SQLite client ownership shared lease is missing.");
+            _sharedLease = null;
+            _locks = null;
             try
             {
-                Unlock(stream);
+                sharedLease.Dispose();
             }
             catch (IOException exception)
             {
                 _failure = exception;
                 throw;
-            }
-            finally
-            {
-                stream.Dispose();
             }
         }
     }
@@ -198,64 +208,6 @@ internal sealed class SqliteManagedFileOwnership
                 "Managed SQLite client ownership release failed; refusing later database opens.",
                 _failure);
         }
-    }
-
-    private static void Lock(FileStream stream)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            stream.Lock(PendingByte, LockRangeLength);
-            return;
-        }
-        if (OperatingSystem.IsLinux())
-        {
-            LinuxOpenFileDescriptionLocks.Lock(
-                stream.SafeFileHandle,
-                PendingByte,
-                LockRangeLength);
-            return;
-        }
-
-        throw new PlatformNotSupportedException(
-            "Managed physical databases require SQLite main-file byte-range locks, "
-            + "which are supported here only on Windows and Linux.");
-    }
-
-    private static void Unlock(FileStream stream)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            stream.Unlock(PendingByte, LockRangeLength);
-            return;
-        }
-        if (OperatingSystem.IsLinux())
-        {
-            LinuxOpenFileDescriptionLocks.Unlock(
-                stream.SafeFileHandle,
-                PendingByte,
-                LockRangeLength);
-            return;
-        }
-
-        throw new PlatformNotSupportedException(
-            "Managed physical databases require SQLite main-file byte-range locks, "
-            + "which are supported here only on Windows and Linux.");
-    }
-
-    private static bool WaitForRetry(TimeSpan timeout, Stopwatch? stopwatch)
-    {
-        if (timeout == Timeout.InfiniteTimeSpan)
-        {
-            Thread.Sleep(RetryDelay);
-            return true;
-        }
-
-        var remaining = timeout - stopwatch!.Elapsed;
-        if (remaining <= TimeSpan.Zero)
-            return false;
-
-        Thread.Sleep(remaining < RetryDelay ? remaining : RetryDelay);
-        return true;
     }
 
     private static TimeSpan RemainingTimeout(TimeSpan timeout, Stopwatch? stopwatch)
@@ -292,75 +244,6 @@ internal sealed class SqliteManagedFileOwnership
     }
 }
 
-internal static partial class LinuxOpenFileDescriptionLocks
-{
-    private const int SetLockCommand = 37;
-    private const short WriteLockType = 1;
-    private const short UnlockType = 2;
-    private const short SeekSet = 0;
-    private const int AccessDenied = 13;
-    private const int ResourceTemporarilyUnavailable = 11;
-
-    internal static void Lock(SafeFileHandle handle, long offset, long length)
-    {
-        EnsureSupportedArchitecture();
-        var fileLock = new FileLock(WriteLockType, SeekSet, offset, length);
-        if (Fcntl(handle, SetLockCommand, ref fileLock) == 0)
-            return;
-
-        var error = Marshal.GetLastPInvokeError();
-        var exception = new Win32Exception(error);
-        if (error is AccessDenied or ResourceTemporarilyUnavailable)
-        {
-            throw new IOException(
-                "The Linux SQLite main-file ownership range is held by another client.",
-                exception);
-        }
-
-        throw new InvalidOperationException(
-            "Linux open-file-description lock acquisition failed.",
-            exception);
-    }
-
-    internal static void Unlock(SafeFileHandle handle, long offset, long length)
-    {
-        EnsureSupportedArchitecture();
-        var fileLock = new FileLock(UnlockType, SeekSet, offset, length);
-        if (Fcntl(handle, SetLockCommand, ref fileLock) == 0)
-            return;
-
-        var error = Marshal.GetLastPInvokeError();
-        throw new IOException(
-            "Linux open-file-description lock release failed.",
-            new Win32Exception(error));
-    }
-
-    private static void EnsureSupportedArchitecture()
-    {
-        if (!Environment.Is64BitProcess || Marshal.SizeOf<FileLock>() != 32)
-        {
-            throw new PlatformNotSupportedException(
-                "Managed physical databases require the 64-bit Linux fcntl lock layout.");
-        }
-    }
-
-    [LibraryImport("libc", EntryPoint = "fcntl", SetLastError = true)]
-    private static partial int Fcntl(
-        SafeFileHandle fileDescriptor,
-        int command,
-        ref FileLock fileLock);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FileLock(short type, short whence, long start, long length)
-    {
-        internal short Type = type;
-        internal short Whence = whence;
-        internal long Start = start;
-        internal long Length = length;
-        internal int ProcessId;
-    }
-}
-
 internal static class SqliteManagedFileOwnershipRegistry
 {
     private static readonly object Gate = new();
@@ -377,7 +260,7 @@ internal static class SqliteManagedFileOwnershipRegistry
         if (fileSystem is not PhysicalFileSystem)
             return null;
 
-        var path = Path.GetFullPath(databasePath);
+        var path = CanonicalizeDatabasePath(databasePath);
         var key = OperatingSystem.IsWindows() ? path.ToUpperInvariant() : path;
         SqliteManagedFileOwnership owner;
         lock (Gate)
@@ -390,5 +273,25 @@ internal static class SqliteManagedFileOwnershipRegistry
         }
 
         return owner.Acquire(createNew, readOnly, timeout);
+    }
+
+    private static string CanonicalizeDatabasePath(string databasePath)
+    {
+        var path = Path.GetFullPath(databasePath);
+        try
+        {
+            if (File.Exists(path))
+            {
+                var target = new FileInfo(path).ResolveLinkTarget(returnFinalTarget: true);
+                if (target is not null)
+                    path = target.FullName;
+            }
+        }
+        catch
+        {
+            // Fall back to the unresolved full path when the host cannot follow links.
+        }
+
+        return path;
     }
 }

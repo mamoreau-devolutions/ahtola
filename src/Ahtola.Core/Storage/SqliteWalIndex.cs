@@ -17,7 +17,9 @@ public enum SqliteWalIndexByteOrder
 /// <remarks>
 /// This capability is deliberately separate from <see cref="IFileSystem"/> until
 /// a production implementation provides mapped, cross-process-visible memory on
-/// every supported physical platform. No managed pager currently consumes it.
+/// every supported physical platform. The physical pager consumes
+/// <see cref="PhysicalFileSystem"/> mappings for Stage 1 WAL-index publication
+/// under Stage 0 ownership; Stages 2–6 still attach reader/writer protocols.
 /// </remarks>
 public interface ISqliteWalSharedMemoryFileSystem
 {
@@ -1046,9 +1048,12 @@ public sealed class SqliteWalIndexSharedMemory
             }
 
             var maximumFrame = checked((uint)recovery.LastCommittedFrameNumber);
+            // Stage 5: recovery always advances iChange so peer caches cannot keep
+            // serving pre-recovery pages against a rebuilt index.
+            var changeCounter = ResolveRecoveryChangeCounter();
             var header = maximumFrame == 0
                 ? SqliteWalIndexHeader.Create(
-                    changeCounter: 1,
+                    changeCounter,
                     wal.Header.ChecksumByteOrder,
                     wal.PageSize,
                     maximumFrame: 0,
@@ -1057,7 +1062,11 @@ public sealed class SqliteWalIndexSharedMemory
                     frameChecksum2: 0,
                     wal.Header.Salt1,
                     wal.Header.Salt2)
-                : CreateHeaderFromCommittedWal(wal, maximumFrame, recovery.LastCommittedDatabaseSizeInPages);
+                : CreateHeaderFromCommittedWal(
+                    wal,
+                    maximumFrame,
+                    recovery.LastCommittedDatabaseSizeInPages,
+                    changeCounter);
 
             EnsureWritableBlocks(SqliteWalIndexLayout.GetRequiredBlockCount(maximumFrame));
             ClearFrameIndex();
@@ -1071,6 +1080,26 @@ public sealed class SqliteWalIndexSharedMemory
 
             _mapping.MemoryBarrier();
             PublishHeaderWithoutWalValidation(header);
+        }
+    }
+
+    private uint ResolveRecoveryChangeCounter()
+    {
+        try
+        {
+            EnsureMappedBlocks(blockCount: 1);
+            var prior = ReadStableHeaderRegion().Header.ChangeCounter;
+            return unchecked(prior + 1);
+        }
+        catch (InvalidDataException)
+        {
+            return 1;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Zero-length carriers grow during EnsureWritableBlocks; first recovery
+            // still starts at iChange=1.
+            return 1;
         }
     }
 
@@ -1256,7 +1285,8 @@ public sealed class SqliteWalIndexSharedMemory
     private static SqliteWalIndexHeader CreateHeaderFromCommittedWal(
         SqliteWalFile wal,
         uint maximumFrame,
-        uint databasePageCount)
+        uint databasePageCount,
+        uint changeCounter = 1)
     {
         var committedFrame = wal.ReadFrame(maximumFrame).Header;
         if (!committedFrame.IsCommit || committedFrame.DatabaseSizeInPages != databasePageCount)
@@ -1266,7 +1296,7 @@ public sealed class SqliteWalIndexSharedMemory
         }
 
         return SqliteWalIndexHeader.Create(
-            changeCounter: 1,
+            changeCounter,
             wal.Header.ChecksumByteOrder,
             wal.PageSize,
             maximumFrame,
@@ -1279,17 +1309,23 @@ public sealed class SqliteWalIndexSharedMemory
 
     private void EnsureWritableBlocks(int blockCount)
     {
-        EnsureMappedBlocks(blockCount: 1);
-        var requiredLength = checked((long)blockCount * SqliteWalIndexLayout.BlockSize);
-        if (_mapping.Length >= requiredLength)
-            return;
+        if (blockCount <= 0)
+            throw new ArgumentOutOfRangeException(nameof(blockCount), "SQLite WAL-index block count must be positive.");
 
-        _mapping.Write(requiredLength - 1, stackalloc byte[1]);
+        // Grow first: a freshly created lock-carrier -shm is zero-length until the
+        // pager (or SQLite) publishes the first WAL-index region.
+        var requiredLength = checked((long)blockCount * SqliteWalIndexLayout.BlockSize);
         if (_mapping.Length < requiredLength)
         {
-            throw new InvalidDataException(
-                $"SQLite WAL-index mapping did not grow to its required {requiredLength} bytes.");
+            _mapping.Write(requiredLength - 1, stackalloc byte[1]);
+            if (_mapping.Length < requiredLength)
+            {
+                throw new InvalidDataException(
+                    $"SQLite WAL-index mapping did not grow to its required {requiredLength} bytes.");
+            }
         }
+
+        EnsureMappedBlocks(blockCount);
     }
 
     private void PublishFrameIndex(uint frameNumber, uint pageNumber)

@@ -41,17 +41,13 @@ public sealed record SqliteCheckpointResult(
 /// </summary>
 /// <remarks>
 /// Pagers that use the same <see cref="IFileSystem"/> and storage paths share a
-/// <see cref="SqlitePagerLockManager"/>. Physical-file pagers additionally hold
-/// SQLite's complete main-file lock-byte range for their lifetime. This grants
-/// one process exclusive client ownership while allowing managed pagers inside
-/// that process to share the database. The pager does not implement SQLite's
-/// WAL-index, so ordinary SQLite clients and other managed processes must not
-/// access the database until every pager in the owner process is disposed.
-/// Other platforms fail ownership acquisition rather than silently using only
-/// process-local locks. WAL commits become visible at their flushed commit
+/// <see cref="SqlitePagerLockManager"/>. Physical-file pagers hold a Stage 6
+/// SQLite SHARED main-file lock and coordinate WAL through the real WAL-index /
+/// <c>-shm</c> protocol (Stages 1–5). Ordinary SQLite SHARED readers may coexist.
+/// Other platforms fail main-file lock acquisition rather than silently using
+/// only process-local locks. WAL commits become visible at their flushed commit
 /// marker; DELETE-mode main-file writes are protected by a hot rollback journal.
-/// See <c>docs/wal-interoperability-contract.md</c> for
-/// the normative ownership, busy, recovery, and cache-invalidation contract.
+/// See <c>docs/wal-interoperability-contract.md</c> for the normative contract.
 /// </remarks>
 public sealed class SqlitePager : IDisposable
 {
@@ -66,6 +62,7 @@ public sealed class SqlitePager : IDisposable
     private readonly string _databasePath;
     private readonly string _walPath;
     private readonly string _journalPath;
+    private readonly string _sharedMemoryPath;
     private readonly SqlitePageStore _pageStore;
     private SqliteWalFile? _wal;
     private readonly SqlitePagerLockManager _lockManager;
@@ -83,6 +80,15 @@ public sealed class SqlitePager : IDisposable
     private SqlitePagerState _state;
     private TimeSpan _busyTimeout;
     private readonly bool _foreignReadOnly;
+    private ISqliteWalSharedMemoryMapping? _walIndexMapping;
+    private SqliteWalIndexSharedMemory? _walIndex;
+    private SqliteWalByteRangeLock? _walIndexLocks;
+    private SqliteWalReadSnapshotCoordinator? _readSnapshotCoordinator;
+    private bool _hasObservedWalIndexIdentity;
+    private uint _observedWalIndexChangeCounter;
+    private uint _observedWalIndexMaximumFrame;
+    private uint _observedWalIndexSalt1;
+    private uint _observedWalIndexSalt2;
 
     private SqlitePager(
         IFileSystem fileSystem,
@@ -100,6 +106,7 @@ public sealed class SqlitePager : IDisposable
         _databasePath = databasePath;
         _walPath = walPath;
         _journalPath = databasePath + "-journal";
+        _sharedMemoryPath = string.Concat(Path.GetFullPath(databasePath), "-shm");
         _pageStore = pageStore;
         _wal = wal;
         _journalMode = journalMode;
@@ -107,6 +114,85 @@ public sealed class SqlitePager : IDisposable
         _pageCache = new SqlitePagerReadCache(pageCacheCapacity);
         _recoveryInfo = CreateEmptyRecoveryInfo();
         _visibleRecoveryInfo = CreateEmptyRecoveryInfo();
+    }
+
+    /// <summary>
+    /// Stage 1 WAL-index accessor when the physical pager has mapped <c>-shm</c>.
+    /// Detached from Stages 2–6 lock/reader/writer protocol; ownership remains Stage 0.
+    /// </summary>
+    internal SqliteWalIndexSharedMemory? WalIndex
+    {
+        get
+        {
+            lock (_gate)
+                return _walIndex;
+        }
+    }
+
+    /// <summary>Stage 1 test hook: validate the published index against this pager's WAL.</summary>
+    internal SqliteWalIndexHeaderRegion ReadValidatedWalIndexHeader()
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (_walIndex is null || _wal is null)
+            {
+                throw new InvalidOperationException(
+                    "This SQLite pager has not attached a Stage 1 WAL-index mapping.");
+            }
+
+            return _walIndex.ReadValidatedHeader(_wal);
+        }
+    }
+
+    /// <summary>Stage 1 test hook: resolve a page through the published WAL-index.</summary>
+    internal uint? FindWalIndexFrame(uint pageNumber)
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (_walIndex is null || _wal is null)
+            {
+                throw new InvalidOperationException(
+                    "This SQLite pager has not attached a Stage 1 WAL-index mapping.");
+            }
+
+            return _walIndex.FindFrame(_wal, pageNumber);
+        }
+    }
+
+    /// <summary>
+    /// Stage 5 test hook: rebuild the attached index and bump <c>iChange</c> without
+    /// refreshing the pager's observed identity, so the next synchronized read must
+    /// detect the shared-header change.
+    /// </summary>
+    internal void RebuildAttachedWalIndexForTesting()
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (_walIndex is null || _wal is null || _walIndexMapping is null)
+            {
+                throw new InvalidOperationException(
+                    "This SQLite pager has not attached a Stage 1 WAL-index mapping.");
+            }
+
+            var mainPageCount = _committedPageCount != 0 ? _committedPageCount : _pageStore.PageCount;
+            _walIndex.RebuildFromWal(_wal, mainPageCount);
+        }
+    }
+
+    /// <summary>Stage 5 test hook: append one uncommitted WAL frame through the pager's WAL handle.</summary>
+    internal void AppendUncommittedWalFrameForTesting(uint pageNumber, ReadOnlySpan<byte> pageImage)
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            var wal = RequireWal();
+            wal.AppendFrame(pageNumber, pageImage, databaseSizeInPages: 0);
+            wal.Flush();
+            _recoveryInfo = wal.ScanRecovery();
+        }
     }
 
     /// <summary>The durable transaction format currently used by this pager.</summary>
@@ -323,6 +409,7 @@ public sealed class SqlitePager : IDisposable
                 effectiveLockManager,
                 pageCacheCapacity);
             pager.InitializeCommittedView(wal.ScanRecovery());
+            pager.AttachAndPublishWalIndex(readOnly: false);
             pager._lockGeneration = createLock.PublishStorageChange();
             pager._state = SqlitePagerState.Ready;
             pager._busyTimeout = busyTimeout ?? TimeSpan.Zero;
@@ -505,12 +592,44 @@ public sealed class SqlitePager : IDisposable
                         }
                         if (!readOnly)
                         {
-                            var repairRecovery = wal.RecoverToLastCommittedFrame();
-                            if (repairRecovery != recovery)
+                            // Map -shm before any rebuild. Dirty tails must be
+                            // repaired under Stage 5 exclusive locks before
+                            // RebuildFromWal can authenticate the boundary.
+                            pager.AttachWalIndexMapping(readOnly: false);
+                            if (HasUncommittedOrInvalidTail(recovery))
                             {
-                                throw new InvalidDataException(
-                                    "SQLite WAL changed between authenticated recovery scanning and tail repair.");
+                                if (pager._walIndex is not null)
+                                {
+                                    // Open already holds lock-manager writer + recovery
+                                    // bytes; only add CKPT + exclusive read marks.
+                                    pager.RecoverWalIndexAndTail(
+                                        wal,
+                                        publishLock: null,
+                                        writeLockAlreadyHeld: true,
+                                        recoveryLockAlreadyHeld: true);
+                                }
+                                else
+                                {
+                                    // RecoverToLastCommittedFrame returns the pre-repair
+                                    // scan; equality ensures the WAL did not change
+                                    // under us. The committed view was already built
+                                    // from that scan's last commit boundary.
+                                    var repairRecovery = wal.RecoverToLastCommittedFrame();
+                                    if (repairRecovery != recovery)
+                                    {
+                                        throw new InvalidDataException(
+                                            "SQLite WAL changed between authenticated recovery scanning and tail repair.");
+                                    }
+                                }
                             }
+                            else if (pager._walIndex is not null)
+                            {
+                                pager.PublishWalIndexFromCurrentWal();
+                            }
+                        }
+                        else
+                        {
+                            pager.AttachAndPublishWalIndex(readOnly: true);
                         }
                     }
                     else if (journalMode == SqliteJournalMode.Delete)
@@ -608,10 +727,16 @@ public sealed class SqlitePager : IDisposable
     /// <summary>
     /// Begins a stable committed snapshot. Readers do not block the WAL writer,
     /// but an active snapshot prevents a checkpoint from installing its pages.
+    /// Physical Stage 1+ pagers pin the boundary through a real SQLite read mark
+    /// (Stage 2) while Stage 0 ownership remains in force.
     /// </summary>
     public SqlitePagerReadTransaction BeginReadTransaction(TimeSpan? busyTimeout = null)
     {
-        var readerLock = _lockManager.EnterReader(ResolveBusyTimeout(busyTimeout), IsReadOnly);
+        var timeout = ResolveBusyTimeout(busyTimeout);
+        if (UsesWalIndexReadMarks())
+            return BeginReadTransactionWithWalIndexReadMark(timeout);
+
+        var readerLock = _lockManager.EnterReader(timeout, IsReadOnly);
         try
         {
             lock (_gate)
@@ -621,6 +746,7 @@ public sealed class SqlitePager : IDisposable
                 var transaction = new SqlitePagerReadTransaction(
                     this,
                     readerLock,
+                    walIndexSnapshot: null,
                     _committedPageCount,
                     new Dictionary<uint, byte[]>(_walPageOverlay),
                     _lockGeneration);
@@ -632,6 +758,100 @@ public sealed class SqlitePager : IDisposable
         {
             readerLock.Dispose();
             throw;
+        }
+    }
+
+    private bool UsesWalIndexReadMarks()
+    {
+        lock (_gate)
+        {
+            return _walIndex is not null
+                && _wal is not null
+                && _journalMode == SqliteJournalMode.Wal
+                && !_foreignReadOnly
+                && _lockManager.UsesFileBackedWalLocks;
+        }
+    }
+
+    private SqlitePagerReadTransaction BeginReadTransactionWithWalIndexReadMark(TimeSpan timeout)
+    {
+        var stopwatch = timeout == Timeout.InfiniteTimeSpan ? null : Stopwatch.StartNew();
+        while (true)
+        {
+            lock (_gate)
+            {
+                ThrowIfNotReadable();
+                SynchronizeCommittedView();
+                EnsureReadSnapshotCoordinatorLocked();
+            }
+
+            SqliteWalReadSnapshot snapshot;
+            try
+            {
+                snapshot = _readSnapshotCoordinator!.BeginRead(
+                    SqlitePagerLockManager.RemainingFileLockTimeout(timeout, stopwatch));
+            }
+            catch (SqliteWalReadSnapshotBusyException exception)
+            {
+                throw new SqlitePagerBusyException(SqlitePagerLockOperation.Reader, timeout, exception);
+            }
+            catch (SqliteWalReadSnapshotInvalidatedException exception)
+            {
+                throw new SqlitePagerBusyException(
+                    SqlitePagerLockOperation.Reader,
+                    SqlitePagerBusyReason.Snapshot,
+                    timeout,
+                    exception);
+            }
+
+            try
+            {
+                lock (_gate)
+                {
+                    ThrowIfNotReadable();
+                    SynchronizeCommittedView();
+                    EnsureReadSnapshotCoordinatorLocked();
+
+                    IReadOnlyDictionary<uint, byte[]> overlay;
+                    uint pageCount;
+                    if (snapshot.MaximumFrame == 0)
+                    {
+                        pageCount = _pageStore.PageCount;
+                        overlay = new Dictionary<uint, byte[]>();
+                    }
+                    else if (snapshot.MaximumFrame == (uint)_committedFrameCount
+                             && snapshot.DatabasePageCount == _committedPageCount)
+                    {
+                        pageCount = _committedPageCount;
+                        overlay = new Dictionary<uint, byte[]>(_walPageOverlay);
+                    }
+                    else if (snapshot.MaximumFrame < (uint)_committedFrameCount)
+                    {
+                        pageCount = snapshot.DatabasePageCount;
+                        overlay = BuildWalPageOverlayThroughFrame(snapshot.MaximumFrame, pageCount);
+                    }
+                    else
+                    {
+                        snapshot.Dispose();
+                        continue;
+                    }
+
+                    var transaction = new SqlitePagerReadTransaction(
+                        this,
+                        readerLock: null,
+                        snapshot,
+                        pageCount,
+                        overlay,
+                        _lockGeneration);
+                    _activeReadTransactions.Add(transaction);
+                    return transaction;
+                }
+            }
+            catch
+            {
+                snapshot.Dispose();
+                throw;
+            }
         }
     }
 
@@ -810,7 +1030,21 @@ public sealed class SqlitePager : IDisposable
                     InitializeCommittedView(recovery);
                     _lockGeneration = _lockManager.Generation;
                     if (!HasUncommittedOrInvalidTail(recovery))
+                    {
+                        if (_walIndex is not null)
+                            ObserveWalIndexIdentityFromAttachedIndex();
                         return;
+                    }
+
+                    if (_walIndex is not null)
+                    {
+                        RecoverWalIndexAndTail(
+                            wal,
+                            publishLock: writerLock,
+                            writeLockAlreadyHeld: true,
+                            recoveryLockAlreadyHeld: true);
+                        return;
+                    }
 
                     wal.RecoverToLastCommittedFrame();
                     recovery = wal.ScanRecovery();
@@ -904,8 +1138,16 @@ public sealed class SqlitePager : IDisposable
         if (JournalMode == journalMode)
             return journalMode;
 
-        using var checkpointLock = _lockManager.EnterCheckpoint(ResolveBusyTimeout(busyTimeout));
-        if (journalMode == SqliteJournalMode.Delete)
+        var timeout = ResolveBusyTimeout(busyTimeout);
+        // Hold one process-exclusive checkpoint lease for the entire transition so
+        // writers that race the mode change queue behind the same exclusive owner.
+        // Physical Stage 3 WAL→DELETE first finishes durable backfill via the
+        // WAL-index protocol (mark-aware), then takes this lease for the header flip.
+        if (journalMode == SqliteJournalMode.Delete && UsesWalIndexCheckpointProtocol())
+            _ = CheckpointWithWalIndexProtocol(timeout, resetCommittedWal: true, writerLockAlreadyHeld: false);
+
+        using var checkpointLock = _lockManager.EnterCheckpoint(timeout);
+        if (journalMode == SqliteJournalMode.Delete && !UsesWalIndexCheckpointProtocol())
             CheckpointToMainStoreUnderLock(checkpointLock, resetCommittedWal: true);
 
         lock (_gate)
@@ -969,9 +1211,11 @@ public sealed class SqlitePager : IDisposable
                     createdWal = null;
                     _recoveryInfo = RequireWal().ScanRecovery();
                     _visibleRecoveryInfo = _recoveryInfo;
+                    AttachAndPublishWalIndex(readOnly: false);
                 }
                 else
                 {
+                    DisposeWalIndex();
                     _wal?.Dispose();
                     _wal = null;
                     _recoveryInfo = CreateEmptyRecoveryInfo();
@@ -1039,8 +1283,25 @@ public sealed class SqlitePager : IDisposable
         TimeSpan? busyTimeout,
         bool resetCommittedWal)
     {
-        using var checkpointLock = _lockManager.EnterCheckpoint(ResolveBusyTimeout(busyTimeout));
+        var timeout = ResolveBusyTimeout(busyTimeout);
+        if (UsesWalIndexCheckpointProtocol())
+            return CheckpointWithWalIndexProtocol(timeout, resetCommittedWal, writerLockAlreadyHeld: false);
+
+        using var checkpointLock = _lockManager.EnterCheckpoint(timeout);
         return CheckpointToMainStoreUnderLock(checkpointLock, resetCommittedWal);
+    }
+
+    private bool UsesWalIndexCheckpointProtocol()
+    {
+        lock (_gate)
+        {
+            return _walIndex is not null
+                && _wal is not null
+                && _journalMode == SqliteJournalMode.Wal
+                && !_foreignReadOnly
+                && _lockManager.UsesFileBackedWalLocks
+                && _walIndexMapping is { IsReadOnly: false };
+        }
     }
 
     private SqliteCheckpointResult CheckpointToMainStoreUnderLock(
@@ -1069,53 +1330,7 @@ public sealed class SqlitePager : IDisposable
             try
             {
                 ValidateWalHasNotChanged();
-                var originalStorePageCount = _pageStore.PageCount;
-                var installedPageCount = 0;
-
-                for (var pageNumber = originalStorePageCount + 1;
-                     pageNumber <= _committedPageCount;
-                     pageNumber++)
-                {
-                    if (!_walPageOverlay.TryGetValue(pageNumber, out var page))
-                    {
-                        throw new InvalidDataException(
-                            $"Committed WAL view is missing required appended page {pageNumber}.");
-                    }
-
-                    _pageStore.WritePage(pageNumber, page);
-                    installedPageCount++;
-                    if (pageNumber == uint.MaxValue)
-                        break;
-                }
-
-                foreach (var pageNumber in _walPageOverlay.Keys
-                             .Where(pageNumber => pageNumber <= Math.Min(originalStorePageCount, _committedPageCount)
-                                                 && pageNumber != 1)
-                             .OrderBy(pageNumber => pageNumber))
-                {
-                    _pageStore.WritePage(pageNumber, _walPageOverlay[pageNumber]);
-                    installedPageCount++;
-                }
-
-                if (_committedPageCount < originalStorePageCount)
-                    ValidateShrinkCheckpointPageOne();
-
-                if (_walPageOverlay.TryGetValue(1, out var firstPage))
-                {
-                    if (_committedPageCount < originalStorePageCount)
-                        _pageStore.WriteShrinkCheckpointPageOne(firstPage);
-                    else
-                        _pageStore.WritePage(1, firstPage);
-                    installedPageCount++;
-                }
-
-                _pageStore.Flush();
-                if (_committedPageCount < originalStorePageCount)
-                {
-                    _pageStore.TruncateToPageCount(_committedPageCount);
-                    _pageStore.Flush();
-                }
-
+                var installedPageCount = InstallCommittedOverlayIntoMainStore();
                 var retainedCommittedFrameCount = _committedFrameCount;
                 if (resetCommittedWal)
                 {
@@ -1135,6 +1350,11 @@ public sealed class SqlitePager : IDisposable
                     _recoveryInfo = CreateEmptyRecoveryInfo();
                     _visibleRecoveryInfo = CreateRecoveryVisibleInfo(_recoveryInfo);
                     retainedCommittedFrameCount = 0;
+                    PublishWalIndexFromCurrentWal();
+                }
+                else
+                {
+                    PublishWalIndexFromCurrentWal();
                 }
 
                 _pageCache.Clear();
@@ -1153,6 +1373,360 @@ public sealed class SqlitePager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stage 3: checkpoint under <c>WAL_CKPT_LOCK</c>, honor held read marks for
+    /// <c>mxSafeFrame</c>, publish <c>nBackfill</c>, and only reset when every
+    /// mark is exclusive. Stage 0 main-file ownership is unchanged.
+    /// </summary>
+    private SqliteCheckpointResult CheckpointWithWalIndexProtocol(
+        TimeSpan timeout,
+        bool resetCommittedWal,
+        bool writerLockAlreadyHeld)
+    {
+        const long writeLockOffset = SqliteWalIndexCheckpointInfo.LockOffset;
+        const long checkpointLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 1;
+        const long firstReadMarkLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 3;
+
+        EnsureWalIndexByteRangeLocks();
+        var locks = _walIndexLocks
+            ?? throw new InvalidOperationException("SQLite WAL-index byte-range locks are not available.");
+        // Drop any legacy lock-manager shared-reader lease so Stage 3 mark probes
+        // observe only real WAL-index readers.
+        _lockManager.ReleaseRetainedSharedReaderLock();
+        var stopwatch = timeout == Timeout.InfiniteTimeSpan ? null : Stopwatch.StartNew();
+
+        try
+        {
+            using var checkpointLease = locks.AcquireExclusive(checkpointLockOffset, length: 1, timeout);
+            SqliteWalByteRangeLockLease? writerLease = null;
+            try
+            {
+                if (resetCommittedWal && !writerLockAlreadyHeld)
+                {
+                    writerLease = locks.AcquireExclusive(
+                        writeLockOffset,
+                        length: 1,
+                        SqlitePagerLockManager.RemainingFileLockTimeout(timeout, stopwatch));
+                }
+
+                while (true)
+                {
+                    List<SqliteWalByteRangeLockLease>? readMarkLeases = null;
+                    try
+                    {
+                        lock (_gate)
+                        {
+                            ThrowIfDisposed();
+                            ThrowIfReadOnly();
+                            SynchronizeCommittedView();
+                            if (_journalMode == SqliteJournalMode.Delete)
+                            {
+                                if (_state != SqlitePagerState.Ready)
+                                    throw new InvalidOperationException($"Cannot checkpoint while the SQLite pager is {_state}.");
+                                return new SqliteCheckpointResult(_committedPageCount, 0, 0);
+                            }
+                            if (HasUncommittedOrInvalidTail(_recoveryInfo))
+                            {
+                                throw new InvalidOperationException(
+                                    "Cannot checkpoint a SQLite WAL with an uncommitted or invalid tail; recover it under the writer lock first.");
+                            }
+                            if (_state != SqlitePagerState.Ready)
+                                throw new InvalidOperationException($"Cannot checkpoint while the SQLite pager is {_state}.");
+                            if (_walIndex is null || _wal is null)
+                                throw new InvalidOperationException("SQLite WAL-index checkpoint requires an attached index.");
+
+                            var region = _walIndex.ReadValidatedHeader(_wal);
+                            readMarkLeases = [];
+                            var safeFrame = region.Header.MaximumFrame;
+                            var allExclusive = true;
+                            for (var markIndex = 0; markIndex < SqliteWalIndexCheckpointInfo.ReadMarkCount; markIndex++)
+                            {
+                                if (locks.TryAcquireExclusive(
+                                        firstReadMarkLockOffset + markIndex,
+                                        length: 1,
+                                        out var markLease))
+                                {
+                                    readMarkLeases.Add(
+                                        markLease
+                                        ?? throw new InvalidOperationException(
+                                            "SQLite read-mark locking reported success without a lease."));
+                                    continue;
+                                }
+
+                                allExclusive = false;
+                                var readMark = region.CheckpointInfo.GetReadMark(markIndex);
+                                if (markIndex == 0 || readMark == 0)
+                                {
+                                    safeFrame = Math.Min(safeFrame, region.CheckpointInfo.BackfilledFrameCount);
+                                    continue;
+                                }
+
+                                // Match SQLite: a held unused mark does not lower mxSafeFrame.
+                                if (readMark == SqliteWalIndexCheckpointInfo.ReadMarkNotUsed
+                                    || readMark > region.Header.MaximumFrame)
+                                {
+                                    continue;
+                                }
+
+                                safeFrame = Math.Min(safeFrame, readMark);
+                            }
+
+                            if (resetCommittedWal && !allExclusive)
+                            {
+                                DisposeWalIndexLeases(readMarkLeases);
+                                readMarkLeases = null;
+                            }
+                            else
+                            {
+                                _state = SqlitePagerState.Checkpointing;
+                                try
+                                {
+                                    ValidateWalHasNotChanged();
+                                    if (safeFrame < region.CheckpointInfo.BackfilledFrameCount)
+                                    {
+                                        throw new InvalidDataException(
+                                            "SQLite WAL read marks would move durable checkpoint progress backwards.");
+                                    }
+
+                                    var attempted = region.CheckpointInfo.BackfillAttemptedFrameCount;
+                                    if (safeFrame > attempted)
+                                    {
+                                        _walIndex.PublishBackfillAttemptedFrameCount(region.Header, safeFrame, _wal);
+                                        attempted = safeFrame;
+                                    }
+
+                                    var installedPageCount = 0;
+                                    var backfilled = region.CheckpointInfo.BackfilledFrameCount;
+                                    if (safeFrame > backfilled)
+                                    {
+                                        // Release unheld marks before copying so new readers can arrive (SQLite PASSIVE).
+                                        if (!resetCommittedWal)
+                                        {
+                                            DisposeWalIndexLeases(readMarkLeases);
+                                            readMarkLeases = null;
+                                        }
+
+                                        RequireWal().Flush();
+                                        installedPageCount = safeFrame == (uint)_committedFrameCount
+                                            ? InstallCommittedOverlayIntoMainStore()
+                                            : InstallWalFramesIntoMainStore(safeFrame);
+                                        _walIndex.PublishBackfilledFrameCount(region.Header, safeFrame, _wal);
+                                        backfilled = safeFrame;
+                                    }
+
+                                    var retainedCommittedFrameCount = _committedFrameCount;
+                                    if (resetCommittedWal)
+                                    {
+                                        if (!allExclusive || backfilled != region.Header.MaximumFrame)
+                                        {
+                                            throw new InvalidOperationException(
+                                                "SQLite WAL restart requires exclusive ownership of every reader mark and a complete backfill.");
+                                        }
+
+                                        if (_pageStore.PageCount != region.Header.DatabasePageCount)
+                                        {
+                                            throw new InvalidDataException(
+                                                "Cannot reset a SQLite WAL before the main database file reaches the committed page count.");
+                                        }
+
+                                        ValidateWalHasNotChanged();
+                                        var confirmation = _walIndex.ReadValidatedHeader(_wal);
+                                        RequireWal().ResetAfterDurableCheckpoint(CanPublishCheckpointedRecoveryMarker());
+                                        _walPageOverlay.Clear();
+                                        _committedFrameCount = 0;
+                                        _recoveryInfo = CreateEmptyRecoveryInfo();
+                                        _visibleRecoveryInfo = CreateRecoveryVisibleInfo(_recoveryInfo);
+                                        retainedCommittedFrameCount = 0;
+                                        var restarted = confirmation.Header.WithRestartedWal(_pageStore.PageCount);
+                                        _walIndex.ResetAfterDurableRestart(restarted);
+                                        ObserveWalIndexIdentity(restarted);
+                                    }
+                                    else
+                                    {
+                                        ObserveWalIndexIdentityFromAttachedIndex();
+                                    }
+
+                                    _pageCache.Clear();
+                                    _lockGeneration = unchecked(_lockGeneration + 1);
+                                    _state = SqlitePagerState.Ready;
+                                    return new SqliteCheckpointResult(
+                                        _committedPageCount,
+                                        installedPageCount,
+                                        retainedCommittedFrameCount);
+                                }
+                                catch
+                                {
+                                    TransitionToFaulted();
+                                    throw;
+                                }
+                            }
+                        }
+
+                        if (!WaitForWalIndexRetry(timeout, stopwatch))
+                        {
+                            throw new SqlitePagerBusyException(SqlitePagerLockOperation.Checkpoint, timeout);
+                        }
+                    }
+                    finally
+                    {
+                        DisposeWalIndexLeases(readMarkLeases);
+                    }
+                }
+            }
+            finally
+            {
+                writerLease?.Dispose();
+            }
+        }
+        catch (SqliteWalByteRangeLockBusyException exception)
+        {
+            throw new SqlitePagerBusyException(SqlitePagerLockOperation.Checkpoint, timeout, exception);
+        }
+    }
+
+    private int InstallCommittedOverlayIntoMainStore()
+    {
+        var originalStorePageCount = _pageStore.PageCount;
+        var installedPageCount = 0;
+
+        for (var pageNumber = originalStorePageCount + 1;
+             pageNumber <= _committedPageCount;
+             pageNumber++)
+        {
+            if (!_walPageOverlay.TryGetValue(pageNumber, out var page))
+            {
+                throw new InvalidDataException(
+                    $"Committed WAL view is missing required appended page {pageNumber}.");
+            }
+
+            _pageStore.WritePage(pageNumber, page);
+            installedPageCount++;
+            if (pageNumber == uint.MaxValue)
+                break;
+        }
+
+        foreach (var pageNumber in _walPageOverlay.Keys
+                     .Where(pageNumber => pageNumber <= Math.Min(originalStorePageCount, _committedPageCount)
+                                         && pageNumber != 1)
+                     .OrderBy(pageNumber => pageNumber))
+        {
+            _pageStore.WritePage(pageNumber, _walPageOverlay[pageNumber]);
+            installedPageCount++;
+        }
+
+        if (_committedPageCount < originalStorePageCount)
+            ValidateShrinkCheckpointPageOne();
+
+        if (_walPageOverlay.TryGetValue(1, out var firstPage))
+        {
+            if (_committedPageCount < originalStorePageCount)
+                _pageStore.WriteShrinkCheckpointPageOne(firstPage);
+            else
+                _pageStore.WritePage(1, firstPage);
+            installedPageCount++;
+        }
+
+        _pageStore.Flush();
+        if (_committedPageCount < originalStorePageCount)
+        {
+            _pageStore.TruncateToPageCount(_committedPageCount);
+            _pageStore.Flush();
+        }
+
+        return installedPageCount;
+    }
+
+    private int InstallWalFramesIntoMainStore(uint safeFrame)
+    {
+        var wal = RequireWal();
+        var finalFrame = wal.ReadFrame(safeFrame);
+        if (!finalFrame.Header.IsCommit)
+        {
+            throw new InvalidDataException(
+                $"SQLite WAL safe checkpoint frame {safeFrame} is not a committed transaction boundary.");
+        }
+
+        var targetPageCount = finalFrame.Header.DatabaseSizeInPages;
+        var latestFrames = new Dictionary<uint, byte[]>();
+        for (var frameNumber = 1U; ; frameNumber++)
+        {
+            var frame = wal.ReadFrame(frameNumber);
+            latestFrames[frame.Header.PageNumber] = frame.PageData;
+            if (frameNumber == safeFrame)
+                break;
+        }
+
+        var originalPageCount = _pageStore.PageCount;
+        var installedPageCount = 0;
+        if (targetPageCount > originalPageCount)
+        {
+            for (var pageNumber = checked(originalPageCount + 1); pageNumber <= targetPageCount; pageNumber++)
+            {
+                if (!latestFrames.TryGetValue(pageNumber, out var page))
+                {
+                    throw new InvalidDataException(
+                        $"SQLite WAL checkpoint is missing newly appended database page {pageNumber}.");
+                }
+
+                _pageStore.WritePage(pageNumber, page);
+                installedPageCount++;
+            }
+        }
+
+        foreach (var (pageNumber, page) in latestFrames
+                     .Where(entry => entry.Key <= targetPageCount && entry.Key != 1)
+                     .OrderBy(static entry => entry.Key))
+        {
+            _pageStore.WritePage(pageNumber, page);
+            installedPageCount++;
+        }
+
+        if (targetPageCount < originalPageCount)
+        {
+            if (!latestFrames.TryGetValue(1, out var pageOne))
+            {
+                throw new InvalidDataException(
+                    "SQLite WAL shrink checkpoint is missing the authoritative first page.");
+            }
+
+            _pageStore.WriteShrinkCheckpointPageOne(pageOne);
+            installedPageCount++;
+            _pageStore.Flush();
+            _pageStore.TruncateToPageCount(targetPageCount);
+            _pageStore.Flush();
+            return installedPageCount;
+        }
+
+        if (latestFrames.TryGetValue(1, out var updatedPageOne))
+        {
+            _pageStore.WritePage(1, updatedPageOne);
+            installedPageCount++;
+        }
+
+        _pageStore.Flush();
+        return installedPageCount;
+    }
+
+    private void EnsureWalIndexByteRangeLocks()
+    {
+        lock (_gate)
+        {
+            _walIndexLocks ??= new SqliteWalByteRangeLock(_sharedMemoryPath);
+        }
+    }
+
+    private static void DisposeWalIndexLeases(List<SqliteWalByteRangeLockLease>? leases)
+    {
+        if (leases is null)
+            return;
+        foreach (var lease in leases)
+            lease.Dispose();
+        leases.Clear();
+    }
+
+    private static bool WaitForWalIndexRetry(TimeSpan timeout, Stopwatch? stopwatch)
+        => SqliteBusyBackoff.Wait(timeout, stopwatch);
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -1170,6 +1744,7 @@ public sealed class SqlitePager : IDisposable
                 _activeTransaction = null;
                 _activeReadTransactions.Clear();
                 _state = SqlitePagerState.Disposed;
+                DisposeWalIndex();
                 _wal?.Dispose();
                 _pageStore.Dispose();
             }
@@ -1210,6 +1785,8 @@ public sealed class SqlitePager : IDisposable
 
                 var wal = RequireWal();
                 ValidateWalHasNotChanged();
+                var priorWalIndexHeader = TryReadValidatedWalIndexHeader(wal);
+                var priorCommittedFrameCount = _committedFrameCount;
                 for (var index = 0; index < transaction.WriteOrder.Count; index++)
                 {
                     var pageNumber = transaction.WriteOrder[index];
@@ -1229,14 +1806,29 @@ public sealed class SqlitePager : IDisposable
                 }
 
                 PublishCommittedTransaction(transaction, recovery);
+                PublishWalIndexAfterCommit(
+                    wal,
+                    priorWalIndexHeader,
+                    priorCommittedFrameCount,
+                    recovery);
                 _lockGeneration = transaction.PublishStorageChange();
                 _activeTransaction = null;
                 _state = SqlitePagerState.Ready;
                 if (transaction.CheckpointWalAfterCommit)
                 {
-                    _ = CheckpointToMainStoreUnderLock(
-                        transaction.TransactionLock,
-                        resetCommittedWal: true);
+                    if (UsesWalIndexCheckpointProtocol())
+                    {
+                        _ = CheckpointWithWalIndexProtocol(
+                            TimeSpan.Zero,
+                            resetCommittedWal: true,
+                            writerLockAlreadyHeld: true);
+                    }
+                    else
+                    {
+                        _ = CheckpointToMainStoreUnderLock(
+                            transaction.TransactionLock,
+                            resetCommittedWal: true);
+                    }
                 }
                 transaction.ReleaseWriterLock();
             }
@@ -1403,13 +1995,10 @@ public sealed class SqlitePager : IDisposable
     /// pager's committed view is current.
     /// </summary>
     /// <remarks>
-    /// A physical database holds SQLite's complete main-file lock-byte range
-    /// exclusively for the lifetime of every pager in this process, so no
-    /// ordinary SQLite client and no other managed process can change durable
-    /// storage. Every in-process commit, checkpoint, and recovery publishes a
-    /// new lock generation, so an unchanged generation proves the committed
-    /// view still matches durable storage. A file-backed lock coordinator
-    /// without that ownership carrier has no such proof and must rescan.
+    /// Foreign read-only has no main-file lease. Physical pagers with a Stage 6
+    /// SHARED lease still detect peer WAL changes via WAL-index identity
+    /// (<c>iChange</c>/<c>mxFrame</c>/salts) inside <see cref="SynchronizeCommittedView"/>.
+    /// A file-backed coordinator without any main-file lease must always rescan.
     /// </remarks>
     private bool RequiresSharedStorageRescan
         => _foreignReadOnly || (_lockManager.UsesFileBackedWalLocks && _clientOwnership is null);
@@ -1460,7 +2049,8 @@ public sealed class SqlitePager : IDisposable
         try
         {
             var generation = _lockManager.Generation;
-            if (_lockGeneration == generation && !RequiresSharedStorageRescan)
+            var walIndexChanged = TryDetectWalIndexIdentityChange(out var walIndexRegion);
+            if (_lockGeneration == generation && !RequiresSharedStorageRescan && !walIndexChanged)
                 return;
 
             CommittedViewRescanCount++;
@@ -1469,7 +2059,7 @@ public sealed class SqlitePager : IDisposable
                 throw new InvalidDataException(
                     "SQLite database has a hot rollback journal; dispose and reopen it writable to recover.");
             }
-            if (_lockGeneration != generation)
+            if (_lockGeneration != generation || walIndexChanged)
                 ValidateMainFileFormat();
 
             if (_journalMode == SqliteJournalMode.Delete)
@@ -1481,6 +2071,7 @@ public sealed class SqlitePager : IDisposable
                 _recoveryInfo = CreateEmptyRecoveryInfo();
                 _visibleRecoveryInfo = _recoveryInfo;
                 _lockGeneration = generation;
+                ClearObservedWalIndexIdentity();
                 return;
             }
             if (_foreignReadOnly)
@@ -1491,6 +2082,7 @@ public sealed class SqlitePager : IDisposable
                 _pageStore.RefreshHeader();
                 InitializeCleanWalView();
                 _lockGeneration = generation;
+                ClearObservedWalIndexIdentity();
                 return;
             }
 
@@ -1505,12 +2097,87 @@ public sealed class SqlitePager : IDisposable
 
             InitializeCommittedView(recovery);
             _lockGeneration = generation;
+            if (walIndexRegion is not null)
+                ObserveWalIndexIdentity(walIndexRegion.Header);
+            else
+                ObserveWalIndexIdentityFromAttachedIndex();
         }
         catch
         {
             TransitionToFaulted();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Stage 5: physical WAL-index identity (<c>iChange</c>, <c>mxFrame</c>, salts)
+    /// invalidates the committed view independently of the process-local lock
+    /// generation so recovery and peer writers cannot leave stale cache entries.
+    /// </summary>
+    private bool TryDetectWalIndexIdentityChange(out SqliteWalIndexHeaderRegion? region)
+    {
+        region = null;
+        if (_walIndex is null || _wal is null || _journalMode != SqliteJournalMode.Wal)
+            return false;
+
+        try
+        {
+            region = _walIndex.ReadValidatedHeader(_wal);
+        }
+        catch (InvalidDataException)
+        {
+            // Torn/corrupt publication: force a full rescan path; callers that
+            // need a durable index rebuild take recovery locks separately.
+            return _hasObservedWalIndexIdentity;
+        }
+
+        if (!_hasObservedWalIndexIdentity)
+        {
+            ObserveWalIndexIdentity(region.Header);
+            return false;
+        }
+
+        var header = region.Header;
+        return header.ChangeCounter != _observedWalIndexChangeCounter
+            || header.MaximumFrame != _observedWalIndexMaximumFrame
+            || header.Salt1 != _observedWalIndexSalt1
+            || header.Salt2 != _observedWalIndexSalt2;
+    }
+
+    private void ObserveWalIndexIdentityFromAttachedIndex()
+    {
+        if (_walIndex is null || _wal is null)
+        {
+            ClearObservedWalIndexIdentity();
+            return;
+        }
+
+        try
+        {
+            ObserveWalIndexIdentity(_walIndex.ReadValidatedHeader(_wal).Header);
+        }
+        catch (InvalidDataException)
+        {
+            ClearObservedWalIndexIdentity();
+        }
+    }
+
+    private void ObserveWalIndexIdentity(SqliteWalIndexHeader header)
+    {
+        _hasObservedWalIndexIdentity = true;
+        _observedWalIndexChangeCounter = header.ChangeCounter;
+        _observedWalIndexMaximumFrame = header.MaximumFrame;
+        _observedWalIndexSalt1 = header.Salt1;
+        _observedWalIndexSalt2 = header.Salt2;
+    }
+
+    private void ClearObservedWalIndexIdentity()
+    {
+        _hasObservedWalIndexIdentity = false;
+        _observedWalIndexChangeCounter = 0;
+        _observedWalIndexMaximumFrame = 0;
+        _observedWalIndexSalt1 = 0;
+        _observedWalIndexSalt2 = 0;
     }
 
     private void ValidateMainFileFormat()
@@ -1608,6 +2275,17 @@ public sealed class SqlitePager : IDisposable
             return;
 
         var wal = RequireWal();
+        if (_walIndex is not null)
+        {
+            // Caller holds lock-manager writer + recovery bytes.
+            RecoverWalIndexAndTail(
+                wal,
+                publishLock: writerLock,
+                writeLockAlreadyHeld: true,
+                recoveryLockAlreadyHeld: true);
+            return;
+        }
+
         wal.RecoverToLastCommittedFrame();
         var recovery = wal.ScanRecovery();
         if (HasUncommittedOrInvalidTail(recovery))
@@ -1615,6 +2293,100 @@ public sealed class SqlitePager : IDisposable
 
         InitializeCommittedView(recovery);
         _lockGeneration = writerLock.PublishStorageChange();
+    }
+
+    /// <summary>
+    /// Stage 5 recovery: exclusive checkpoint/writer/recovery/read-mark locks,
+    /// truncate an uncommitted tail when present, rebuild the WAL-index, and bump
+    /// <c>iChange</c> so shared caches cannot keep pre-recovery pages.
+    /// </summary>
+    /// <remarks>
+    /// Callers that already hold lock-manager writer/recovery bytes must pass the
+    /// corresponding <c>*AlreadyHeld</c> flags so this path does not try to lock
+    /// the same SHM bytes twice through a second handle.
+    /// </remarks>
+    private void RecoverWalIndexAndTail(
+        SqliteWalFile wal,
+        SqlitePagerLockLease? publishLock,
+        bool writeLockAlreadyHeld,
+        bool recoveryLockAlreadyHeld)
+    {
+        const long writeLockOffset = SqliteWalIndexCheckpointInfo.LockOffset;
+        const long checkpointLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 1;
+        const long recoveryLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 2;
+        const long firstReadMarkLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 3;
+
+        EnsureWalIndexByteRangeLocks();
+        var locks = _walIndexLocks
+            ?? throw new InvalidOperationException("SQLite WAL-index recovery requires byte-range locks.");
+        _lockManager.ReleaseRetainedSharedReaderLock();
+
+        try
+        {
+            using var checkpointLease = locks.AcquireExclusive(
+                checkpointLockOffset,
+                length: 1,
+                TimeSpan.Zero);
+            using var writerLease = writeLockAlreadyHeld
+                ? null
+                : locks.AcquireExclusive(writeLockOffset, length: 1, TimeSpan.Zero);
+            using var recoveryLease = recoveryLockAlreadyHeld
+                ? null
+                : locks.AcquireExclusive(recoveryLockOffset, length: 1, TimeSpan.Zero);
+            var readMarkLeases = new List<SqliteWalByteRangeLockLease>(SqliteWalIndexCheckpointInfo.ReadMarkCount);
+            try
+            {
+                for (var markIndex = 0; markIndex < SqliteWalIndexCheckpointInfo.ReadMarkCount; markIndex++)
+                {
+                    if (!locks.TryAcquireExclusive(
+                            firstReadMarkLockOffset + markIndex,
+                            length: 1,
+                            out var markLease))
+                    {
+                        throw new SqlitePagerBusyException(
+                            SqlitePagerLockOperation.Writer,
+                            SqlitePagerBusyReason.Recovery,
+                            TimeSpan.Zero);
+                    }
+
+                    readMarkLeases.Add(
+                        markLease
+                        ?? throw new InvalidOperationException(
+                            "SQLite recovery read-mark locking reported success without a lease."));
+                }
+
+                if (HasUncommittedOrInvalidTail(wal.ScanRecovery()))
+                {
+                    wal.RecoverToLastCommittedFrame();
+                    var repaired = wal.ScanRecovery();
+                    if (HasUncommittedOrInvalidTail(repaired))
+                    {
+                        throw new InvalidDataException(
+                            "SQLite WAL recovery did not remove its uncommitted or invalid tail.");
+                    }
+                }
+
+                InitializeCommittedView(wal.ScanRecovery());
+                var mainPageCount = _committedPageCount != 0 ? _committedPageCount : _pageStore.PageCount;
+                _walIndex!.RebuildFromWal(wal, mainPageCount);
+                ObserveWalIndexIdentityFromAttachedIndex();
+                _pageCache.Clear();
+                _lockGeneration = publishLock?.PublishStorageChange()
+                    ?? unchecked(_lockManager.Generation + 1);
+            }
+            finally
+            {
+                DisposeWalIndexLeases(readMarkLeases);
+            }
+        }
+        catch (SqliteWalByteRangeLockBusyException exception)
+        {
+            throw new SqlitePagerBusyException(
+                SqlitePagerLockOperation.Writer,
+                SqlitePagerBusyReason.Recovery,
+                TimeSpan.Zero,
+                exception);
+        }
     }
 
     private static bool HasUncommittedOrInvalidTail(SqliteWalRecoveryInfo recovery)
@@ -1870,6 +2642,215 @@ public sealed class SqlitePager : IDisposable
         ValidateVisiblePageSources();
     }
 
+    /// <summary>
+    /// Stage 1: map physical <c>-shm</c> and publish a dual-header WAL-index that
+    /// matches an independent WAL scan. Stage 0 ownership is unchanged.
+    /// </summary>
+    private void AttachAndPublishWalIndex(bool readOnly)
+    {
+        AttachWalIndexMapping(readOnly);
+        if (!readOnly && _walIndex is not null)
+            PublishWalIndexFromCurrentWal();
+    }
+
+    private void AttachWalIndexMapping(bool readOnly)
+    {
+        if (_foreignReadOnly
+            || !_lockManager.UsesFileBackedWalLocks
+            || _wal is null
+            || _journalMode != SqliteJournalMode.Wal)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_walIndex is not null)
+                return;
+
+            if (readOnly)
+            {
+                if (!File.Exists(_sharedMemoryPath))
+                    return;
+
+                var length = new FileInfo(_sharedMemoryPath).Length;
+                if (length == 0)
+                    return;
+
+                _walIndexMapping = PhysicalFileSystem.Instance.OpenSharedMemory(
+                    _sharedMemoryPath,
+                    FileOpenMode.OpenExisting,
+                    readOnly: true);
+                _walIndex = new SqliteWalIndexSharedMemory(_walIndexMapping);
+                try
+                {
+                    var region = _walIndex.ReadValidatedHeader(_wal);
+                    ObserveWalIndexIdentity(region.Header);
+                }
+                catch (InvalidDataException)
+                {
+                    // Peer engines may hold a torn or mid-update -shm. Read-only
+                    // opens fall back to WAL-scan views rather than failing closed.
+                    DisposeWalIndex();
+                }
+
+                return;
+            }
+
+            _walIndexMapping = PhysicalFileSystem.Instance.OpenSharedMemory(
+                _sharedMemoryPath,
+                FileOpenMode.OpenOrCreate,
+                readOnly: false);
+            _walIndex = new SqliteWalIndexSharedMemory(_walIndexMapping);
+        }
+        catch
+        {
+            DisposeWalIndex();
+            throw;
+        }
+    }
+
+    private void PublishWalIndexFromCurrentWal()
+    {
+        if (_walIndex is null || _wal is null || _walIndexMapping is null)
+            return;
+        if (_walIndexMapping.IsReadOnly)
+        {
+            throw new InvalidOperationException(
+                "Cannot publish a SQLite WAL-index through a read-only shared-memory mapping.");
+        }
+
+        var mainPageCount = _committedPageCount != 0
+            ? _committedPageCount
+            : _pageStore.PageCount;
+        if (mainPageCount == 0)
+        {
+            throw new InvalidDataException(
+                "Cannot publish a SQLite WAL-index without a nonzero main-database page count.");
+        }
+
+        _walIndex.RebuildFromWal(_wal, mainPageCount);
+        ObserveWalIndexIdentityFromAttachedIndex();
+    }
+
+    private SqliteWalIndexHeader? TryReadValidatedWalIndexHeader(SqliteWalFile wal)
+    {
+        if (_walIndex is null || _walIndexMapping is null || _walIndexMapping.IsReadOnly)
+            return null;
+
+        try
+        {
+            return _walIndex.ReadValidatedHeader(wal).Header;
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Stage 3 writer publication: append is already durable; publish frame/hash
+    /// entries and dual headers incrementally when the prior index is trustworthy,
+    /// otherwise rebuild from the WAL scan.
+    /// </summary>
+    private void PublishWalIndexAfterCommit(
+        SqliteWalFile wal,
+        SqliteWalIndexHeader? priorHeader,
+        long priorCommittedFrameCount,
+        SqliteWalRecoveryInfo recovery)
+    {
+        if (_walIndex is null || _walIndexMapping is null)
+            return;
+        if (_walIndexMapping.IsReadOnly)
+        {
+            throw new InvalidOperationException(
+                "Cannot publish a SQLite WAL-index through a read-only shared-memory mapping.");
+        }
+
+        if (priorHeader is not null
+            && priorHeader.MaximumFrame == (uint)priorCommittedFrameCount
+            && recovery.LastCommittedFrameNumber > priorCommittedFrameCount)
+        {
+            var frames = new List<SqliteWalFrame>(
+                checked((int)(recovery.LastCommittedFrameNumber - priorCommittedFrameCount)));
+            for (var frameNumber = priorCommittedFrameCount + 1;
+                 frameNumber <= recovery.LastCommittedFrameNumber;
+                 frameNumber++)
+            {
+                frames.Add(wal.ReadFrame(frameNumber));
+            }
+
+            var commitFrame = frames[^1].Header;
+            var committedHeader = priorHeader.WithCommittedFrames(
+                checked((uint)recovery.LastCommittedFrameNumber),
+                recovery.LastCommittedDatabaseSizeInPages,
+                commitFrame.Checksum1,
+                commitFrame.Checksum2);
+            _walIndex.PublishCommittedFrames(priorHeader, frames, committedHeader, wal);
+            ObserveWalIndexIdentity(committedHeader);
+            return;
+        }
+
+        PublishWalIndexFromCurrentWal();
+    }
+
+    private void DisposeWalIndex()
+    {
+        _readSnapshotCoordinator?.Dispose();
+        _readSnapshotCoordinator = null;
+        _walIndexLocks = null;
+        _walIndex = null;
+        _walIndexMapping?.Dispose();
+        _walIndexMapping = null;
+        ClearObservedWalIndexIdentity();
+    }
+
+    private void EnsureReadSnapshotCoordinatorLocked()
+    {
+        if (_readSnapshotCoordinator is not null || _walIndex is null || _wal is null)
+            return;
+
+        _walIndexLocks ??= new SqliteWalByteRangeLock(_sharedMemoryPath);
+        _readSnapshotCoordinator = new SqliteWalReadSnapshotCoordinator(
+            _wal,
+            _walIndex,
+            _walIndexLocks);
+    }
+
+    private Dictionary<uint, byte[]> BuildWalPageOverlayThroughFrame(uint maximumFrame, uint databasePageCount)
+    {
+        var wal = RequireWal();
+        var overlay = new Dictionary<uint, byte[]>();
+        var transactionPages = new Dictionary<uint, byte[]>();
+        uint lastCommitPageCount = 0;
+        for (var frameNumber = 1U; frameNumber <= maximumFrame; frameNumber++)
+        {
+            var frame = wal.ReadFrame(frameNumber);
+            transactionPages[frame.Header.PageNumber] = frame.PageData;
+            if (!frame.Header.IsCommit)
+                continue;
+
+            foreach (var pair in transactionPages)
+                overlay[pair.Key] = pair.Value;
+            lastCommitPageCount = frame.Header.DatabaseSizeInPages;
+            transactionPages.Clear();
+        }
+
+        if (transactionPages.Count != 0)
+        {
+            throw new InvalidDataException(
+                "SQLite WAL read-mark boundary stopped inside an uncommitted transaction.");
+        }
+
+        if (lastCommitPageCount != databasePageCount)
+        {
+            throw new InvalidDataException(
+                "SQLite WAL read-mark page count does not match its commit boundary.");
+        }
+
+        return overlay;
+    }
+
     private void ValidatePageOneImage(
         IReadOnlyDictionary<uint, byte[]> transactionPages,
         uint targetDatabaseSizeInPages)
@@ -2107,16 +3088,22 @@ public sealed class SqlitePagerReadTransaction : IDisposable
     private readonly IReadOnlyDictionary<uint, byte[]> _walPageOverlay;
     private readonly long _cacheGeneration;
     private SqlitePagerLockLease? _readerLock;
+    private SqliteWalReadSnapshot? _walIndexSnapshot;
 
     internal SqlitePagerReadTransaction(
         SqlitePager pager,
-        SqlitePagerLockLease readerLock,
+        SqlitePagerLockLease? readerLock,
+        SqliteWalReadSnapshot? walIndexSnapshot,
         uint pageCount,
         IReadOnlyDictionary<uint, byte[]> walPageOverlay,
         long cacheGeneration)
     {
+        if (readerLock is null && walIndexSnapshot is null)
+            throw new ArgumentException("A SQLite pager read transaction requires a reader lock or WAL-index snapshot.");
+
         _pager = pager;
         _readerLock = readerLock;
+        _walIndexSnapshot = walIndexSnapshot;
         PageCount = pageCount;
         _walPageOverlay = walPageOverlay;
         _cacheGeneration = cacheGeneration;
@@ -2131,7 +3118,27 @@ public sealed class SqlitePagerReadTransaction : IDisposable
         get
         {
             lock (_gate)
-                return _readerLock is not null;
+                return _readerLock is not null || _walIndexSnapshot is not null;
+        }
+    }
+
+    /// <summary>Stage 2: pinned WAL-index read-mark slot, when used.</summary>
+    internal int? WalIndexReadMarkIndex
+    {
+        get
+        {
+            lock (_gate)
+                return _walIndexSnapshot?.ReadMarkIndex;
+        }
+    }
+
+    /// <summary>Stage 2: pinned committed frame boundary, when used.</summary>
+    internal uint? WalIndexMaximumFrame
+    {
+        get
+        {
+            lock (_gate)
+                return _walIndexSnapshot?.MaximumFrame;
         }
     }
 
@@ -2140,8 +3147,21 @@ public sealed class SqlitePagerReadTransaction : IDisposable
     {
         lock (_gate)
         {
-            if (_readerLock is null)
+            if (_readerLock is null && _walIndexSnapshot is null)
                 throw new ObjectDisposedException(nameof(SqlitePagerReadTransaction));
+
+            try
+            {
+                _walIndexSnapshot?.EnsureStillValid();
+            }
+            catch (SqliteWalReadSnapshotInvalidatedException exception)
+            {
+                throw new SqlitePagerBusyException(
+                    SqlitePagerLockOperation.Reader,
+                    SqlitePagerBusyReason.Snapshot,
+                    TimeSpan.Zero,
+                    exception);
+            }
 
             return _pager.ReadSnapshotPage(_walPageOverlay, PageCount, _cacheGeneration, pageNumber);
         }
@@ -2151,15 +3171,19 @@ public sealed class SqlitePagerReadTransaction : IDisposable
     public void Dispose()
     {
         SqlitePagerLockLease? readerLock;
+        SqliteWalReadSnapshot? walIndexSnapshot;
         lock (_gate)
         {
             readerLock = _readerLock;
+            walIndexSnapshot = _walIndexSnapshot;
             _readerLock = null;
-            if (readerLock is null)
+            _walIndexSnapshot = null;
+            if (readerLock is null && walIndexSnapshot is null)
                 return;
 
             _pager.EndReadTransaction(this);
-            readerLock.Dispose();
+            readerLock?.Dispose();
+            walIndexSnapshot?.Dispose();
         }
     }
 
@@ -2168,8 +3192,11 @@ public sealed class SqlitePagerReadTransaction : IDisposable
         lock (_gate)
         {
             var readerLock = _readerLock;
+            var walIndexSnapshot = _walIndexSnapshot;
             _readerLock = null;
+            _walIndexSnapshot = null;
             readerLock?.Dispose();
+            walIndexSnapshot?.Dispose();
         }
     }
 }

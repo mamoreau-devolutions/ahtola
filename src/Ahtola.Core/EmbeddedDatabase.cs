@@ -29,6 +29,11 @@ public class EmbeddedSqlException : Exception
     {
     }
 
+    public EmbeddedSqlException(string message, int sqliteErrorCode) : base(message)
+    {
+        SqliteErrorCode = sqliteErrorCode;
+    }
+
     internal EmbeddedSqlException(string message, InsertConflictAlgorithm conflictAlgorithm) : base(message)
     {
         ConflictAlgorithm = conflictAlgorithm;
@@ -42,9 +47,23 @@ public class EmbeddedSqlException : Exception
         ConflictAlgorithm = conflictAlgorithm ?? InsertConflictAlgorithm.Abort;
     }
 
+    internal EmbeddedSqlException(
+        string message,
+        int sqliteErrorCode,
+        InsertConflictAlgorithm? conflictAlgorithm) : base(message)
+    {
+        SqliteErrorCode = sqliteErrorCode;
+        ConflictAlgorithm = conflictAlgorithm;
+    }
+
     public EmbeddedSqlException(string message, Exception innerException) : base(message, innerException)
     {
     }
+
+    /// <summary>
+    /// Optional SQLite result code (e.g. 19 CONSTRAINT) when raised from Halt / HaltIfNull.
+    /// </summary>
+    public int? SqliteErrorCode { get; }
 
     internal InsertConflictAlgorithm? ConflictAlgorithm { get; }
 }
@@ -493,6 +512,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
         EmbeddedTable Table,
         EmbeddedIndex Index,
         bool Search);
+
+    private sealed record ManagedOrIndexUnionPlan(
+        NamedTableSource Source,
+        EmbeddedTable Table,
+        IReadOnlyList<(EmbeddedIndex Index, Expression Branch)> Branches);
 
     private sealed record ReturningTableSnapshot(SqlValue[][] Rows, long[] RowIds);
 
@@ -10183,6 +10207,22 @@ public sealed partial class EmbeddedDatabase : IDisposable
             context,
             new NamedTableSource(statement.TableName, statement.Alias));
         ValidateStandaloneUpdateAssignmentColumns(statement, context);
+        if (CanCompileForeignKeyCascadeDelete(context)
+            && TryCompileSelfReferentialCascadeUpdate(
+                statement,
+                parameters,
+                context,
+                out var foreignKeyCompiled,
+                out var foreignKeyColumns,
+                out var foreignKeyHasReturning))
+        {
+            return RunCompiledDml(
+                foreignKeyCompiled,
+                foreignKeyColumns,
+                foreignKeyHasReturning,
+                parameters);
+        }
+
         if (CanRouteUpdateThroughCompiler(statement, context)
             && TryCompileUpdate(statement, parameters, context, out var compiled, out var columns, out var hasReturning))
             return RunCompiledDml(compiled, columns, hasReturning, parameters);
@@ -13460,6 +13500,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     materializeIndexRows: true,
                     out compiled);
             }
+            else if (!context.CancellationToken.CanBeCanceled
+                && TryPlanManagedOrIndexUnion(select, context) is { } orUnionPlan)
+            {
+                compiledIndex = TryCompileManagedOrIndexUnionSelect(
+                    select,
+                    orUnionPlan,
+                    parameters,
+                    context,
+                    outerRow,
+                    out compiled);
+            }
 
             if (!compiledIndex)
                 TryCompileSelect(select, parameters, context, outerRow, out compiled);
@@ -13649,6 +13700,70 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return compiler.TryCompile(select, out compiled);
     }
 
+    private bool TryCompileManagedOrIndexUnionSelect(
+        SelectStatement select,
+        ManagedOrIndexUnionPlan plan,
+        SqlValue[] parameters,
+        QueryContext context,
+        SourceRow? outerRow,
+        out CompiledSelect compiled)
+    {
+        select = ResolveNamedWindows(select);
+        context = EnterCollationSource(context, select.Source);
+        if (IsAggregateSelect(select)
+            || CollectSelectWindowFunctions(select).Count != 0
+            || select.Distinct
+            || select.Limit is not null
+            || select.Offset is not null
+            || select.OrderBy.Count != 0
+            || select.GroupBy.Count != 0
+            || select.Having is not null)
+        {
+            compiled = null!;
+            return false;
+        }
+
+        var source = GetManagedOrIndexUnionRows(plan, parameters, context, outerRow);
+        var rows = source.Rows.Select(row => row.Values).ToArray();
+        var rowIds = plan.Table.HasRowid
+            ? source.Rows.Select(row =>
+                row.RowId ?? throw new InvalidOperationException("OR-union row is missing its rowid.")).ToArray()
+            : null;
+        var qualifier = plan.Source.Alias ?? plan.Source.Name;
+        var qualifiedColumns = BuildQualifiedColumns(qualifier, plan.Table.Columns);
+        var indexLabel = string.Join(
+            "+",
+            plan.Branches.Select(branch => branch.Index.Name).Distinct(StringComparer.OrdinalIgnoreCase));
+        var target = new ScanTarget(
+            plan.Source.Name,
+            qualifier,
+            plan.Table.Columns,
+            rows,
+            name => ResolveScanColumnIndex(name, plan.Table.Columns, qualifiedColumns),
+            rowIds,
+            indexLabel,
+            plan.Table.ColumnDefinitions,
+            BuildQualifiedColumnDefinitions(qualifier, plan.Table.ColumnDefinitions));
+
+        // WHERE was consumed while building the union positions.
+        var compileForScan = select with { Where = null };
+        var compiler = new SelectStatementCompiler(
+            IsConstantScalarExpression,
+            expression => Evaluate(expression, parameters, null, context),
+            _ => target,
+            (where, scan) => CompileRowPredicate(where, scan, parameters, context, outerRow),
+            (where, scan) => CanEmitNativeScanPredicate(where, scan, context),
+            (where, scan) => CompileSimpleRowIdPredicate(where, scan, parameters, context, outerRow),
+            (statement, scan) => CompileDistinctScanEquality(statement, scan, context),
+            function => TryGetRoutableBuiltinScalarCall(function, out var routable)
+                ? BuildBuiltinScalarFunction(routable, parameters, context)
+                : null,
+            ArithmeticNumericAffinity,
+            ModuloNumericAffinity,
+            BitwiseIntegerAffinity);
+        return compiler.TryCompile(compileForScan, out compiled);
+    }
+
     private bool TryCompileManagedIndexSelect(
         SelectStatement select,
         ManagedIndexScanPlan plan,
@@ -13667,6 +13782,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             var qualifier = plan.Source.Alias ?? plan.Source.Name;
             var qualifiedColumns = BuildQualifiedColumns(qualifier, plan.Table.Columns);
+            var covering = IndexCoversSelect(select, plan.Table, plan.Index);
+            var indexName = covering
+                ? $"{plan.Index.Name} COVERING"
+                : plan.Index.Name;
             return new ScanTarget(
                 plan.Source.Name,
                 qualifier,
@@ -13677,7 +13796,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     plan.Table.Columns,
                     qualifiedColumns),
                 targetRowIds,
-                plan.Index.Name,
+                indexName,
                 plan.Table.ColumnDefinitions,
                 BuildQualifiedColumnDefinitions(
                     qualifier,
@@ -13837,6 +13956,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 target);
         }
 
+        // When ORDER BY is fully satisfied by the selected index, strip OrderBy so
+        // SelectStatementCompiler emits a plain Rewind/Next scan (no sorter). Execution
+        // binds index-ordered rows when materializeIndexRows is true; EXPLAIN only needs
+        // the bytecode shape (OpenRead USING INDEX + Rewind), not the row order.
+        var compileForScan = select;
+        if (select.OrderBy.Count > 0
+            && OrderByUsesIndex(select.OrderBy, plan.Table, plan.Index))
+        {
+            compileForScan = select with { OrderBy = Array.Empty<OrderByTerm>() };
+        }
+
         var compiler = new SelectStatementCompiler(
             IsConstantScalarExpression,
             expression => Evaluate(expression, parameters, null, context),
@@ -13851,7 +13981,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ArithmeticNumericAffinity,
             ModuloNumericAffinity,
             BitwiseIntegerAffinity);
-        return compiler.TryCompile(select, out compiled);
+        return compiler.TryCompile(compileForScan, out compiled);
     }
 
     // DISTINCT runs as rows stream from the cursor, whereas the evaluator first materializes every filtered
@@ -16418,14 +16548,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
             JoinKind.Full => VdbeJoinKind.Full,
             _ => throw new InvalidOperationException($"Unknown join kind {join.Kind}."),
         };
+        var equiProbe = TryCreateCompiledJoinEquiProbe(join, context);
         var plan = new VdbeJoinOperatorPlan(
             left.Plan,
             right.Plan,
             kind,
-            join.Condition is null && joinPairs.Count == 0 ? null : condition);
+            join.Condition is null && joinPairs.Count == 0 ? null : condition,
+            equiProbe);
         compiled = new CompiledJoinSource(
             plan,
-            $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} join",
+            equiProbe is null
+                ? $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} join"
+                : $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} equijoin",
             columns,
             qualifiedColumns,
             qualifiedRowIds,
@@ -16434,6 +16568,68 @@ public sealed partial class EmbeddedDatabase : IDisposable
             outputColumns,
             rawOutputColumns);
         return true;
+    }
+
+    /// <summary>
+    /// Builds a hash probe for compiled multi-way joins when ON is a conjunction of
+    /// simple column equalities (same shape as the evaluator EquiJoinHashIndex).
+    /// </summary>
+    private VdbeJoinEquiProbe? TryCreateCompiledJoinEquiProbe(
+        JoinTableSource join,
+        QueryContext context)
+    {
+        if (join.Condition is null)
+            return null;
+
+        var leftColumns = GetOutputColumns(join.Left, context);
+        var rightColumns = GetOutputColumns(join.Right, context);
+        var keys = new List<EquiJoinKey>();
+        var pending = new Stack<Expression>();
+        pending.Push(join.Condition);
+        while (pending.Count > 0)
+        {
+            var conjunct = pending.Pop();
+            if (conjunct is BinaryExpression { Operator: BinaryOperator.And } and)
+            {
+                pending.Push(and.Left);
+                pending.Push(and.Right);
+                continue;
+            }
+
+            if (TryCreateEquiJoinKey(conjunct, join, leftColumns, rightColumns, context) is { } key)
+                keys.Add(key);
+        }
+
+        if (keys.Count == 0)
+            return null;
+
+        string? BuildKey(VdbeJoinRow row, bool leftSide)
+        {
+            string? key = null;
+            foreach (var equiKey in keys)
+            {
+                var column = leftSide ? equiKey.LeftColumn : equiKey.RightColumn;
+                if (column.Index < 0 || column.Index >= row.Values.Length)
+                    return null;
+                var value = row.Values[column.Index];
+                var segment = EquiJoinHashIndex.CanonicalizeJoinKeyValue(
+                    value,
+                    leftSide ? equiKey.LeftConvertsTextToNumeric : equiKey.RightConvertsTextToNumeric,
+                    leftSide ? equiKey.LeftConvertsNumericToText : equiKey.RightConvertsNumericToText,
+                    equiKey.Collation);
+                if (segment is null)
+                    return null;
+                key = key is null
+                    ? segment.Length + ":" + segment
+                    : key + segment.Length + ":" + segment;
+            }
+
+            return key;
+        }
+
+        return new VdbeJoinEquiProbe(
+            left => BuildKey(left, leftSide: true),
+            right => BuildKey(right, leftSide: false));
     }
 
     private static SourceRow CreateCompiledJoinSourceRow(
@@ -18984,8 +19180,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return true;
     }
 
-    private bool TryCompileSelfReferentialCascadeDelete(
-        DeleteStatement statement,
+    private bool TryCompileSelfReferentialCascadeUpdate(
+        UpdateStatement statement,
         SqlValue[] parameters,
         QueryContext context,
         out CompiledDml compiled,
@@ -19000,7 +19196,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
             || statement.Offset is not null
             || statement.EffectiveOrderBy.Count != 0
             || statement.Alias is not null
+            || statement.From is not null
             || statement.Returning is not null
+            || statement.ConflictAlgorithm is not null
             || context.CommonTableExpressions.Count != 0
             || IsSchemaTable(statement.TableName)
             || !context.Tables.TryGetValue(statement.TableName, out var table)
@@ -19014,7 +19212,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         var foreignKey = table.ForeignKeys[0];
         if (!string.Equals(foreignKey.ParentTable, statement.TableName, StringComparison.OrdinalIgnoreCase)
-            || foreignKey.OnDelete != ForeignKeyAction.Cascade)
+            || foreignKey.OnUpdate is not (ForeignKeyAction.Cascade or ForeignKeyAction.SetNull))
         {
             return false;
         }
@@ -19042,33 +19240,332 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return false;
         }
 
+        var plan = PrepareUpdate(statement, table, context);
         var parent = ResolveForeignKeyParent(context.Tables, statement.TableName, foreignKey);
-        var parentRegisters = new Register[parent.ColumnIndices.Count];
-        for (var index = 0; index < parentRegisters.Length; index++)
-            parentRegisters[index] = new Register(index);
+        var assignedColumns = plan.ColumnAssignments
+            .Select(assignment => assignment.Index)
+            .ToHashSet();
+        table.ExpandAssignedColumnsThroughGeneratedColumns(assignedColumns);
+        // Action only matters when the parent key columns are assigned.
+        if (!parent.ColumnIndices.Any(assignedColumns.Contains)
+            && plan.RowidAssignment is null
+            && !(plan.AliasIndex >= 0 && assignedColumns.Contains(plan.AliasIndex)))
+        {
+            return false;
+        }
 
-        var cascadeAction = VdbeSubprogram.CreateDeferred(
-            parentRegisters.Length,
-            binding => CreateCompiledCascadeWriteTargets(
+        var keyCount = parent.ColumnIndices.Count;
+        var oldRegisters = new Register[keyCount];
+        var newRegisters = new Register[keyCount];
+        var allRegisters = new Register[keyCount * 2];
+        for (var index = 0; index < keyCount; index++)
+        {
+            oldRegisters[index] = new Register(index);
+            newRegisters[index] = new Register(keyCount + index);
+            allRegisters[index] = oldRegisters[index];
+            allRegisters[keyCount + index] = newRegisters[index];
+        }
+
+        var setNull = foreignKey.OnUpdate == ForeignKeyAction.SetNull;
+        var action = VdbeSubprogram.CreateDeferred(
+            allRegisters.Length,
+            binding => CreateCompiledUpdateActionWriteTargets(
                 context,
                 statement.TableName,
                 table,
                 foreignKey,
                 parent,
-                binding));
+                binding,
+                setNull));
+        // Non-recursive Update subprogram: children are patched in MutateRow only.
         var actionProgram = DmlStatementCompiler.BuildProgramWithMutationPrograms(
-            DmlKind.Delete,
+            DmlKind.Update,
             statement.TableName,
             table.Columns.Length,
             filter: null,
-            CreateParentKeyCaptureInstructions(parent, parentRegisters),
-            [new ProgramInstruction(parentRegisters, cascadeAction)],
-            registerCount: parentRegisters.Length,
-            parameterSlotCount: parentRegisters.Length);
+            beforeMutation: Array.Empty<VdbeInstruction>(),
+            afterMutation: Array.Empty<VdbeInstruction>(),
+            registerCount: 0,
+            parameterSlotCount: allRegisters.Length);
+        action.Resolve(actionProgram);
+
+        var rowCount = table.Rows.Count;
+        var writeTarget = new VdbeWriteTarget
+        {
+            TableName = statement.TableName,
+            RowCount = rowCount,
+            GetRow = index => table.Rows[index],
+            GetRowId = index => index < table.RowIds.Count ? table.RowIds[index] : index + 1,
+            MutateRow = index =>
+            {
+                var original = table.Rows[index];
+                var rowid = index < table.RowIds.Count ? table.RowIds[index] : index + 1;
+                var (updated, newRowid) = BuildUpdatedRow(
+                    statement,
+                    table,
+                    plan,
+                    original,
+                    rowid,
+                    parameters,
+                    context);
+                // Apply immediately so afterMutation Column reads and child FK actions
+                // observe the post-update parent key (same model as cascade DELETE).
+                table.Rows[index] = updated;
+                if (table.HasRowid)
+                    table.RowIds[index] = newRowid;
+                context.ReportRowChange(SqliteChangeOperation.Update, statement.TableName, table, newRowid);
+                return new VdbeRowMutation(updated, newRowid);
+            },
+            Commit = () =>
+            {
+                // Children already cascaded via Program; validate shape without re-firing actions.
+                ValidateRowIdsUnique(statement.TableName, table, table.RowIds.ToList(), plan.AliasIndex);
+                table.ValidateRows(statement.TableName, table.Rows);
+                ValidateColumnUniqueConstraints(table, table.Rows);
+                ValidatePrimaryKey(statement.TableName, table, table.Rows);
+                ValidateUniqueIndexes(statement.TableName, table, table.Rows);
+                ValidateChildForeignKeys(
+                    context,
+                    statement.TableName,
+                    table,
+                    table.Rows,
+                    statement.TableName,
+                    table.Rows);
+                return null;
+            },
+        };
+
+        var before = CreateParentKeyCaptureInstructions(parent, oldRegisters);
+        var after = new List<VdbeInstruction>(keyCount + 1);
+        for (var index = 0; index < keyCount; index++)
+        {
+            after.Add(new ColumnInstruction(
+                new Cursor(0),
+                parent.ColumnIndices[index],
+                newRegisters[index]));
+        }
+
+        after.Add(new ProgramInstruction(allRegisters, action));
+
+        var program = DmlStatementCompiler.BuildProgramWithMutationPrograms(
+            DmlKind.Update,
+            statement.TableName,
+            table.Columns.Length,
+            filter,
+            before,
+            after,
+            registerCount: allRegisters.Length);
+        compiled = new CompiledDml(program, [writeTarget]);
+        return true;
+    }
+
+    private IReadOnlyList<VdbeWriteTarget?> CreateCompiledUpdateActionWriteTargets(
+        QueryContext context,
+        string tableName,
+        EmbeddedTable table,
+        ForeignKeyDefinition foreignKey,
+        ForeignKeyParent parent,
+        VdbeParameterBinding? binding,
+        bool setNull)
+    {
+        if (binding is null || binding.Count < parent.ColumnIndices.Count * 2)
+            throw new InvalidOperationException("A compiled foreign-key UPDATE action requires old and new parent key bindings.");
+
+        var keyCount = parent.ColumnIndices.Count;
+        var oldValues = new SqlValue[keyCount];
+        var newValues = new SqlValue[keyCount];
+        for (var index = 0; index < keyCount; index++)
+        {
+            oldValues[index] = binding[index];
+            newValues[index] = binding[keyCount + index];
+        }
+
+        if (ForeignKeyValuesEqual(parent, oldValues, newValues))
+            return [null];
+
+        var childColumns = ResolveForeignKeyChildColumns(table, tableName, foreignKey);
+        var matchingPositions = FindForeignKeyChildPositions(
+            table,
+            tableName,
+            foreignKey,
+            parent,
+            oldValues);
+        var sourceRowIds = new long[matchingPositions.Count];
+        for (var index = 0; index < matchingPositions.Count; index++)
+            sourceRowIds[index] = table.RowIds[matchingPositions[index]];
+
+        return
+        [
+            new VdbeWriteTarget
+            {
+                TableName = tableName,
+                RowCount = sourceRowIds.Length,
+                GetRow = index =>
+                {
+                    var position = table.RowIds.IndexOf(sourceRowIds[index]);
+                    return position >= 0 ? table.Rows[position] : new SqlValue[table.Columns.Length];
+                },
+                GetRowId = index => sourceRowIds[index],
+                MutateRow = index =>
+                {
+                    var position = table.RowIds.IndexOf(sourceRowIds[index]);
+                    if (position < 0)
+                        return new VdbeRowMutation(new SqlValue[table.Columns.Length], sourceRowIds[index]);
+
+                    var updated = (SqlValue[])table.Rows[position].Clone();
+                    for (var key = 0; key < childColumns.Length; key++)
+                        updated[childColumns[key]] = setNull ? SqlValue.Null : newValues[key];
+                    table.Rows[position] = updated;
+                    context.ReportRowChange(SqliteChangeOperation.Update, tableName, table, sourceRowIds[index]);
+                    _totalChanges++;
+                    return new VdbeRowMutation(updated, sourceRowIds[index]);
+                },
+                Commit = () => null,
+            },
+        ];
+    }
+
+    private bool TryCompileSelfReferentialCascadeDelete(
+        DeleteStatement statement,
+        SqlValue[] parameters,
+        QueryContext context,
+        out CompiledDml compiled,
+        out string[] columns,
+        out bool hasReturning)
+        => TryCompileForeignKeyActionDelete(
+            statement,
+            parameters,
+            context,
+            out compiled,
+            out columns,
+            out hasReturning);
+
+    /// <summary>
+    /// Compiles DELETE with a single ON DELETE CASCADE/SET NULL foreign-key action:
+    /// self-referential or one distinct child table referencing this parent.
+    /// </summary>
+    private bool TryCompileForeignKeyActionDelete(
+        DeleteStatement statement,
+        SqlValue[] parameters,
+        QueryContext context,
+        out CompiledDml compiled,
+        out string[] columns,
+        out bool hasReturning)
+    {
+        compiled = null!;
+        columns = [];
+        hasReturning = false;
+
+        if (statement.Limit is not null
+            || statement.Offset is not null
+            || statement.EffectiveOrderBy.Count != 0
+            || statement.Alias is not null
+            || statement.Returning is not null
+            || context.CommonTableExpressions.Count != 0
+            || IsSchemaTable(statement.TableName)
+            || !context.Tables.TryGetValue(statement.TableName, out var parentTable)
+            || !parentTable.HasRowid)
+        {
+            return false;
+        }
+
+        // Collect every FK that treats the deleted table as parent.
+        string? childTableName = null;
+        EmbeddedTable? childTable = null;
+        ForeignKeyDefinition? foreignKey = null;
+        foreach (var (candidateName, candidateTable) in context.Tables)
+        {
+            foreach (var candidateForeignKey in candidateTable.ForeignKeys)
+            {
+                if (!string.Equals(
+                        candidateForeignKey.ParentTable,
+                        statement.TableName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (candidateForeignKey.OnDelete is not (ForeignKeyAction.Cascade or ForeignKeyAction.SetNull))
+                    return false;
+
+                if (foreignKey is not null)
+                    return false; // more than one action FK → evaluator
+
+                foreignKey = candidateForeignKey;
+                childTableName = candidateName;
+                childTable = candidateTable;
+            }
+        }
+
+        if (foreignKey is null || childTable is null || childTableName is null || !childTable.HasRowid)
+            return false;
+
+        DmlRowFilter? filter = null;
+        if (statement.Where is not null)
+        {
+            filter = CompileDmlRowPredicate(
+                statement.Where,
+                parentTable,
+                statement.TableName,
+                parameters,
+                context);
+            if (filter is null)
+                return false;
+        }
+
+        var parent = ResolveForeignKeyParent(context.Tables, childTableName, foreignKey);
+        var parentRegisters = new Register[parent.ColumnIndices.Count];
+        for (var index = 0; index < parentRegisters.Length; index++)
+            parentRegisters[index] = new Register(index);
+
+        var setNull = foreignKey.OnDelete == ForeignKeyAction.SetNull;
+        var selfReferential = string.Equals(
+            childTableName,
+            statement.TableName,
+            StringComparison.OrdinalIgnoreCase);
+
+        var cascadeAction = VdbeSubprogram.CreateDeferred(
+            parentRegisters.Length,
+            binding => setNull
+                ? CreateCompiledSetNullWriteTargets(
+                    context,
+                    childTableName,
+                    childTable,
+                    foreignKey,
+                    parent,
+                    binding)
+                : CreateCompiledCascadeWriteTargets(
+                    context,
+                    childTableName,
+                    childTable,
+                    foreignKey,
+                    parent,
+                    binding));
+        // Self-ref CASCADE may recurse (child delete re-enters the same Program). SET NULL and
+        // cross-table CASCADE only act on direct children — no nested Program after each mutation.
+        var actionProgram = setNull || !selfReferential
+            ? DmlStatementCompiler.BuildProgramWithMutationPrograms(
+                setNull ? DmlKind.Update : DmlKind.Delete,
+                childTableName,
+                childTable.Columns.Length,
+                filter: null,
+                beforeMutation: Array.Empty<VdbeInstruction>(),
+                afterMutation: Array.Empty<VdbeInstruction>(),
+                registerCount: 0,
+                parameterSlotCount: parentRegisters.Length)
+            : DmlStatementCompiler.BuildProgramWithMutationPrograms(
+                DmlKind.Delete,
+                childTableName,
+                childTable.Columns.Length,
+                filter: null,
+                CreateParentKeyCaptureInstructions(parent, parentRegisters),
+                [new ProgramInstruction(parentRegisters, cascadeAction)],
+                registerCount: parentRegisters.Length,
+                parameterSlotCount: parentRegisters.Length);
         cascadeAction.Resolve(actionProgram);
 
-        var sourceRows = table.Rows.ToArray();
-        var sourceRowIds = table.RowIds.ToArray();
+        var sourceRows = parentTable.Rows.ToArray();
+        var sourceRowIds = parentTable.RowIds.ToArray();
         var writeTarget = new VdbeWriteTarget
         {
             TableName = statement.TableName,
@@ -19078,7 +19575,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
             TryDeleteRow = index => DeleteCompiledCascadeRow(
                 context,
                 statement.TableName,
-                table,
+                parentTable,
                 sourceRowIds[index],
                 countAsCascade: false),
             Commit = () => null,
@@ -19086,7 +19583,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var program = DmlStatementCompiler.BuildProgramWithMutationPrograms(
             DmlKind.Delete,
             statement.TableName,
-            table.Columns.Length,
+            parentTable.Columns.Length,
             filter,
             CreateParentKeyCaptureInstructions(parent, parentRegisters),
             [new ProgramInstruction(parentRegisters, cascadeAction)],
@@ -19155,6 +19652,64 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     table,
                     sourceRowIds[index],
                     countAsCascade: true),
+                Commit = () => null,
+            },
+        ];
+    }
+
+    private IReadOnlyList<VdbeWriteTarget?> CreateCompiledSetNullWriteTargets(
+        QueryContext context,
+        string tableName,
+        EmbeddedTable table,
+        ForeignKeyDefinition foreignKey,
+        ForeignKeyParent parent,
+        VdbeParameterBinding? binding)
+    {
+        if (binding is null)
+            throw new InvalidOperationException("A compiled foreign-key SET NULL action requires parent key bindings.");
+
+        var parentValues = new SqlValue[binding.Count];
+        for (var index = 0; index < parentValues.Length; index++)
+            parentValues[index] = binding[index];
+
+        var childColumns = ResolveForeignKeyChildColumns(table, tableName, foreignKey);
+        var matchingPositions = FindForeignKeyChildPositions(
+            table,
+            tableName,
+            foreignKey,
+            parent,
+            parentValues);
+        // Snapshot positions/rowids: parent delete may already have removed a self-row.
+        var sourceRowIds = new long[matchingPositions.Count];
+        for (var index = 0; index < matchingPositions.Count; index++)
+            sourceRowIds[index] = table.RowIds[matchingPositions[index]];
+
+        return
+        [
+            new VdbeWriteTarget
+            {
+                TableName = tableName,
+                RowCount = sourceRowIds.Length,
+                GetRow = index =>
+                {
+                    var position = table.RowIds.IndexOf(sourceRowIds[index]);
+                    return position >= 0 ? table.Rows[position] : new SqlValue[table.Columns.Length];
+                },
+                GetRowId = index => sourceRowIds[index],
+                MutateRow = index =>
+                {
+                    var position = table.RowIds.IndexOf(sourceRowIds[index]);
+                    if (position < 0)
+                        return new VdbeRowMutation(new SqlValue[table.Columns.Length], sourceRowIds[index]);
+
+                    var updated = (SqlValue[])table.Rows[position].Clone();
+                    foreach (var column in childColumns)
+                        updated[column] = SqlValue.Null;
+                    table.Rows[position] = updated;
+                    context.ReportRowChange(SqliteChangeOperation.Update, tableName, table, sourceRowIds[index]);
+                    _totalChanges++;
+                    return new VdbeRowMutation(updated, sourceRowIds[index]);
+                },
                 Commit = () => null,
             },
         ];
@@ -19444,7 +19999,22 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         SqlValue.Integer(1),
                         SqlValue.Integer(0),
                         SqlValue.Integer(0),
-                        SqlValue.Text(FormatManagedIndexExplainDetail(indexPlan)),
+                        SqlValue.Text(FormatManagedIndexExplainDetail(indexPlan, plannedSelect)),
+                    ],
+                ],
+                0);
+        }
+        if (statement.Inner is SelectStatement orUnionSelect
+            && TryPlanManagedOrIndexUnion(orUnionSelect, compilationContext) is { } orUnionPlan)
+        {
+            return new ExecutionResult(
+                ExplainQueryPlanColumns(),
+                [
+                    [
+                        SqlValue.Integer(1),
+                        SqlValue.Integer(0),
+                        SqlValue.Integer(0),
+                        SqlValue.Text(FormatManagedOrIndexUnionExplainDetail(orUnionPlan)),
                     ],
                 ],
                 0);
@@ -20462,16 +21032,23 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (source.IndexDirective is IndexedByDirective)
             return CreateForcedIndexScanPlan(source, table, statement.Where);
 
-        foreach (var index in table.Indexes.OrderBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase))
+        ManagedIndexScanPlan? best = null;
+        var bestScore = int.MinValue;
+        // Collect usable indexes and pick the highest score instead of first-by-name.
+        // Score favors equality SEARCH depth, ORDER BY elision, and covering projection.
+        foreach (var index in table.Indexes)
         {
-            if ((!index.IsPartial && index.Columns.All(term => !term.IsExpression))
+            // Skip indexes the managed planner cannot evaluate (registered functions /
+            // overridden collations), and skip partial indexes whose WHERE is not
+            // implied by the query predicate. Plain (non-partial, non-expression)
+            // indexes are eligible for SEARCH and ORDER BY elision.
+            if (IndexUsesRegisteredFunctions(index)
+                || IndexUsesOverriddenBuiltInCollation(index, table)
                 || !IndexExpressionSemantics.PredicateImplies(
                     statement.Where,
                     index.Where,
                     source.Name,
-                    source.Alias)
-                || IndexUsesRegisteredFunctions(index)
-                || IndexUsesOverriddenBuiltInCollation(index, table))
+                    source.Alias))
             {
                 continue;
             }
@@ -20488,20 +21065,299 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     source.Alias);
             // A query whose predicate exactly matches a partial index can scan that index
             // without an indexed key constraint. Turso renders this as "SCAN ... USING INDEX ...".
-            if (search || ordered || scansOnlyPartialPredicate)
-                return new ManagedIndexScanPlan(source, table, index, search);
+            // Plain indexes also qualify when ORDER BY matches the index key order or the
+            // WHERE probes the leading term (SEARCH).
+            if (!search && !ordered && !scansOnlyPartialPredicate)
+                continue;
+
+            var plan = new ManagedIndexScanPlan(source, table, index, search);
+            var score = ScoreManagedIndexPlan(
+                plan,
+                statement,
+                ordered,
+                scansOnlyPartialPredicate,
+                context);
+            if (score > bestScore
+                || (score == bestScore
+                    && best is not null
+                    && string.Compare(index.Name, best.Index.Name, StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                best = plan;
+                bestScore = score;
+            }
         }
 
-        return null;
+        return best;
     }
 
-    private static string FormatManagedIndexExplainDetail(ManagedIndexScanPlan plan)
+    /// <summary>
+    /// Heuristic access-method score (higher wins). Not a full cost model — enough to
+    /// prefer multi-column equality prefixes and covering indexes over name order.
+    /// When ANALYZE has populated <c>sqlite_stat1</c>, equality SEARCH gains a selectivity
+    /// bonus from the leading-prefix average-rows figure (lower avg ⇒ higher score).
+    /// </summary>
+    private static int ScoreManagedIndexPlan(
+        ManagedIndexScanPlan plan,
+        SelectStatement statement,
+        bool ordered,
+        bool scansOnlyPartialPredicate,
+        QueryContext context)
+    {
+        var score = 0;
+        if (plan.Search)
+        {
+            score += 1000;
+            score += CountLeadingEqualityIndexTerms(statement.Where, plan.Table, plan.Index) * 100;
+            if (WhereUsesIndexEqualityTerm(statement.Where, plan.Table, plan.Index.Columns[0]))
+                score += 50;
+
+            // sqlite_stat1: "N avg1 avg2 …" — avg1 is mean rows per distinct leading key.
+            if (TryGetSqliteStat1LeadingAverage(
+                    context,
+                    plan.Table.Name,
+                    plan.Index.Name,
+                    out var leadingAverage)
+                && leadingAverage > 0)
+            {
+                // Cap bonus so stats refine ranking without drowning structural signals.
+                score += Math.Min(300, 300 / leadingAverage);
+            }
+        }
+
+        if (ordered)
+            score += 400;
+
+        if (IndexCoversSelect(statement, plan.Table, plan.Index))
+            score += 200;
+
+        if (scansOnlyPartialPredicate)
+            score += 25;
+
+        // Prefer narrower keys when utility is otherwise equal.
+        score -= plan.Index.Columns.Count;
+        return score;
+    }
+
+    /// <summary>
+    /// Reads the leading-prefix average from <c>sqlite_stat1.stat</c> for
+    /// <paramref name="tableName"/> / <paramref name="indexName"/> when present.
+    /// </summary>
+    private static bool TryGetSqliteStat1LeadingAverage(
+        QueryContext context,
+        string tableName,
+        string indexName,
+        out int leadingAverage)
+    {
+        leadingAverage = 0;
+        if (!context.Tables.TryGetValue(SqliteStat1TableName, out var stat1)
+            || stat1.Columns.Length < 3)
+        {
+            return false;
+        }
+
+        // Columns: tbl, idx, stat
+        foreach (var row in stat1.Rows)
+        {
+            if (row.Length < 3
+                || row[0].Kind != SqlValueKind.Text
+                || row[1].Kind != SqlValueKind.Text
+                || row[2].Kind != SqlValueKind.Text)
+            {
+                continue;
+            }
+
+            if (!string.Equals(row[0].AsText(), tableName, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(row[1].AsText(), indexName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // Format: "rowCount avgPrefix1 avgPrefix2 …"
+            var parts = row[2].AsText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2)
+                return false;
+            if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out leadingAverage)
+                || leadingAverage <= 0)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static int CountLeadingEqualityIndexTerms(
+        Expression? where,
+        EmbeddedTable table,
+        EmbeddedIndex index)
+    {
+        var count = 0;
+        foreach (var term in index.Columns)
+        {
+            if (!WhereUsesIndexEqualityTerm(where, table, term))
+                break;
+            count++;
+        }
+
+        return count;
+    }
+
+    private static bool WhereUsesIndexEqualityTerm(
+        Expression? expression,
+        EmbeddedTable table,
+        EmbeddedIndexColumn term)
+    {
+        if (expression is null)
+            return false;
+        if (expression is BinaryExpression { Operator: BinaryOperator.And } and)
+            return WhereUsesIndexEqualityTerm(and.Left, table, term)
+                || WhereUsesIndexEqualityTerm(and.Right, table, term);
+        if (expression is not BinaryExpression binary
+            || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.Is))
+        {
+            return false;
+        }
+
+        return QueryExpressionMatchesIndexTerm(binary.Left, table, term)
+            || QueryExpressionMatchesIndexTerm(binary.Right, table, term);
+    }
+
+    private static string FormatManagedIndexExplainDetail(
+        ManagedIndexScanPlan plan,
+        SelectStatement? select = null)
     {
         var tableName = plan.Source.Alias ?? plan.Source.Name;
-        var detail = $"{(plan.Search ? "SEARCH" : "SCAN")} {tableName} USING INDEX {plan.Index.Name}";
+        var covering = select is not null
+            && IndexCoversSelect(select, plan.Table, plan.Index);
+        var usingClause = covering
+            ? $"USING COVERING INDEX {plan.Index.Name}"
+            : $"USING INDEX {plan.Index.Name}";
+        var detail = $"{(plan.Search ? "SEARCH" : "SCAN")} {tableName} {usingClause}";
         return plan.Search && plan.Index.Columns[0].Expression is null
             ? detail + $" ({plan.Index.Columns[0].Name}=?)"
             : detail;
+    }
+
+    /// <summary>
+    /// True when every column the <paramref name="select"/> needs is available from
+    /// <paramref name="index"/> keys (plus the rowid for rowid tables). Used to emit
+    /// COVERING INDEX and to skip redundant base-table projection work.
+    /// </summary>
+    private static bool IndexCoversSelect(SelectStatement select, EmbeddedTable table, EmbeddedIndex index)
+    {
+        if (index.Columns.Any(term => term.IsExpression))
+            return false;
+
+        var covered = new HashSet<int>();
+        foreach (var term in index.Columns)
+        {
+            if (term.ColumnIndex >= 0)
+                covered.Add(term.ColumnIndex);
+        }
+
+        // Rowid tables can always satisfy rowid references from the index entry.
+        bool NeedsColumn(int columnIndex) => !covered.Contains(columnIndex);
+
+        foreach (var projection in select.Projections)
+        {
+            if (!ProjectionCoveredByIndex(projection.Expression, table, covered, NeedsColumn))
+                return false;
+        }
+
+        if (select.Where is not null
+            && !ExpressionCoveredByIndex(select.Where, table, covered))
+        {
+            return false;
+        }
+
+        foreach (var term in select.OrderBy)
+        {
+            if (!ExpressionCoveredByIndex(term.Expression, table, covered))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool ProjectionCoveredByIndex(
+        Expression expression,
+        EmbeddedTable table,
+        HashSet<int> covered,
+        Func<int, bool> needsColumn)
+    {
+        switch (expression)
+        {
+            case StarExpression:
+            case QualifiedStarExpression:
+                for (var i = 0; i < table.Columns.Length; i++)
+                {
+                    if (needsColumn(i))
+                        return false;
+                }
+
+                return true;
+            case ColumnExpression column:
+                return ColumnCoveredByIndex(column, table, covered);
+            case LiteralExpression:
+                return true;
+            default:
+                return ExpressionCoveredByIndex(expression, table, covered);
+        }
+    }
+
+    private static bool ExpressionCoveredByIndex(
+        Expression expression,
+        EmbeddedTable table,
+        HashSet<int> covered)
+    {
+        switch (expression)
+        {
+            case LiteralExpression:
+            case ParameterExpression:
+                return true;
+            case ColumnExpression column:
+                return ColumnCoveredByIndex(column, table, covered);
+            case BinaryExpression binary:
+                return ExpressionCoveredByIndex(binary.Left, table, covered)
+                    && ExpressionCoveredByIndex(binary.Right, table, covered);
+            case UnaryExpression unary:
+                return ExpressionCoveredByIndex(unary.Operand, table, covered);
+            case CollationExpression collation:
+                return ExpressionCoveredByIndex(collation.Expression, table, covered);
+            case FunctionExpression function:
+                return function.Arguments.All(arg => ExpressionCoveredByIndex(arg, table, covered));
+            default:
+                // Subqueries, CASE, etc. are not covering-index safe without deeper analysis.
+                return false;
+        }
+    }
+
+    private static bool ColumnCoveredByIndex(
+        ColumnExpression column,
+        EmbeddedTable table,
+        HashSet<int> covered)
+    {
+        var bare = column.UnqualifiedName ?? column.Name;
+        if (table.HasRowid && EmbeddedTable.IsRowidAliasName(bare))
+            return true;
+
+        if (table.TryGetColumnIndex(bare, out var index))
+            return covered.Contains(index);
+
+        // Qualified name: strip qualifier.
+        var separator = bare.IndexOf('.');
+        if (separator >= 0)
+        {
+            var name = bare[(separator + 1)..];
+            if (table.HasRowid && EmbeddedTable.IsRowidAliasName(name))
+                return true;
+            if (table.TryGetColumnIndex(name, out index))
+                return covered.Contains(index);
+        }
+
+        return false;
     }
 
     private static bool TryGetPartialIndexScanSource(
@@ -20696,6 +21552,199 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return new SourceData(table.Columns, rows);
     }
 
+    /// <summary>
+    /// Plans a multi-index OR union when WHERE is a top-level OR of equality
+    /// predicates, each of which can SEARCH a distinct usable index.
+    /// </summary>
+    private ManagedOrIndexUnionPlan? TryPlanManagedOrIndexUnion(
+        SelectStatement statement,
+        QueryContext context)
+    {
+        if (statement.Source is not NamedTableSource source
+            || source.IndexDirective is not null
+            || IsSchemaTable(source.Name)
+            || context.CommonTableExpressions.ContainsKey(source.Name)
+            || context.Views?.ContainsKey(source.Name) == true
+            || !context.Tables.TryGetValue(source.Name, out var table)
+            || statement.Where is null
+            || statement.OrderBy.Count != 0
+            || IsAggregateSelect(statement)
+            || statement.GroupBy.Count != 0
+            || statement.Having is not null)
+        {
+            return null;
+        }
+
+        if (!TrySplitTopLevelOrBranches(statement.Where, out var branches) || branches.Count < 2)
+            return null;
+
+        var planned = new List<(EmbeddedIndex Index, Expression Branch)>(branches.Count);
+        foreach (var branch in branches)
+        {
+            if (!TryFindEqualityIndexForBranch(table, source, branch, out var index))
+                return null;
+
+            planned.Add((index, branch));
+        }
+
+        // Require at least one distinct index name so this is a real multi-index OR,
+        // not a single-index multi-equality that should use a plain index scan.
+        if (planned.Select(item => item.Index.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() < 2)
+            return null;
+
+        return new ManagedOrIndexUnionPlan(source, table, planned);
+    }
+
+    private static bool TrySplitTopLevelOrBranches(
+        Expression expression,
+        out List<Expression> branches)
+    {
+        branches = [];
+        CollectTopLevelOrLeaves(expression, branches);
+        return branches.Count >= 2
+            && branches.All(branch => branch is BinaryExpression
+            {
+                Operator: BinaryOperator.Equal or BinaryOperator.Is
+            });
+    }
+
+    private static void CollectTopLevelOrLeaves(Expression expression, List<Expression> leaves)
+    {
+        if (expression is BinaryExpression { Operator: BinaryOperator.Or } orExpr)
+        {
+            CollectTopLevelOrLeaves(orExpr.Left, leaves);
+            CollectTopLevelOrLeaves(orExpr.Right, leaves);
+            return;
+        }
+
+        leaves.Add(expression);
+    }
+
+    private bool TryFindEqualityIndexForBranch(
+        EmbeddedTable table,
+        NamedTableSource source,
+        Expression branch,
+        out EmbeddedIndex index)
+    {
+        index = null!;
+        if (branch is not BinaryExpression binary
+            || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.Is))
+        {
+            return false;
+        }
+
+        EmbeddedIndex? best = null;
+        var bestScore = int.MinValue;
+        foreach (var candidate in table.Indexes)
+        {
+            if (IndexUsesRegisteredFunctions(candidate)
+                || IndexUsesOverriddenBuiltInCollation(candidate, table)
+                || candidate.IsPartial
+                || !IndexExpressionSemantics.PredicateImplies(
+                    branch,
+                    candidate.Where,
+                    source.Name,
+                    source.Alias)
+                || !WhereUsesIndexEqualityTerm(branch, table, candidate.Columns[0]))
+            {
+                continue;
+            }
+
+            var score = 1000
+                + CountLeadingEqualityIndexTerms(branch, table, candidate) * 100
+                - candidate.Columns.Count;
+            if (score > bestScore
+                || (score == bestScore
+                    && best is not null
+                    && string.Compare(candidate.Name, best.Name, StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+
+        if (best is null)
+            return false;
+
+        index = best;
+        return true;
+    }
+
+    private SourceData GetManagedOrIndexUnionRows(
+        ManagedOrIndexUnionPlan plan,
+        SqlValue[] parameters,
+        QueryContext context,
+        SourceRow? outerRow)
+    {
+        var table = plan.Table;
+        var positions = new SortedSet<int>();
+        foreach (var (index, branch) in plan.Branches)
+        {
+            for (var position = 0; position < table.Rows.Count; position++)
+            {
+                context.CheckInterrupt();
+                var rowId = table.HasRowid ? table.RowIds[position] : (long?)null;
+                if (!IndexExpressionSemantics.Qualifies(
+                        index,
+                        table,
+                        table.Rows[position],
+                        rowId,
+                        EvaluateIndexExpression))
+                {
+                    continue;
+                }
+
+                var probeRow = new SourceRow(
+                    table.Columns,
+                    table.Rows[position],
+                    BuildQualifiedColumns(plan.Source.Alias ?? plan.Source.Name, table.Columns),
+                    outerRow,
+                    RowId: rowId,
+                    RowIdQualifier: plan.Source.Alias ?? plan.Source.Name,
+                    ColumnDefinitions: table.ColumnDefinitions,
+                    QualifiedColumnDefinitions: BuildQualifiedColumnDefinitions(
+                        plan.Source.Alias ?? plan.Source.Name,
+                        table.ColumnDefinitions));
+                // Branch equality is re-checked so non-matching keys on this index are skipped.
+                if (!IsTrue(Evaluate(branch, parameters, probeRow, context)))
+                    continue;
+
+                positions.Add(position);
+            }
+        }
+
+        var qualifier = plan.Source.Alias ?? plan.Source.Name;
+        var qualifiedColumns = BuildQualifiedColumns(qualifier, table.Columns);
+        var rows = new SourceRow[positions.Count];
+        var write = 0;
+        foreach (var position in positions)
+        {
+            var rowId = table.HasRowid ? table.RowIds[position] : (long?)null;
+            rows[write++] = new SourceRow(
+                table.Columns,
+                table.Rows[position],
+                qualifiedColumns,
+                outerRow,
+                RowId: rowId,
+                RowIdQualifier: qualifier,
+                ColumnDefinitions: table.ColumnDefinitions,
+                QualifiedColumnDefinitions: BuildQualifiedColumnDefinitions(
+                    qualifier,
+                    table.ColumnDefinitions));
+        }
+
+        return new SourceData(table.Columns, rows);
+    }
+
+    private static string FormatManagedOrIndexUnionExplainDetail(ManagedOrIndexUnionPlan plan)
+    {
+        var tableName = plan.Source.Alias ?? plan.Source.Name;
+        var indexes = string.Join(
+            ", ",
+            plan.Branches.Select(branch => branch.Index.Name));
+        return $"MULTI-INDEX OR {tableName} USING INDEXES {indexes}";
+    }
+
     private int CompareManagedIndexEntries(
         EmbeddedTable table,
         EmbeddedIndex index,
@@ -20824,11 +21873,17 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ? limit
             : null;
         var indexPlan = TryPlanManagedIndexScan(statement, context);
+        var orUnionPlan = indexPlan is null
+            ? TryPlanManagedOrIndexUnion(statement, context)
+            : null;
         var streamProjectionRows = CanStreamProjectionRows(statement, context, outerRow);
         // A managed index plan wins over the transient probe: the index path defines
         // row order (SQLite parity, INDEXED BY), while the probe only prunes a plain scan.
+        // Top-level OR equality branches can each SEARCH a different index and union positions.
         var source = indexPlan is not null
             ? GetManagedIndexRows(indexPlan, context, outerRow)
+            : orUnionPlan is not null
+                ? GetManagedOrIndexUnionRows(orUnionPlan, parameters, context, outerRow)
             : TryGetTransientLookupRows(
                     statement.Source,
                     statement.Where,
@@ -21815,7 +22870,70 @@ public sealed partial class EmbeddedDatabase : IDisposable
         if (!TryCompileValues(values, out var compiled, out var slotParameterIndices))
             return false;
 
+        // Top-level multi-row VALUES is a production consumer of OpenEphemeral/EphemeralInsert.
+        // Single-row and compound-composed VALUES keep the cursor-less LoadConstant program.
+        if (values.Rows.Count > 1
+            && TryBuildEphemeralValuesProgram(values, out var ephemeralProgram, out var ephemeralSlots))
+        {
+            compiled = new CompiledSelect(
+                ephemeralProgram,
+                [new VdbeCursorSource([])],
+                ephemeralSlots);
+            slotParameterIndices = ephemeralSlots;
+        }
+
         lowering = new PreparedValuesLowering(compiled, slotParameterIndices, DescribeValues(values));
+        return true;
+    }
+
+    private static bool TryBuildEphemeralValuesProgram(
+        ValuesClause values,
+        out VdbeProgram program,
+        out IReadOnlyList<int> slotParameterIndices)
+    {
+        program = null!;
+        slotParameterIndices = [];
+        var parameterSlots = new Dictionary<int, int>();
+        var slotToParameter = new List<int>();
+        var cellRows = new List<IReadOnlyList<ValuesCell>>(values.Rows.Count);
+        foreach (var row in values.Rows)
+        {
+            var cells = new ValuesCell[row.Count];
+            for (var index = 0; index < row.Count; index++)
+            {
+                switch (row[index])
+                {
+                    case LiteralExpression literal:
+                        cells[index] = ValuesCell.Constant(literal.Value);
+                        break;
+                    case ParameterExpression parameter:
+                        if (!parameterSlots.TryGetValue(parameter.Index, out var slot))
+                        {
+                            slot = slotToParameter.Count;
+                            parameterSlots.Add(parameter.Index, slot);
+                            slotToParameter.Add(parameter.Index);
+                        }
+
+                        cells[index] = ValuesCell.Parameter(slot);
+                        break;
+                    default:
+                        return false;
+                }
+            }
+
+            cellRows.Add(cells);
+        }
+
+        try
+        {
+            program = ValuesProgramBuilder.BuildEphemeralCells(cellRows);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        slotParameterIndices = slotToParameter;
         return true;
     }
 
@@ -21898,6 +23016,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         VdbeProgram program;
         try
         {
+            // Shared lowering stays cursor-less so compound/LIMIT composition keeps working.
+            // Top-level multi-row VALUES switches to OpenEphemeral in TryPrepareValuesLowering.
             program = ValuesProgramBuilder.BuildCells(cellRows);
         }
         catch (ArgumentException exception)

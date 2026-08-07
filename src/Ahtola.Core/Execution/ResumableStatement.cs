@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.ExceptionServices;
 using System.Text;
+using Ahtola.Core.Parsing;
 
 namespace Ahtola.Core.Execution;
 
@@ -50,12 +51,15 @@ public sealed class ResumableStatement : IDisposable
     private readonly Dictionary<int, ResumableStatement> _subprogramStatements = [];
     private readonly WorkTableRuntime?[] _workTables;
     private readonly WindowBufferRuntime?[] _windowBuffers;
+    private readonly EphemeralTableRuntime?[] _ephemeralTables;
     private readonly IReadOnlyList<VdbeCursorSource?>? _cursorSources;
     private readonly IReadOnlyList<VdbeWriteTarget?>? _writeTargets;
     private readonly VdbeTransactionContext _transaction = new();
     private VdbeParameterBinding? _binding;
     private ProgramCounter _instructionPointer;
     private ReadOnlyCollection<SqlValue>? _currentRow;
+    private int _fkImmediateViolations;
+    private int _fkDeferredViolations;
     private bool _hasExecutedInstruction;
     private bool _disposed;
 
@@ -98,6 +102,7 @@ public sealed class ResumableStatement : IDisposable
         _rowSetPositions = new int[program.DistinctSetCount];
         _workTables = new WorkTableRuntime?[program.WorkTableCount];
         _windowBuffers = new WindowBufferRuntime?[program.WindowBufferCount];
+        _ephemeralTables = new EphemeralTableRuntime?[program.CursorCount];
         _cursorSources = cursorSources;
         _writeTargets = writeTargets;
         _binding = parameterBinding;
@@ -266,10 +271,26 @@ public sealed class ResumableStatement : IDisposable
                     _materializedRows[openWrite.Cursor.Index] = null;
                     AdvanceInstructionPointer();
                     break;
+                case OpenEphemeralInstruction openEphemeral:
+                    OpenCursor(openEphemeral.Cursor);
+                    _ephemeralTables[openEphemeral.Cursor.Index] = new EphemeralTableRuntime(openEphemeral.ColumnCount);
+                    _cursorPositions[openEphemeral.Cursor.Index] = -1;
+                    _materializedRows[openEphemeral.Cursor.Index] = null;
+                    AdvanceInstructionPointer();
+                    break;
+                case EphemeralInsertInstruction ephemeralInsert:
+                    {
+                        var table = RequireEphemeralTable(ephemeralInsert.Cursor);
+                        var row = ReadRegisters(ephemeralInsert.Values);
+                        table.Insert(row);
+                        AdvanceInstructionPointer();
+                        break;
+                    }
                 case CloseCursorInstruction close:
                     CloseCursor(close.Cursor);
                     _joinCursorStates[close.Cursor.Index]?.Close();
                     _joinCursorStates[close.Cursor.Index] = null;
+                    _ephemeralTables[close.Cursor.Index] = null;
                     AdvanceInstructionPointer();
                     break;
                 case RewindCursorInstruction rewind:
@@ -376,52 +397,138 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case SeekRowidInstruction seekRowid:
                     {
-                        // Position the cursor directly on the row whose rowid equals the value
-                        // held in RowIdRegister, jumping to NotFoundTarget when no such row
-                        // exists. The search is linear because the rowid sort invariant is not
-                        // maintained for explicit out-of-order rowid INSERTs (CommitInserts
-                        // appends in insert order, not rowid order); a BinarySearch over a sorted
-                        // projection is a later opt-in once the invariant is enforced on insert
-                        // or the cursor caches a sorted index per statement. Not yet emitted by
-                        // the compiler (Step 3); included now as additive, zero-regression-risk
-                        // scaffolding so EXPLAIN/Describe and the opcode enum are stable first.
-                        _materializedRows[seekRowid.Cursor.Index] = null;
-                        var source = RequireCursorSource(seekRowid.Cursor);
-                        var rowIds = source.RowIds;
-                        if (rowIds is null)
-                        {
-                            _instructionPointer = seekRowid.NotFoundTarget;
-                            break;
-                        }
-
-                        var sought = _registers[seekRowid.RowIdRegister.Index];
-                        if (sought.Kind != SqlValueKind.Integer)
-                        {
-                            _instructionPointer = seekRowid.NotFoundTarget;
-                            break;
-                        }
-
-                        var target = sought.AsInteger();
-                        var found = -1;
-                        for (var i = 0; i < rowIds.Count; i++)
-                        {
-                            if (rowIds[i] == target)
-                            {
-                                found = i;
-                                break;
-                            }
-                        }
-
-                        if (found >= 0)
-                        {
-                            _cursorPositions[seekRowid.Cursor.Index] = found;
+                        // Position the cursor on the rowid in RowIdRegister; jump if absent.
+                        // Linear search: CommitInserts keeps insert order, not rowid order.
+                        if (TryPositionCursorOnRowId(seekRowid.Cursor, seekRowid.RowIdRegister))
                             AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = seekRowid.NotFoundTarget;
+                        break;
+                    }
+                case NotExistsInstruction notExists:
+                    {
+                        // Jump when the rowid is absent; leave cursor positioned when present.
+                        if (TryPositionCursorOnRowId(notExists.Cursor, notExists.RowIdRegister))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = notExists.JumpTarget;
+                        break;
+                    }
+                case FoundInstruction found:
+                    {
+                        // Jump when the rowid is present; fall through when absent.
+                        if (TryPositionCursorOnRowId(found.Cursor, found.RowIdRegister))
+                            _instructionPointer = found.FoundTarget;
+                        else
+                            AdvanceInstructionPointer();
+                        break;
+                    }
+                case NoConflictInstruction noConflict:
+                    {
+                        // Jump when no matching key (or any NULL key); position on match.
+                        if (TryPositionCursorOnKeyPrefix(noConflict.Cursor, noConflict.Key))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = noConflict.NoConflictTarget;
+                        break;
+                    }
+                case FkCounterInstruction fkCounter:
+                    {
+                        if (fkCounter.Deferred)
+                        {
+                            // Deferred counters live on the transaction while one is open so they
+                            // survive statement Reset and are checked at Commit.
+                            if (_transaction.InTransaction)
+                            {
+                                _transaction.DeferredForeignKeyViolations = checked(
+                                    _transaction.DeferredForeignKeyViolations + fkCounter.Increment);
+                            }
+                            else
+                            {
+                                _fkDeferredViolations = checked(_fkDeferredViolations + fkCounter.Increment);
+                            }
                         }
                         else
                         {
-                            _instructionPointer = seekRowid.NotFoundTarget;
+                            _fkImmediateViolations = checked(_fkImmediateViolations + fkCounter.Increment);
                         }
 
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case FkIfZeroInstruction fkIfZero:
+                    {
+                        var count = fkIfZero.Deferred
+                            ? GetDeferredForeignKeyViolations()
+                            : _fkImmediateViolations;
+                        if (count == 0)
+                            _instructionPointer = fkIfZero.Target;
+                        else
+                            AdvanceInstructionPointer();
+                        break;
+                    }
+                case FkCheckInstruction fkCheck:
+                    {
+                        // Deferred checks inside a transaction are deferred to Commit; only
+                        // autocommit statements enforce deferred counters at statement end.
+                        if (fkCheck.Deferred && _transaction.InTransaction)
+                        {
+                            AdvanceInstructionPointer();
+                            break;
+                        }
+
+                        var count = fkCheck.Deferred
+                            ? GetDeferredForeignKeyViolations()
+                            : _fkImmediateViolations;
+                        if (count != 0)
+                        {
+                            throw new EmbeddedSqlException(
+                                "FOREIGN KEY constraint failed",
+                                SqliteResultCode.ConstraintForeignKey,
+                                InsertConflictAlgorithm.Abort);
+                        }
+
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case SeekKeyInstruction seekKey:
+                    {
+                        if (TrySeekKey(seekKey.Cursor, seekKey.Key, seekKey.Operator, seekKey.EqOnly))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = seekKey.NotFoundTarget;
+                        break;
+                    }
+                case IdxRowIdInstruction idxRowId:
+                    {
+                        _registers[idxRowId.Destination.Index] = SqlValue.Integer(CurrentCursorRowId(idxRowId.Cursor));
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case RowDataInstruction rowData:
+                    {
+                        var row = CurrentCursorRow(rowData.Cursor);
+                        var dest = rowData.Destination;
+                        for (var i = 0; i < dest.Count; i++)
+                        {
+                            _registers[dest.Start.Index + i] = i < row.Length
+                                ? row[i]
+                                : SqlValue.Null;
+                        }
+
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case IdxInsertInstruction idxInsert:
+                    {
+                        ExecuteIdxInsert(idxInsert);
+                        AdvanceInstructionPointer();
+                        break;
+                    }
+                case IdxDeleteInstruction idxDelete:
+                    {
+                        ExecuteIdxDelete(idxDelete);
+                        AdvanceInstructionPointer();
                         break;
                     }
                 case SeekRowidRangeInstruction seekRowidRange:
@@ -629,13 +736,13 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case InsertInstruction insert:
                     {
-                        MutateCursorRow(insert.Cursor);
+                        MutateCursorRow(insert.Cursor, insert.Flags);
                         AdvanceInstructionPointer();
                         break;
                     }
                 case UpdateInstruction update:
                     {
-                        MutateCursorRow(update.Cursor);
+                        MutateCursorRow(update.Cursor, update.Flags);
                         AdvanceInstructionPointer();
                         break;
                     }
@@ -1187,14 +1294,35 @@ public sealed class ResumableStatement : IDisposable
                     CloseWindowBuffer(closeWindowBuffer.Buffer);
                     AdvanceInstructionPointer();
                     break;
-                case HaltInstruction:
-                    Array.Clear(_openCursors);
-                    DisposeAllJoinCursors();
-                    DisposeAllSorters();
-                    Array.Clear(_windowBuffers);
-                    AdvanceInstructionPointer();
-                    State = ResumableStatementState.Done;
-                    return ResumableStatementStepResult.Done;
+                case HaltInstruction halt:
+                    {
+                        Array.Clear(_openCursors);
+                        DisposeAllJoinCursors();
+                        DisposeAllSorters();
+                        Array.Clear(_windowBuffers);
+                        Array.Clear(_ephemeralTables);
+                        if (halt.ErrorCode != 0)
+                            throw CreateHaltException(halt);
+
+                        AdvanceInstructionPointer();
+                        State = ResumableStatementState.Done;
+                        return ResumableStatementStepResult.Done;
+                    }
+                case HaltIfNullInstruction haltIfNull:
+                    {
+                        if (_registers[haltIfNull.Target.Index].Kind == SqlValueKind.Null)
+                        {
+                            Array.Clear(_openCursors);
+                            DisposeAllJoinCursors();
+                            DisposeAllSorters();
+                            Array.Clear(_windowBuffers);
+                            Array.Clear(_ephemeralTables);
+                            throw CreateHaltIfNullException(haltIfNull);
+                        }
+
+                        AdvanceInstructionPointer();
+                        break;
+                    }
                 default:
                     throw new InvalidOperationException(
                         $"Validated VDBE program contains unsupported opcode {instruction.Opcode}.");
@@ -1234,10 +1362,16 @@ public sealed class ResumableStatement : IDisposable
             subprogram.Reset();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
+        Array.Clear(_ephemeralTables);
         _transaction.Reset();
         _currentRow = null;
         _instructionPointer = default;
         _hasExecutedInstruction = false;
+        _fkImmediateViolations = 0;
+        // Deferred FK violations live on the transaction while open; the statement-local
+        // copy is only used in autocommit and is cleared on every Reset.
+        if (!_transaction.InTransaction)
+            _fkDeferredViolations = 0;
         RowsAffected = 0;
         LastInsertRowId = null;
         // The parameter binding is intentionally preserved across Reset, mirroring SQLite's
@@ -1245,6 +1379,11 @@ public sealed class ResumableStatement : IDisposable
         // parameters. Rebind replaces it explicitly.
         State = ResumableStatementState.Ready;
     }
+
+    private int GetDeferredForeignKeyViolations()
+        => _transaction.InTransaction
+            ? _transaction.DeferredForeignKeyViolations
+            : _fkDeferredViolations;
 
     /// <summary>
     /// Replaces the statement's parameter binding, so the next run reads fresh late-bound values without
@@ -1493,6 +1632,9 @@ public sealed class ResumableStatement : IDisposable
 
     private VdbeCursorSource RequireCursorSource(Cursor cursor)
     {
+        if (_ephemeralTables[cursor.Index] is { } ephemeral)
+            return ephemeral.AsCursorSource();
+
         var source = _cursorSources is not null && cursor.Index < _cursorSources.Count
             ? _cursorSources[cursor.Index]
             : null;
@@ -1501,6 +1643,11 @@ public sealed class ResumableStatement : IDisposable
             ?? throw new InvalidOperationException(
                 $"Cursor {cursor.Index} has no bound row source.");
     }
+
+    private EphemeralTableRuntime RequireEphemeralTable(Cursor cursor)
+        => _ephemeralTables[cursor.Index]
+            ?? throw new InvalidOperationException(
+                $"Cursor {cursor.Index} is not an open ephemeral table.");
 
     private VdbeWriteTarget? WriteTargetOrNull(Cursor cursor)
         => _writeTargets is not null && cursor.Index < _writeTargets.Count
@@ -1532,8 +1679,11 @@ public sealed class ResumableStatement : IDisposable
 
     // Runs a mutation delegate for the current position and materializes the written
     // (row, rowid) so a following Column/RowId observes the new values, not the source.
-    private void MutateCursorRow(Cursor cursor)
+    private void MutateCursorRow(Cursor cursor, VdbeInsertFlags flags = VdbeInsertFlags.None)
     {
+        if ((flags & VdbeInsertFlags.RequireSeek) != 0)
+            EnsureCursorPositioned(cursor);
+
         var target = RequireWriteTarget(cursor);
         var mutate = target.MutateRow
             ?? throw new InvalidOperationException(
@@ -1541,7 +1691,28 @@ public sealed class ResumableStatement : IDisposable
         var mutation = mutate(_cursorPositions[cursor.Index]);
         _materializedRows[cursor.Index] = mutation.Row;
         _materializedRowIds[cursor.Index] = mutation.RowId;
-        RowsAffected = checked(RowsAffected + 1);
+
+        // SkipLastRowid is honored at Commit time via the write-target contract; the
+        // mutation still records the rowid for in-program Column/RowId reads.
+        if ((flags & (VdbeInsertFlags.SkipStatementChangeCount | VdbeInsertFlags.SkipAllChangeCounts)) == 0)
+            RowsAffected = checked(RowsAffected + 1);
+    }
+
+    private void EnsureCursorPositioned(Cursor cursor)
+    {
+        if (_materializedRows[cursor.Index] is not null)
+            return;
+
+        if (_joinCursorStates[cursor.Index] is { CurrentRow: not null })
+            return;
+
+        var position = _cursorPositions[cursor.Index];
+        var count = CursorRowCount(cursor);
+        if (position < 0 || position >= count)
+        {
+            throw new InvalidOperationException(
+                $"Cursor {cursor.Index} requires a prior seek before this write (VdbeInsertFlags.RequireSeek).");
+        }
     }
 
     private SqlValue[] CurrentCursorRow(Cursor cursor)
@@ -1661,6 +1832,293 @@ public sealed class ResumableStatement : IDisposable
         Array.Copy(row, 0, _registers, destination.Start.Index, row.Length);
     }
 
+    /// <summary>
+    /// Positions <paramref name="cursor"/> on the integer rowid held in
+    /// <paramref name="rowIdRegister"/>. Returns false when the key is missing or
+    /// not an integer (caller jumps to the not-found target).
+    /// </summary>
+    private bool TryPositionCursorOnRowId(Cursor cursor, Register rowIdRegister)
+    {
+        _materializedRows[cursor.Index] = null;
+        var source = RequireCursorSource(cursor);
+        var rowIds = source.RowIds;
+        if (rowIds is null)
+            return false;
+
+        var sought = _registers[rowIdRegister.Index];
+        if (sought.Kind != SqlValueKind.Integer)
+            return false;
+
+        var target = sought.AsInteger();
+        for (var i = 0; i < rowIds.Count; i++)
+        {
+            if (rowIds[i] != target)
+                continue;
+
+            _cursorPositions[cursor.Index] = i;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Positions <paramref name="cursor"/> on the first row whose leading columns equal
+    /// <paramref name="key"/>. Returns false when any key register is NULL (Turso
+    /// NoConflict: NULL never conflicts) or when no row matches.
+    /// </summary>
+    private bool TryPositionCursorOnKeyPrefix(Cursor cursor, RegisterRange key)
+    {
+        _materializedRows[cursor.Index] = null;
+        var keyValues = ReadRegisters(key);
+        for (var i = 0; i < keyValues.Length; i++)
+        {
+            if (keyValues[i].Kind == SqlValueKind.Null)
+                return false;
+        }
+
+        var source = RequireCursorSource(cursor);
+        var rows = source.Rows;
+        for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            if (!RowMatchesKeyPrefix(rows[rowIndex], keyValues))
+                continue;
+
+            _cursorPositions[cursor.Index] = rowIndex;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Positions the cursor for SeekGE/GT/LE/LT (and Idx* aliases). GE/GT take the first
+    /// qualifying row in scan order; LE/LT take the last. EqOnly requires an exact match
+    /// on GE/LE (Turso eq_only). Comparison uses SqlValue binary equality/order via
+    /// <see cref="CompareKeyPrefix"/>.
+    /// </summary>
+    private bool TrySeekKey(
+        Cursor cursor,
+        RegisterRange key,
+        VdbeKeySeekOperator op,
+        bool eqOnly)
+    {
+        _materializedRows[cursor.Index] = null;
+        var keyValues = ReadRegisters(key);
+        var source = RequireCursorSource(cursor);
+        var rows = source.Rows;
+        var found = -1;
+
+        for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            var cmp = CompareKeyPrefix(rows[rowIndex], keyValues);
+            var qualifies = op switch
+            {
+                VdbeKeySeekOperator.GreaterThanOrEqual => cmp >= 0,
+                VdbeKeySeekOperator.GreaterThan => cmp > 0,
+                VdbeKeySeekOperator.LessThanOrEqual => cmp <= 0,
+                VdbeKeySeekOperator.LessThan => cmp < 0,
+                _ => false,
+            };
+            if (!qualifies)
+                continue;
+
+            if (eqOnly
+                && op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.LessThanOrEqual
+                && cmp != 0)
+            {
+                continue;
+            }
+
+            // GE/GT: first match; LE/LT: last match.
+            if (op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.GreaterThan)
+            {
+                found = rowIndex;
+                break;
+            }
+
+            found = rowIndex;
+        }
+
+        if (found < 0)
+            return false;
+
+        _cursorPositions[cursor.Index] = found;
+        return true;
+    }
+
+    private static bool RowMatchesKeyPrefix(SqlValue[] row, SqlValue[] key)
+    {
+        if (row.Length < key.Length)
+            return false;
+
+        for (var column = 0; column < key.Length; column++)
+        {
+            if (!row[column].Equals(key[column]))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Lexicographic comparison of row's leading columns against key. Nulls sort
+    /// lowest (SQLite default BINARY). Returns negative if row &lt; key, 0 if equal
+    /// for the key width, positive if row &gt; key.
+    /// </summary>
+    private static int CompareKeyPrefix(SqlValue[] row, SqlValue[] key)
+    {
+        var width = key.Length;
+        for (var column = 0; column < width; column++)
+        {
+            if (column >= row.Length)
+                return -1;
+
+            var cmp = CompareSqlValues(row[column], key[column]);
+            if (cmp != 0)
+                return cmp;
+        }
+
+        return 0;
+    }
+
+    private static int CompareSqlValues(SqlValue left, SqlValue right)
+    {
+        if (left.Kind == SqlValueKind.Null && right.Kind == SqlValueKind.Null)
+            return 0;
+        if (left.Kind == SqlValueKind.Null)
+            return -1;
+        if (right.Kind == SqlValueKind.Null)
+            return 1;
+        if (left.Equals(right))
+            return 0;
+
+        // Prefer numeric order when both are numeric; otherwise ordinal text / kind order.
+        if (TryAsDouble(left, out var leftNum) && TryAsDouble(right, out var rightNum))
+            return leftNum.CompareTo(rightNum);
+
+        if (left.Kind == SqlValueKind.Text && right.Kind == SqlValueKind.Text)
+            return string.CompareOrdinal(left.AsText(), right.AsText());
+
+        // Mixed/non-text kinds: order by kind then fall back to inequality.
+        var kindOrder = left.Kind.CompareTo(right.Kind);
+        return kindOrder != 0 ? kindOrder : left.Equals(right) ? 0 : -1;
+    }
+
+    private static bool TryAsDouble(SqlValue value, out double number)
+    {
+        switch (value.Kind)
+        {
+            case SqlValueKind.Integer:
+                number = value.AsInteger();
+                return true;
+            case SqlValueKind.Real:
+                number = value.AsReal();
+                return true;
+            default:
+                number = 0;
+                return false;
+        }
+    }
+
+    private void ExecuteIdxInsert(IdxInsertInstruction idxInsert)
+    {
+        var ephemeral = RequireEphemeralTable(idxInsert.Cursor);
+        var key = ReadRegisters(idxInsert.Key);
+        if ((idxInsert.Flags & VdbeIdxInsertFlags.NoOpDuplicate) != 0
+            && ephemeral.ContainsKeyPrefix(key))
+        {
+            return;
+        }
+
+        ephemeral.Insert(key);
+        if ((idxInsert.Flags & VdbeIdxInsertFlags.NChange) != 0)
+            RowsAffected = checked(RowsAffected + 1);
+    }
+
+    private void ExecuteIdxDelete(IdxDeleteInstruction idxDelete)
+    {
+        var ephemeral = RequireEphemeralTable(idxDelete.Cursor);
+        if (idxDelete.Key is { } keyRange)
+        {
+            var key = ReadRegisters(keyRange);
+            if (!ephemeral.TryDeleteKeyPrefix(key))
+                return;
+        }
+        else
+        {
+            var position = _cursorPositions[idxDelete.Cursor.Index];
+            if (!ephemeral.TryDeleteAt(position))
+                return;
+            _cursorPositions[idxDelete.Cursor.Index] = -1;
+        }
+
+        _materializedRows[idxDelete.Cursor.Index] = null;
+    }
+
+    private Exception CreateHaltException(HaltInstruction halt)
+    {
+        var message = halt.DescriptionRegister is { } descReg
+            ? FormatHaltMessage(_registers[descReg.Index])
+            : halt.Description ?? string.Empty;
+        message = FormatConstraintHaltMessage(halt.ErrorCode, message);
+
+        var algorithm = halt.OnError switch
+        {
+            VdbeHaltOnError.Rollback => InsertConflictAlgorithm.Rollback,
+            VdbeHaltOnError.Fail => InsertConflictAlgorithm.Fail,
+            VdbeHaltOnError.Ignore => InsertConflictAlgorithm.Ignore,
+            VdbeHaltOnError.Abort => InsertConflictAlgorithm.Abort,
+            null => InsertConflictAlgorithm.Abort,
+            _ => InsertConflictAlgorithm.Abort,
+        };
+
+        if (algorithm == InsertConflictAlgorithm.Ignore)
+            return new TriggerIgnoreException();
+
+        var error = new EmbeddedSqlException(message, halt.ErrorCode, algorithm);
+        return algorithm switch
+        {
+            InsertConflictAlgorithm.Rollback => new EmbeddedConflictRollbackException(error),
+            InsertConflictAlgorithm.Fail => new EmbeddedConflictFailException(error, lastInsertRowId: 0),
+            _ => error,
+        };
+    }
+
+    private static Exception CreateHaltIfNullException(HaltIfNullInstruction haltIfNull)
+    {
+        var message = FormatConstraintHaltMessage(haltIfNull.ErrorCode, haltIfNull.Description);
+        return new EmbeddedSqlException(message, haltIfNull.ErrorCode, InsertConflictAlgorithm.Abort);
+    }
+
+    private static string FormatHaltMessage(SqlValue value)
+        => value.Kind == SqlValueKind.Null ? string.Empty : value.AsText();
+
+    private static string FormatConstraintHaltMessage(int errorCode, string description)
+    {
+        if (string.IsNullOrEmpty(description))
+            description = "constraint failed";
+
+        return errorCode switch
+        {
+            SqliteResultCode.ConstraintPrimaryKey
+                => $"UNIQUE constraint failed: {description} ({errorCode})",
+            SqliteResultCode.ConstraintUnique
+                => $"UNIQUE constraint failed: {description} ({errorCode})",
+            SqliteResultCode.ConstraintCheck
+                => $"CHECK constraint failed: {description} ({errorCode})",
+            SqliteResultCode.ConstraintNotNull
+                => $"NOT NULL constraint failed: {description} ({errorCode})",
+            SqliteResultCode.ConstraintForeignKey
+                => description,
+            SqliteResultCode.Constraint or SqliteResultCode.ConstraintTrigger
+                => description.Contains("constraint", StringComparison.OrdinalIgnoreCase)
+                    ? description
+                    : $"constraint failed: {description}",
+            _ => description,
+        };
+    }
+
     private void AdvanceInstructionPointer()
     {
         _instructionPointer = new ProgramCounter(checked(_instructionPointer.Offset + 1));
@@ -1681,6 +2139,86 @@ public sealed class ResumableStatement : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    /// <summary>
+    /// In-memory ephemeral table backing an <see cref="OpenEphemeralInstruction"/> cursor.
+    /// Rows are append-only with sequential 1-based rowids for SeekRowid/NotExists/Found,
+    /// and support IdxInsert/IdxDelete key maintenance.
+    /// </summary>
+    private sealed class EphemeralTableRuntime
+    {
+        private readonly int _columnCount;
+        private readonly List<SqlValue[]> _rows = [];
+        private readonly List<long> _rowIds = [];
+        private VdbeCursorSource? _sourceView;
+        private long _nextRowId = 1;
+
+        public EphemeralTableRuntime(int columnCount)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(columnCount);
+            _columnCount = columnCount;
+        }
+
+        public int ColumnCount => _columnCount;
+
+        public int RowCount => _rows.Count;
+
+        public void Insert(SqlValue[] row)
+        {
+            ArgumentNullException.ThrowIfNull(row);
+            if (row.Length != _columnCount)
+            {
+                throw new InvalidOperationException(
+                    $"Ephemeral insert has {row.Length} columns but the table has {_columnCount}.");
+            }
+
+            _rows.Add(row.ToArray());
+            _rowIds.Add(_nextRowId);
+            _nextRowId = checked(_nextRowId + 1);
+            _sourceView = null;
+        }
+
+        public bool ContainsKeyPrefix(SqlValue[] key)
+        {
+            foreach (var row in _rows)
+            {
+                if (RowMatchesKeyPrefix(row, key))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public bool TryDeleteKeyPrefix(SqlValue[] key)
+        {
+            for (var i = 0; i < _rows.Count; i++)
+            {
+                if (!RowMatchesKeyPrefix(_rows[i], key))
+                    continue;
+
+                _rows.RemoveAt(i);
+                _rowIds.RemoveAt(i);
+                _sourceView = null;
+                return true;
+            }
+
+            return false;
+        }
+
+        public bool TryDeleteAt(int position)
+        {
+            if (position < 0 || position >= _rows.Count)
+                return false;
+
+            _rows.RemoveAt(position);
+            _rowIds.RemoveAt(position);
+            _sourceView = null;
+            return true;
+        }
+
+        public VdbeCursorSource AsCursorSource()
+            => _sourceView ??= new VdbeCursorSource(_rows, _rowIds);
     }
 
     // Turso's RowSetTest keeps inserts from the current batch separate so a batch cannot match itself.

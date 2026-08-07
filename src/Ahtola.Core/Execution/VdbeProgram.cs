@@ -233,6 +233,86 @@ public enum VdbeOpcode
     Prev = 73,
     RowSetTest = 74,
     Program = 75,
+    /// <summary>Jump if the integer key in P3 is absent from cursor P1 (Turso/SQLite <c>NotExists</c>).</summary>
+    NotExists = 76,
+    /// <summary>Jump if the integer key in P3 is present on cursor P1 (Turso/SQLite <c>Found</c>).</summary>
+    Found = 77,
+    /// <summary>Halt when register P3 is NULL (Turso/SQLite <c>HaltIfNull</c> / NOT NULL checks).</summary>
+    HaltIfNull = 78,
+    /// <summary>Open a general-purpose in-memory ephemeral table bound to a cursor (Turso <c>OpenEphemeral</c>).</summary>
+    OpenEphemeral = 79,
+    /// <summary>Append one row from registers into an ephemeral table cursor.</summary>
+    EphemeralInsert = 80,
+    /// <summary>
+    /// Jump if the key in registers has no matching row (or contains NULL); leave the cursor
+    /// positioned when a match is found (Turso/SQLite <c>NoConflict</c>).
+    /// </summary>
+    NoConflict = 81,
+    /// <summary>Add P2 to the deferred or statement FK constraint counter (Turso <c>FkCounter</c>).</summary>
+    FkCounter = 82,
+    /// <summary>Jump if the deferred or statement FK counter is zero (Turso <c>FkIfZero</c>).</summary>
+    FkIfZero = 83,
+    /// <summary>Halt with SQLITE_CONSTRAINT_FOREIGNKEY when the FK counter is non-zero (Turso <c>FkCheck</c>).</summary>
+    FkCheck = 84,
+    /// <summary>Seek to first key ≥ bound (Turso <c>SeekGE</c>).</summary>
+    SeekGE = 85,
+    /// <summary>Seek to first key &gt; bound (Turso <c>SeekGT</c>).</summary>
+    SeekGT = 86,
+    /// <summary>Seek to last key ≤ bound (Turso <c>SeekLE</c>).</summary>
+    SeekLE = 87,
+    /// <summary>Seek to last key &lt; bound (Turso <c>SeekLT</c>).</summary>
+    SeekLT = 88,
+    /// <summary>Index-cursor SeekGE (Turso <c>IdxGE</c>).</summary>
+    IdxGE = 89,
+    /// <summary>Index-cursor SeekGT (Turso <c>IdxGT</c>).</summary>
+    IdxGT = 90,
+    /// <summary>Index-cursor SeekLE (Turso <c>IdxLE</c>).</summary>
+    IdxLE = 91,
+    /// <summary>Index-cursor SeekLT (Turso <c>IdxLT</c>).</summary>
+    IdxLT = 92,
+    /// <summary>Load the current index entry's rowid into a register (Turso <c>IdxRowid</c>).</summary>
+    IdxRowId = 93,
+    /// <summary>Copy the current cursor row's packed payload into registers (Turso <c>RowData</c>).</summary>
+    RowData = 94,
+    /// <summary>Insert a key into an index/ephemeral cursor (Turso <c>IdxInsert</c>).</summary>
+    IdxInsert = 95,
+    /// <summary>Delete the current index entry (Turso <c>IdxDelete</c>).</summary>
+    IdxDelete = 96,
+}
+
+/// <summary>Key-order seek comparison used by SeekGE/GT/LE/LT and IdxGE/GT/LE/LT.</summary>
+public enum VdbeKeySeekOperator
+{
+    GreaterThanOrEqual = 0,
+    GreaterThan = 1,
+    LessThanOrEqual = 2,
+    LessThan = 3,
+}
+
+/// <summary>
+/// Disposition applied when a <see cref="HaltInstruction"/> carries a non-zero error code
+/// (Turso <c>ResolveType</c> / SQLite ON CONFLICT / RAISE action).
+/// </summary>
+public enum VdbeHaltOnError
+{
+    Abort = 0,
+    Fail = 1,
+    Ignore = 2,
+    Rollback = 3,
+}
+
+/// <summary>Well-known SQLite result codes used by Halt / HaltIfNull.</summary>
+public static class SqliteResultCode
+{
+    public const int Ok = 0;
+    public const int Error = 1;
+    public const int Constraint = 19;
+    public const int ConstraintCheck = 275;
+    public const int ConstraintNotNull = 1299;
+    public const int ConstraintPrimaryKey = 1555;
+    public const int ConstraintUnique = 2067;
+    public const int ConstraintTrigger = 1811;
+    public const int ConstraintForeignKey = 787;
 }
 
 /// <summary>
@@ -760,6 +840,26 @@ public sealed class VdbeJoinScanPlan : VdbeJoinPlanNode
     }
 }
 
+/// <summary>
+/// Optional equijoin probe for <see cref="VdbeJoinOperatorPlan"/>: hashes the right side
+/// once and probes per left row. The full <see cref="VdbeJoinCondition"/> still runs so
+/// affinity/collation edge cases stay correct; the probe is only a candidate filter.
+/// </summary>
+public sealed class VdbeJoinEquiProbe
+{
+    public VdbeJoinEquiProbe(
+        Func<VdbeJoinRow, string?> buildLeftKey,
+        Func<VdbeJoinRow, string?> buildRightKey)
+    {
+        BuildLeftKey = buildLeftKey ?? throw new ArgumentNullException(nameof(buildLeftKey));
+        BuildRightKey = buildRightKey ?? throw new ArgumentNullException(nameof(buildRightKey));
+    }
+
+    public Func<VdbeJoinRow, string?> BuildLeftKey { get; }
+
+    public Func<VdbeJoinRow, string?> BuildRightKey { get; }
+}
+
 /// <summary>An INNER, LEFT, RIGHT, or FULL node in a materializing join plan.</summary>
 public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
 {
@@ -767,7 +867,8 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
         VdbeJoinPlanNode left,
         VdbeJoinPlanNode right,
         VdbeJoinKind kind,
-        VdbeJoinCondition? condition)
+        VdbeJoinCondition? condition,
+        VdbeJoinEquiProbe? equiProbe = null)
         : base(
             checked((left ?? throw new ArgumentNullException(nameof(left))).ColumnCount
                 + (right ?? throw new ArgumentNullException(nameof(right))).ColumnCount),
@@ -780,6 +881,7 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
         Right = right;
         Kind = kind;
         Condition = condition;
+        EquiProbe = equiProbe;
     }
 
     public VdbeJoinPlanNode Left { get; }
@@ -789,6 +891,8 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
     public VdbeJoinKind Kind { get; }
 
     public VdbeJoinCondition? Condition { get; }
+
+    public VdbeJoinEquiProbe? EquiProbe { get; }
 
     internal override IReadOnlyList<VdbeJoinRow> Materialize(int? maximumRows) => Enumerate(maximumRows).ToList();
 
@@ -805,10 +909,45 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
             : null;
         var emitted = 0;
 
+        // Optional equijoin hash: bucket right rows by canonical key, probe per left row.
+        // Candidates still pass through Condition for full SQLite equality semantics.
+        Dictionary<string, List<int>>? buckets = null;
+        if (EquiProbe is not null && rightRows.Count > 0)
+        {
+            buckets = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            for (var rightIndex = 0; rightIndex < rightRows.Count; rightIndex++)
+            {
+                var key = EquiProbe.BuildRightKey(rightRows[rightIndex]);
+                if (key is null)
+                    continue;
+                if (!buckets.TryGetValue(key, out var bucket))
+                {
+                    bucket = [];
+                    buckets[key] = bucket;
+                }
+
+                bucket.Add(rightIndex);
+            }
+        }
+
         foreach (var left in Left.Enumerate(maximumRows: null))
         {
             var matched = false;
-            for (var rightIndex = 0; rightIndex < rightRows.Count; rightIndex++)
+            IEnumerable<int> candidateIndices;
+            if (buckets is not null && EquiProbe is not null)
+            {
+                var key = EquiProbe.BuildLeftKey(left);
+                if (key is not null && buckets.TryGetValue(key, out var bucket))
+                    candidateIndices = bucket;
+                else
+                    candidateIndices = Array.Empty<int>();
+            }
+            else
+            {
+                candidateIndices = Enumerable.Range(0, rightRows.Count);
+            }
+
+            foreach (var rightIndex in candidateIndices)
             {
                 var right = rightRows[rightIndex];
                 var combined = Combine(left, right);
@@ -1463,12 +1602,33 @@ public sealed record DeleteInstruction(Cursor Cursor) : VdbeInstruction
     public override VdbeOpcode Opcode => VdbeOpcode.Delete;
 }
 
-public sealed record InsertInstruction(Cursor Cursor) : VdbeInstruction
+/// <summary>
+/// Turso/SQLite <c>InsertFlags</c> bitfield carried on Insert/Update opcodes.
+/// </summary>
+[Flags]
+public enum VdbeInsertFlags : byte
+{
+    None = 0,
+    /// <summary>This mutation is part of an UPDATE that changes the row's rowid.</summary>
+    UpdateRowidChange = 0x01,
+    /// <summary>Cursor must already be positioned on the target row before the write.</summary>
+    RequireSeek = 0x02,
+    /// <summary>Insert targets an ephemeral table (not the durable catalog).</summary>
+    EphemeralTableInsert = 0x04,
+    /// <summary>Do not update last_insert_rowid() from this write.</summary>
+    SkipLastRowid = 0x08,
+    /// <summary>Do not increment the statement-level changes() counter.</summary>
+    SkipStatementChangeCount = 0x10,
+    /// <summary>Do not increment changes() or total_changes().</summary>
+    SkipAllChangeCounts = 0x20,
+}
+
+public sealed record InsertInstruction(Cursor Cursor, VdbeInsertFlags Flags = VdbeInsertFlags.None) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.Insert;
 }
 
-public sealed record UpdateInstruction(Cursor Cursor) : VdbeInstruction
+public sealed record UpdateInstruction(Cursor Cursor, VdbeInsertFlags Flags = VdbeInsertFlags.None) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.Update;
 }
@@ -1848,9 +2008,209 @@ public sealed record LimitGateInstruction(Register Counter, ProgramCounter DoneT
     public override VdbeOpcode Opcode => VdbeOpcode.LimitGate;
 }
 
-public sealed record HaltInstruction : VdbeInstruction
+/// <summary>
+/// Stops the program. With <see cref="ErrorCode"/> 0 this is a clean halt (normal end).
+/// A non-zero code raises <see cref="Ahtola.Core.EmbeddedSqlException"/> carrying the SQLite
+/// result code, optional message, and <see cref="OnError"/> disposition (Turso
+/// <c>op_halt</c> / RAISE / constraint Halt).
+/// </summary>
+public sealed record HaltInstruction(
+    int ErrorCode = 0,
+    string? Description = null,
+    Register? DescriptionRegister = null,
+    VdbeHaltOnError? OnError = null) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => VdbeOpcode.Halt;
+}
+
+/// <summary>
+/// Halts with <see cref="ErrorCode"/> when <see cref="Target"/> holds NULL; otherwise falls
+/// through. Used for NOT NULL enforcement (Turso <c>op_halt_if_null</c>).
+/// </summary>
+public sealed record HaltIfNullInstruction(
+    Register Target,
+    int ErrorCode,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.HaltIfNull;
+}
+
+/// <summary>
+/// Positions <paramref name="Cursor"/> on the rowid held in <paramref name="RowIdRegister"/>
+/// when present and falls through; jumps to <paramref name="JumpTarget"/> when absent
+/// (Turso/SQLite <c>NotExists</c>). Same probe as <see cref="SeekRowidInstruction"/> with
+/// inverted naming for compiler/EXPLAIN parity on uniqueness probes.
+/// </summary>
+public sealed record NotExistsInstruction(
+    Cursor Cursor,
+    Register RowIdRegister,
+    ProgramCounter JumpTarget,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.NotExists;
+}
+
+/// <summary>
+/// Positions <paramref name="Cursor"/> on the rowid held in <paramref name="RowIdRegister"/>
+/// and jumps to <paramref name="FoundTarget"/> when present; falls through when absent
+/// (Turso/SQLite <c>Found</c>).
+/// </summary>
+public sealed record FoundInstruction(
+    Cursor Cursor,
+    Register RowIdRegister,
+    ProgramCounter FoundTarget,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.Found;
+}
+
+/// <summary>
+/// Opens a general-purpose in-memory ephemeral table on <paramref name="Cursor"/> with
+/// <paramref name="ColumnCount"/> columns (Turso/SQLite <c>OpenEphemeral</c>). Rows are
+/// appended with <see cref="EphemeralInsertInstruction"/> and scanned with the normal
+/// Rewind/Next/Column/SeekRowid/NotExists/Found family. Unlike
+/// <see cref="OpenWorkTableInstruction"/> this is not recursion-specific — it is the
+/// store used for IN-list materialization, DISTINCT intermediates, and subquery results.
+/// </summary>
+public sealed record OpenEphemeralInstruction(Cursor Cursor, int ColumnCount) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.OpenEphemeral;
+}
+
+/// <summary>
+/// Appends the values in <paramref name="Values"/> as one row of the ephemeral table
+/// opened on <paramref name="Cursor"/>, assigning the next sequential rowid.
+/// </summary>
+public sealed record EphemeralInsertInstruction(Cursor Cursor, RegisterRange Values) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.EphemeralInsert;
+}
+
+/// <summary>
+/// Probes <paramref name="Cursor"/> for a row whose leading columns equal
+/// <paramref name="Key"/>. Jumps to <paramref name="NoConflictTarget"/> when any key
+/// register is NULL or no match exists (Turso/SQLite <c>NoConflict</c> — NULL never
+/// conflicts). Falls through with the cursor positioned on the match when found.
+/// </summary>
+public sealed record NoConflictInstruction(
+    Cursor Cursor,
+    RegisterRange Key,
+    ProgramCounter NoConflictTarget,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.NoConflict;
+}
+
+/// <summary>
+/// Adds <paramref name="Increment"/> (may be negative) to the deferred or statement-level
+/// foreign-key constraint counter (Turso/SQLite <c>FkCounter</c>).
+/// </summary>
+public sealed record FkCounterInstruction(int Increment, bool Deferred) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.FkCounter;
+}
+
+/// <summary>
+/// Jumps to <paramref name="Target"/> when the deferred or statement FK counter is zero
+/// (Turso/SQLite <c>FkIfZero</c>).
+/// </summary>
+public sealed record FkIfZeroInstruction(bool Deferred, ProgramCounter Target) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.FkIfZero;
+}
+
+/// <summary>
+/// Halts with <see cref="SqliteResultCode.ConstraintForeignKey"/> when the deferred or
+/// statement FK counter is non-zero (Turso/SQLite <c>FkCheck</c>).
+/// </summary>
+public sealed record FkCheckInstruction(bool Deferred) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.FkCheck;
+}
+
+/// <summary>
+/// Positions <paramref name="Cursor"/> on the first (GE/GT) or last (LE/LT) row whose
+/// leading columns compare to <paramref name="Key"/> per <paramref name="Operator"/>.
+/// When <paramref name="EqOnly"/> is set, a GE/LE seek requires an exact match (Turso
+/// <c>eq_only</c>). Jumps to <paramref name="NotFoundTarget"/> when no qualifying row
+/// exists. <paramref name="IsIndex"/> selects the Idx* opcode names for EXPLAIN parity;
+/// runtime semantics are the same for materialization-backed cursors.
+/// </summary>
+public sealed record SeekKeyInstruction(
+    Cursor Cursor,
+    RegisterRange Key,
+    VdbeKeySeekOperator Operator,
+    bool EqOnly,
+    bool IsIndex,
+    ProgramCounter NotFoundTarget,
+    string Description) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => (IsIndex, Operator) switch
+    {
+        (false, VdbeKeySeekOperator.GreaterThanOrEqual) => VdbeOpcode.SeekGE,
+        (false, VdbeKeySeekOperator.GreaterThan) => VdbeOpcode.SeekGT,
+        (false, VdbeKeySeekOperator.LessThanOrEqual) => VdbeOpcode.SeekLE,
+        (false, VdbeKeySeekOperator.LessThan) => VdbeOpcode.SeekLT,
+        (true, VdbeKeySeekOperator.GreaterThanOrEqual) => VdbeOpcode.IdxGE,
+        (true, VdbeKeySeekOperator.GreaterThan) => VdbeOpcode.IdxGT,
+        (true, VdbeKeySeekOperator.LessThanOrEqual) => VdbeOpcode.IdxLE,
+        (true, VdbeKeySeekOperator.LessThan) => VdbeOpcode.IdxLT,
+        _ => VdbeOpcode.SeekGE,
+    };
+}
+
+/// <summary>
+/// Writes the current cursor row's rowid into <paramref name="Destination"/> (Turso
+/// <c>IdxRowid</c>). Works for any cursor that exposes rowids.
+/// </summary>
+public sealed record IdxRowIdInstruction(Cursor Cursor, Register Destination) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.IdxRowId;
+}
+
+/// <summary>
+/// Copies the current cursor row into <paramref name="Destination"/> (width =
+/// destination count), starting at column 0 (Turso <c>RowData</c> simplified to
+/// register columns rather than a packed record blob).
+/// </summary>
+public sealed record RowDataInstruction(Cursor Cursor, RegisterRange Destination) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.RowData;
+}
+
+/// <summary>Turso <c>IdxInsertFlags</c> bitfield.</summary>
+[Flags]
+public enum VdbeIdxInsertFlags : byte
+{
+    None = 0,
+    Append = 0x01,
+    UseSeek = 0x02,
+    NChange = 0x04,
+    NoOpDuplicate = 0x08,
+}
+
+/// <summary>
+/// Inserts <paramref name="Key"/> into an ephemeral/index cursor. With
+/// <see cref="VdbeIdxInsertFlags.NoOpDuplicate"/>, a matching key is a no-op
+/// instead of a second insert (Turso <c>IdxInsert</c>).
+/// </summary>
+public sealed record IdxInsertInstruction(
+    Cursor Cursor,
+    RegisterRange Key,
+    VdbeIdxInsertFlags Flags = VdbeIdxInsertFlags.None) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.IdxInsert;
+}
+
+/// <summary>
+/// Deletes the entry at the current cursor position from an ephemeral/index
+/// cursor (Turso <c>IdxDelete</c>). Optional <paramref name="Key"/> seeks first.
+/// </summary>
+public sealed record IdxDeleteInstruction(
+    Cursor Cursor,
+    RegisterRange? Key = null) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.IdxDelete;
 }
 
 /// <summary>
@@ -2393,6 +2753,33 @@ public sealed class VdbeProgram
                     openCursors[openWrite.Cursor.Index] = true;
                     cursorColumnCounts[openWrite.Cursor.Index] = openWrite.ColumnCount;
                     break;
+                case OpenEphemeralInstruction openEphemeral:
+                    ValidateCursor(openEphemeral.Cursor, instructionIndex);
+                    if (openCursors[openEphemeral.Cursor.Index])
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} opens cursor {openEphemeral.Cursor.Index} twice.");
+                    }
+
+                    if (openEphemeral.ColumnCount <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} opens ephemeral cursor {openEphemeral.Cursor.Index} with a non-positive column count.");
+                    }
+
+                    openCursors[openEphemeral.Cursor.Index] = true;
+                    cursorColumnCounts[openEphemeral.Cursor.Index] = openEphemeral.ColumnCount;
+                    break;
+                case EphemeralInsertInstruction ephemeralInsert:
+                    ValidateOpenCursor(ephemeralInsert.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(ephemeralInsert.Values, instructionIndex);
+                    if (ephemeralInsert.Values.Count != cursorColumnCounts[ephemeralInsert.Cursor.Index])
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} inserts {ephemeralInsert.Values.Count} columns into ephemeral cursor {ephemeralInsert.Cursor.Index}, which has {cursorColumnCounts[ephemeralInsert.Cursor.Index]} columns.");
+                    }
+
+                    break;
                 case CloseCursorInstruction close:
                     ValidateCursor(close.Cursor, instructionIndex);
                     if (!openCursors[close.Cursor.Index])
@@ -2470,6 +2857,88 @@ public sealed class VdbeProgram
                     ValidateOpenCursor(seekRowid.Cursor, openCursors, instructionIndex);
                     ValidateRegister(seekRowid.RowIdRegister, instructionIndex);
                     ValidateJumpTarget(seekRowid.NotFoundTarget, instructionIndex);
+                    break;
+                case NotExistsInstruction notExists:
+                    ValidateOpenCursor(notExists.Cursor, openCursors, instructionIndex);
+                    ValidateRegister(notExists.RowIdRegister, instructionIndex);
+                    ValidateJumpTarget(notExists.JumpTarget, instructionIndex);
+                    break;
+                case FoundInstruction found:
+                    ValidateOpenCursor(found.Cursor, openCursors, instructionIndex);
+                    ValidateRegister(found.RowIdRegister, instructionIndex);
+                    ValidateJumpTarget(found.FoundTarget, instructionIndex);
+                    break;
+                case NoConflictInstruction noConflict:
+                    ValidateOpenCursor(noConflict.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(noConflict.Key, instructionIndex);
+                    if (noConflict.Key.Count <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} NoConflict requires a positive key width.");
+                    }
+
+                    ValidateJumpTarget(noConflict.NoConflictTarget, instructionIndex);
+                    break;
+                case FkCounterInstruction:
+                    break;
+                case FkIfZeroInstruction fkIfZero:
+                    ValidateJumpTarget(fkIfZero.Target, instructionIndex);
+                    break;
+                case FkCheckInstruction:
+                    break;
+                case SeekKeyInstruction seekKey:
+                    ValidateOpenCursor(seekKey.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(seekKey.Key, instructionIndex);
+                    if (seekKey.Key.Count <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} SeekKey requires a positive key width.");
+                    }
+
+                    if (!Enum.IsDefined(seekKey.Operator))
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has an undefined SeekKey operator.");
+                    }
+
+                    ValidateJumpTarget(seekKey.NotFoundTarget, instructionIndex);
+                    break;
+                case IdxRowIdInstruction idxRowId:
+                    ValidateOpenCursor(idxRowId.Cursor, openCursors, instructionIndex);
+                    ValidateRegister(idxRowId.Destination, instructionIndex);
+                    break;
+                case RowDataInstruction rowData:
+                    ValidateOpenCursor(rowData.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(rowData.Destination, instructionIndex);
+                    if (rowData.Destination.Count <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} RowData requires a positive destination width.");
+                    }
+
+                    break;
+                case IdxInsertInstruction idxInsert:
+                    ValidateOpenCursor(idxInsert.Cursor, openCursors, instructionIndex);
+                    ValidateRegisterRange(idxInsert.Key, instructionIndex);
+                    if (idxInsert.Key.Count <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} IdxInsert requires a positive key width.");
+                    }
+
+                    break;
+                case IdxDeleteInstruction idxDelete:
+                    ValidateOpenCursor(idxDelete.Cursor, openCursors, instructionIndex);
+                    if (idxDelete.Key is { } deleteKey)
+                    {
+                        ValidateRegisterRange(deleteKey, instructionIndex);
+                        if (deleteKey.Count <= 0)
+                        {
+                            throw new VdbeProgramValidationException(
+                                $"VDBE instruction {instructionIndex} IdxDelete key requires a positive width.");
+                        }
+                    }
+
                     break;
                 case SeekRowidRangeInstruction seekRowidRange:
                     ValidateOpenCursor(seekRowidRange.Cursor, openCursors, instructionIndex);
@@ -2994,11 +3463,33 @@ public sealed class VdbeProgram
                     ValidateOpenWindowBuffer(closeWindowBuffer.Buffer, openWindowBuffers, instructionIndex);
                     openWindowBuffers[closeWindowBuffer.Buffer.Index] = false;
                     break;
-                case HaltInstruction when instructionIndex == _instructions.Count - 1:
+                case HaltInstruction halt:
+                    // Clean halt (error code 0) is only legal as the terminal instruction.
+                    // Error Halt (constraint / RAISE) may appear mid-program, matching Turso.
+                    if (halt.ErrorCode == 0 && instructionIndex != _instructions.Count - 1)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} halts before the end of the program.");
+                    }
+
+                    if (halt.ErrorCode < 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has a negative Halt error code.");
+                    }
+
+                    if (halt.DescriptionRegister is { } descReg)
+                        ValidateRegister(descReg, instructionIndex);
                     break;
-                case HaltInstruction:
-                    throw new VdbeProgramValidationException(
-                        $"VDBE instruction {instructionIndex} halts before the end of the program.");
+                case HaltIfNullInstruction haltIfNull:
+                    ValidateRegister(haltIfNull.Target, instructionIndex);
+                    if (haltIfNull.ErrorCode <= 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} HaltIfNull requires a positive error code.");
+                    }
+
+                    break;
                 default:
                     throw new VdbeProgramValidationException(
                         $"VDBE instruction {instructionIndex} has unsupported opcode {instruction.Opcode}.");

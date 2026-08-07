@@ -242,7 +242,9 @@ public static class LimitOffsetProgramBuilder
                 or CastInstruction
                 or GroupKeyInstruction
                 or YieldInstruction
-                or HaltInstruction => instruction,
+                or HaltInstruction
+                or OpenEphemeralInstruction
+                or EphemeralInsertInstruction => instruction,
             _ => throw new StatementCompilationException(
                 $"Cannot lower opcode {instruction.Opcode} into a LIMIT/OFFSET program."),
         };

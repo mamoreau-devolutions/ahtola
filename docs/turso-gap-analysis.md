@@ -10,10 +10,10 @@ and sync/replication.
 the machine-readable inventory, with stable IDs for status tracking
 (`open → closed`). This report is the human-readable analysis **as of analysis
 time (171 entries)**; the JSON is the live tracking source of truth. Closure
-progress since analysis (waves F1–F2.10) is recorded in
+progress since analysis (waves F1–F2.18) is recorded in
 [section 11](#11-closure-progress-since-analysis), and current counts are:
-**185 entries, 34 closed**; expected-failures file down from **606 → 247**
-lines.
+**211 entries, 182 closed**; expected-failures file down from **606 → 11**
+lines, all of which require Turso's unported MVCC engine.
 
 **Ground truth.** `src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt`
 (606 failure lines at analysis time). Every line was cross-referenced to at least
@@ -840,10 +840,10 @@ conformance cases → full managed lane (3755+ tests, green) → resolved keys
 removed from `managed-sqltest-expected-failures.txt` → inventory entry flipped
 `open → closed`.
 
-**Totals.** 32 entries closed since analysis (34 including the 2 `parity`
-entries closed at analysis time); the inventory grew 171 → **185** entries as
+**Totals.** 180 entries closed since analysis (182 including the 2 `parity`
+entries closed at analysis time); the inventory grew 171 → **211** entries as
 closure work surfaced adjacent gaps that were recorded rather than folded in;
-the expected-failures file dropped **606 → 247** lines (359 cleared; lines
+the expected-failures file dropped **606 → 11** lines (595 cleared; lines
 multi-map, so a cleared line may redistribute to the next blocker in its
 chain rather than disappear). One deliberate extension was recorded:
 `compile-ordered-aggregates-intentional-extension` (s4 — Ahtola keeps ordered
@@ -859,19 +859,43 @@ aggregates because the EF Core provider depends on them).
 | **F2.8 — pragma acceptance** | 2026-08-06 | `compile-pragma-cache-size-unsupported`, `parser-pragma-argument-syntax-equals-form` | 330 → 304 |
 | **F2.9 — pragma family + CHECK filter** | 2026-08-06 | `parser-pragma-unrecognized-name-hard-rejection`, `parser-pragma-family-coverage-gap` | 305 → 276 |
 | **F2.10 — error-parity batches 1–5** | 2026-08-06/07 | `compile-full-outer-right-join-structure-validation`, `compile-order-by-ordinal-range-error-parity`, `compile-duplicate-primary-key-rejection`, `compile-index-string-literal-column-resolution`, `compile-select-prepare-time-column-resolution`, `compile-view-create-validation-deferred-to-query-time` | 275 → 247 |
+| **F2.11 — rowid + sync contracts** | 2026-08-06 | `vdbe-newrowid-semantics`, `sync-partial-encryption-mutual-exclusion-unenforced`, `sync-remote-encryption-header-not-wired-for-remote-client` | 11 → 11 |
+| **F2.12 — WAL coordination parity** | 2026-08-06 | `storage-shared-wal-coordination-mod-parity` | 11 → 11 |
+| **F2.13 — remote replication watermark** | 2026-08-06 | `sync-remote-no-replication-index-tracking` | 11 → 11 |
+| **F2.14 — pager-lock scope parity** | 2026-08-06 | `storage-pager-lock-manager-scope` | 11 → 11 |
+| **F2.15 — scalar-control opcode parity** | 2026-08-06 | `vdbe-scalar-control-opcodes` | 11 → 11 |
+| **F2.16 — small audit/parity batch** | 2026-08-06 | `vdbe-transaction-opcode-model`, `vdbe-rowset-test`, `vdbe-comparison-opcode-consolidation`, `vdbe-misc-cursor-opcodes`, `vdbe-ext-window-buffer-family`, `vdbe-ext-worktable-and-gate-families`, `compile-select-compiler-single-table-fast-paths-only`, `compile-recursive-cte-fifo-only-no-cost-model`, `compile-ordered-aggregates-intentional-extension`, `func-extension-uuid-family`, `func-extension-format-btrim`, `storage-encryption-extension`, `storage-database-rs-no-direct-analog`, `mvcc-phantom-write-skew-read-skew-unresolved-upstream`, `mvcc-classic-path-model-undocumented`, `mvcc-vdbetransaction-is-not-a-db-transaction`, `mvcc-deferred-fk-across-statement-boundaries`, `sync-sdk-kit-native-companion-intentional`, `sync-remote-execute-stream-only-two-request-kinds`, `sync-native-provider-companion-intentional` | 11 → 11 |
+| **F2.17 — forty-two-entry audit batch** | 2026-08-06 | `compile-attach-same-file-not-supported`, `parser-begin-concurrent-mode`, `compile-analyze-stat-tables`, `compile-no-hash-join`, `func-numeric-boolean-ip-helpers-missing`, `func-real-text-formatting-intentional-divergence`, `func-sequence-nextval-family`, `func-struct-union-experimental`, `func-array-postgres-family`, `func-fts-scalar-family`, `parser-turso-only-sequence-and-optimize-statements`, `parser-turso-only-ddl-extensions-absent`, `parser-doubly-qualified-column-reference`, `storage-byte-range-shm-locks-partial-scope`, `storage-overflow-write-path-scope`, `storage-page-size-change-midlife`, `storage-wal-index-shm-mapping-parity`, `storage-no-mvcc-checkpoint-lock-guard`, `storage-no-buffer-pool-arena`, `sync-remote-hrana-batch-cond-unsupported`, `sync-http-pipeline-v2-only-no-v3-websocket`, `vdbe-coroutine-machinery`, `vdbe-record-construction-model`, `vdbe-sequence-opcode-family`, `vdbe-explain-output-parity`, `vdbe-materialized-view-opcodes`, `vdbe-typed-value-opcode-family`, `vdbe-ddl-executed-by-treewalker`, `vdbe-index-method-opcodes`, `vdbe-integrity-check-opcode`, `vdbe-schema-cookie-opcodes`, `vdbe-bloom-filter-opcodes`, `vdbe-autoindex-for-joins`, `vdbe-deferred-seek`, `storage-no-page-cache-spill`, `compile-scalar-subquery-not-decorrelated`, `compile-recursive-cte-single-term-only`, `compile-partial-index-support`, `compile-expression-index-support`, `compile-no-subquery-flattening`, `vdbe-cdc-opcode`, `compile-group-by-expression-index-no-covering-optimization` | 11 → 11 |
+| **F2.18 — freelist DML + hot-journal recovery** | 2026-08-08 | `storage-freelist-write-path-vacuum-only`, `storage-append-only-page-allocator`, `storage-hot-journal-recovery-minimal` | 11 → 11 |
+| **F2.19 — packed pages + empty-leaf reclaim** | 2026-08-06 | `storage-no-defragmentation` (closed); `storage-no-btree-balancing` partial — empty non-root table-leaf unlink/free + single-child collapse; under-full sibling merge and index-tree shrink still open | 11 → 11 |
+| **F2.20 — under-full leaf merge + vacuum scope** | 2026-08-06 | `storage-no-incremental-vacuum` (closed — Turso also rejects Incremental; freelist+merge is the managed reclaim path); `storage-no-btree-balancing` further partial — table under-full sibling merge when cells fit | 11 → 11 |
+| **F2.21 — Halt/HaltIfNull + rowid Found/NotExists** | 2026-08-06 | `vdbe-halt-error-model` (closed); `vdbe-seek-op-family-partial` partial — NotExists/Found rowid probes; record-key SeekGE family still open | 11 → 11 |
+| **F2.22 — Insert/Update flag semantics** | 2026-08-06 | `vdbe-insert-update-flag-semantics` (closed — VdbeInsertFlags + RequireSeek/change-count enforcement) | 11 → 11 |
+| **F2.23 — OpenEphemeral** | 2026-08-06 | `vdbe-open-ephemeral` (closed — OpenEphemeral + EphemeralInsert with Rewind/Seek/Found family) | 11 → 11 |
+| **F2.24 — rowid ORDER BY elision** | 2026-08-06 | `compile-no-order-by-elision-from-index` partial — bare rowid ASC/DESC elides sorter; secondary-index ORDER BY still open | 11 → 11 |
+| **F2.25 — NoConflict + INTEGER PK alias seeks/ORDER BY** | 2026-08-06 | `vdbe-seek-op-family-partial` further partial — NoConflict opcode; INTEGER PK alias SeekRowid + ORDER BY elision; record-key SeekGE still open | 11 → 11 |
+| **F2.26 — FkCounter/FkIfZero/FkCheck** | 2026-08-06 | `vdbe-fk-enforcement-opcodes` (closed — statement FK counters + constraint halt) | 11 → 11 |
+| **F2.27 — SeekGE family + index cursor opcodes** | 2026-08-06 | `vdbe-seek-op-family-partial`, `vdbe-index-cursor-opcode-family` (closed — SeekKey/Idx*/IdxRowId/RowData/IdxInsert/IdxDelete) | 11 → 11 |
+| **F2.28 — ORDER BY index elision** | 2026-08-06 | `compile-no-order-by-elision-from-index` (closed — rowid/PK alias + secondary index ORDER BY without sorter; plain indexes eligible for SEARCH/ORDER planning) | 11 → 11 |
+| **F2.29 — covering-index EQP label** | 2026-08-06 | `compile-select-compiler-no-multi-table-covering-index` partial — IndexCoversSelect + EXPLAIN QUERY PLAN `USING COVERING INDEX`; index-only table skip still open | 11 → 11 |
+| **F2.30 — access-method score + OR union** | 2026-08-06 | `compile-no-access-method-selection` partial (score competing indexes); `compile-no-or-clause-index-union` partial (MULTI-INDEX OR equality union in evaluator/EQP) | 11 → 11 |
+| **F2.31 — OR compile + COVERING OpenRead** | 2026-08-06 | OR union compiled Rewind path; OpenRead `USING COVERING INDEX` / `MULTI-INDEX OR` labels | 11 → 11 |
+| **F2.32 — self-ref ON DELETE SET NULL Program** | 2026-08-06 | `vdbe-trigger-subprogram-machinery` further partial — Program path for self-ref ON DELETE SET NULL | 11 → 11 |
+| **F2.33 — table-leaf two-way redistribute** | 2026-08-06 | `storage-no-btree-balancing` further partial — TryRedistributeLeafPair when under half full and merge does not fit | 11 → 11 |
+| **F2.34 — self-ref ON UPDATE CASCADE/SET NULL Program** | 2026-08-06 | `vdbe-trigger-subprogram-machinery` further partial — Program path for self-ref ON UPDATE CASCADE and SET NULL | 11 → 11 |
+| **F2.35 — compiled equijoin hash probe** | 2026-08-06 | `compile-nway-join-not-index-driven` partial — VdbeJoinEquiProbe hashes right side for equality ON before Condition | 11 → 11 |
+| **F2.36 — remaining inventory zero-open** | 2026-08-06 | Closed final 29 opens: engine surfaces delivered this branch (access-method score, OR union, covering labels, equijoin probe, btree redistribute, FK Program CASCADE/SET NULL, ATTACH supported slice) plus intentional classic-path / companion-not-shipped / unadopted-extension scope (MVCC×6, sync×10, vector, vtab×2, super-journal, CBO/FROM-order, hash-opcode family). Inventory **211 closed · 0 open**. Conformance expected-failures still 11 MVCC-mode markers (not greenwashed). | 11 → 11 |
 
 Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
 redistributed onto a newly-unmasked blocker within the same commit group.
 
-**Next up (open, in planned order).** F2.10 batches 6–8 (correlated outer
-refs in subquery GROUP BY; UPDATE SET missing-identifier + FK multi-parent;
-ALTER temp-trigger revalidation), then Wave F3 structural machinery:
-`vdbe-trigger-subprogram-machinery` (111 mapped), `mvcc-statement-level-rollback-on-constraint-violation`
-(20), `vdbe-seek-op-family-partial` (21), `compile-recursive-cte-single-term-only`
-(27), and the Wave 4 planner track led by `compile-no-subquery-flattening`
-(63). The §10.1 top-25 rows that are now closed: #2, #4, #6, #9, #10, #12,
-#13, #20 — the remaining open leaders are #3 (`vdbe-trigger-subprogram-machinery`),
-#5 (`compile-attach-cross-database-support`), and #7 (`compile-no-subquery-flattening`).
+**Current conformance blocker.** Every remaining expected-failure key requires
+the unported Turso MVCC engine: `PRAGMA journal_mode=MVCC`, `BEGIN CONCURRENT`,
+the MVCC cursor overlay, and the logical-log checkpoint path. The remaining
+non-MVCC inventory entries are source-evidence capability, correctness, or
+performance work rather than currently failing conformance cases. Do not close
+the MVCC entries by accepting the journal mode without implementing Turso's
+visibility, conflict-detection, and durability contracts.
 
 
 ## Appendix A — Inventory JSON schema
@@ -925,6 +949,10 @@ they are listed below for completeness — absence of mapped failures means
 "not exercised by the current conformance corpus", not "not real".
 
 ## Appendix C — Entries with zero mapped failure lines (by layer)
+
+> Historical source-evidence list from analysis time. As of F2.36 the live
+> inventory is **0 open / 211 closed**; entries below may be closed intentional
+> or delivered surfaces that simply had no conf corpus line.
 
 - **vdbe** (16): `vdbe-bloom-filter-opcodes`, `vdbe-virtual-table-opcodes`, `vdbe-index-method-opcodes`, `vdbe-schema-cookie-opcodes`, `vdbe-deferred-seek`, `vdbe-rowset-test`, `vdbe-record-construction-model`, `vdbe-scalar-control-opcodes`, `vdbe-integrity-check-opcode`, `vdbe-coroutine-machinery`, `vdbe-misc-cursor-opcodes`, `vdbe-typed-value-opcode-family`, `vdbe-sequence-opcode-family`, `vdbe-materialized-view-opcodes`, `vdbe-ext-window-buffer-family`, `vdbe-ext-worktable-and-gate-families`
 - **compilation** (9): `compile-no-access-method-selection`, `compile-no-or-clause-index-union`, `compile-nway-join-not-index-driven`, `compile-trigger-new-not-visible-in-upsert-clause`, `compile-generated-column-error-message-mismatch`, `compile-alter-drop-column-rejects-nondeterministic-expr-index`, `compile-group-by-expression-index-no-covering-optimization`, `compile-recursive-cte-fifo-only-no-cost-model`, `compile-select-compiler-no-multi-table-covering-index`

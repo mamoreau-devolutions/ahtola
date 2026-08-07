@@ -22,6 +22,29 @@ public enum SqlitePagerLockOperation
 }
 
 /// <summary>
+/// Stage 4 busy taxonomy aligned with SQLite's <c>SQLITE_BUSY</c>,
+/// <c>SQLITE_BUSY_SNAPSHOT</c>, and <c>SQLITE_BUSY_RECOVERY</c> extended result
+/// codes.
+/// </summary>
+public enum SqlitePagerBusyReason
+{
+    /// <summary>Ordinary lock contention (<c>SQLITE_BUSY</c>).</summary>
+    Busy,
+
+    /// <summary>
+    /// The reader's WAL snapshot/mark is no longer valid
+    /// (<c>SQLITE_BUSY_SNAPSHOT</c>).
+    /// </summary>
+    Snapshot,
+
+    /// <summary>
+    /// Recovery/checkpoint recovery locks could not be obtained
+    /// (<c>SQLITE_BUSY_RECOVERY</c>).
+    /// </summary>
+    Recovery,
+}
+
+/// <summary>
 /// Raised when a SQLite pager lock cannot be acquired before its configured
 /// busy timeout expires.
 /// </summary>
@@ -31,14 +54,27 @@ public sealed class SqlitePagerBusyException : InvalidOperationException
         SqlitePagerLockOperation operation,
         TimeSpan timeout,
         Exception? innerException = null)
-        : base($"SQLite pager is busy; {operation} lock could not be acquired within {timeout}.", innerException)
+        : this(operation, SqlitePagerBusyReason.Busy, timeout, innerException)
+    {
+    }
+
+    public SqlitePagerBusyException(
+        SqlitePagerLockOperation operation,
+        SqlitePagerBusyReason reason,
+        TimeSpan timeout,
+        Exception? innerException = null)
+        : base(CreateMessage(operation, reason, timeout), innerException)
     {
         Operation = operation;
+        Reason = reason;
         Timeout = timeout;
     }
 
     /// <summary>The requested lock operation.</summary>
     public SqlitePagerLockOperation Operation { get; }
+
+    /// <summary>Stage 4 busy class for SQLite extended-result mapping.</summary>
+    public SqlitePagerBusyReason Reason { get; }
 
     /// <summary>
     /// The requested busy timeout. Shared-memory byte-range locks report
@@ -46,6 +82,20 @@ public sealed class SqlitePagerBusyException : InvalidOperationException
     /// until this timeout expires.
     /// </summary>
     public TimeSpan Timeout { get; }
+
+    private static string CreateMessage(
+        SqlitePagerLockOperation operation,
+        SqlitePagerBusyReason reason,
+        TimeSpan timeout)
+        => reason switch
+        {
+            SqlitePagerBusyReason.Snapshot =>
+                $"SQLite pager snapshot is busy; {operation} could not retain a valid WAL read mark within {timeout}.",
+            SqlitePagerBusyReason.Recovery =>
+                $"SQLite pager recovery is busy; {operation} recovery lock could not be acquired within {timeout}.",
+            _ =>
+                $"SQLite pager is busy; {operation} lock could not be acquired within {timeout}.",
+        };
 }
 
 /// <summary>
@@ -188,7 +238,12 @@ public sealed class SqlitePagerLockManager
         if (_coordinator is null)
             return null;
         if (timeout == TimeSpan.Zero && configuredTimeout != TimeSpan.Zero)
-            throw new SqlitePagerBusyException(SqlitePagerLockOperation.Writer, configuredTimeout);
+        {
+            throw new SqlitePagerBusyException(
+                SqlitePagerLockOperation.Writer,
+                SqlitePagerBusyReason.Recovery,
+                configuredTimeout);
+        }
 
         ReleaseIdleSharedReaderLock();
 
@@ -199,7 +254,11 @@ public sealed class SqlitePagerLockManager
         }
         catch (SqlitePagerBusyException exception)
         {
-            throw new SqlitePagerBusyException(SqlitePagerLockOperation.Writer, configuredTimeout, exception);
+            throw new SqlitePagerBusyException(
+                SqlitePagerLockOperation.Writer,
+                SqlitePagerBusyReason.Recovery,
+                configuredTimeout,
+                exception);
         }
     }
 

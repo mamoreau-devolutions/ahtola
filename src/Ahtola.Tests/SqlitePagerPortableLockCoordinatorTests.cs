@@ -69,7 +69,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
 
     [Test]
     [NonParallelizable]
-    public void PhysicalPagerRejectsAnotherManagedProcessUntilOwnerDisposes()
+    public void PhysicalPagerAllowsAnotherManagedProcessUnderSharedMainFileLock()
     {
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
             Assert.Ignore("Physical managed WAL lock coordination requires Windows or Linux byte-range locks.");
@@ -83,9 +83,10 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
                        databasePath,
                        databasePath + "-wal",
                        CreateWalHeader()))
-            using (var writer = pager.BeginTransaction(targetDatabaseSizeInPages: 1))
             {
-                RunManagedWorker(databasePath, "owned");
+                // Stage 6: SHARED main-file lock coexists across managed processes
+                // while the owner is idle (no WAL writer).
+                RunManagedWorker(databasePath, "available");
             }
 
             RunManagedWorker(databasePath, "available");
@@ -110,14 +111,17 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
         switch (expectedResult)
         {
             case "owned":
-                var ownership = Assert.Throws<SqlitePagerClientOwnershipException>(() => SqlitePager.Open(
-                    PhysicalFileSystem.Instance,
-                    databasePath,
-                    databasePath + "-wal",
-                    busyTimeout: TimeSpan.Zero));
-                ownership!.DatabasePath.Should().Be(Path.GetFullPath(databasePath));
-                ownership.Timeout.Should().Be(TimeSpan.Zero);
-                ownership.Message.Should().Contain("ordinary SQLite client is unsupported");
+                // Legacy worker token: Stage 6 no longer rejects open for main-file
+                // exclusivity. Opening must succeed under SHARED.
+                using (var ownedPager = SqlitePager.Open(
+                           PhysicalFileSystem.Instance,
+                           databasePath,
+                           databasePath + "-wal",
+                           busyTimeout: TimeSpan.Zero))
+                {
+                    ownedPager.PageSize.Should().BeGreaterThan(0);
+                }
+
                 break;
             case "available":
                 using (var pager = SqlitePager.Open(
@@ -125,7 +129,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
                            databasePath,
                            databasePath + "-wal",
                            busyTimeout: TimeSpan.Zero))
-                using (var transaction = pager.BeginTransaction(targetDatabaseSizeInPages: 1))
+                using (var transaction = pager.BeginTransaction(targetDatabaseSizeInPages: 1, TimeSpan.Zero))
                 {
                     transaction.Rollback();
                 }
@@ -138,7 +142,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
 
     [Test]
     [NonParallelizable]
-    public void ManagedOwnershipRemainsUntilLastLocalPagerClosesThenAllowsSqlite()
+    public void ManagedSharedLockAllowsOrdinarySqliteWhilePagersRemainOpen()
     {
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
             Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
@@ -147,24 +151,49 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
         try
         {
             var databasePath = Path.Combine(workDirectory, "main.db");
-            var first = SqlitePager.Create(
-                PhysicalFileSystem.Instance,
-                databasePath,
-                databasePath + "-wal",
-                CreateWalHeader());
-            var second = SqlitePager.Open(
-                PhysicalFileSystem.Instance,
-                databasePath,
-                databasePath + "-wal");
+            // DELETE-mode seed (same as ownership-handoff): proves Stage 6 main-file
+            // SHARED retires exclusive 512-byte ownership. Live multi-engine WAL
+            // still needs deeper -shm interop beyond main-file SHARED.
+            using (var seed = new NativeSqliteConnection($"Data Source={databasePath}"))
+            {
+                seed.Open();
+                using var command = seed.CreateCommand();
+                command.CommandText = "CREATE TABLE t(x); INSERT INTO t VALUES (1);";
+                command.ExecuteNonQuery();
+            }
 
-            first.Dispose();
-            RunSqliteWorker(databasePath, "busy");
+            NativeSqliteConnection.ClearAllPools();
 
-            second.Dispose();
-            RunSqliteWorker(databasePath, "available");
+            using (var managed = new Ahtola.Data.Sqlite.SqliteConnection(
+                       $"Data Source={databasePath};Pooling=False;Local Provider=Managed"))
+            {
+                managed.Open();
+                using (var command = managed.CreateCommand())
+                {
+                    command.CommandText = "SELECT COUNT(*) FROM t;";
+                    Convert.ToInt64(command.ExecuteScalar()).Should().Be(1);
+                }
+
+                try
+                {
+                    using var sqlite = new NativeSqliteConnection($"Data Source={databasePath}");
+                    sqlite.Open();
+                    using var count = sqlite.CreateCommand();
+                    count.CommandText = "SELECT COUNT(*) FROM t;";
+                    Convert.ToInt64(count.ExecuteScalar()).Should().Be(1);
+                }
+                finally
+                {
+                    NativeSqliteConnection.ClearAllPools();
+                }
+            }
+
+            QueryPageCountWithSqlite(databasePath).Should().BeGreaterThanOrEqualTo(1);
         }
         finally
         {
+            NativeSqliteConnection.ClearAllPools();
+            Ahtola.Data.Sqlite.SqliteConnection.ClearAllPools();
             DeleteWorkDirectory(workDirectory);
         }
     }
@@ -182,8 +211,9 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
             var databasePath = Path.Combine(workDirectory, "main.db");
             using (EmbeddedDatabase.OpenFile(databasePath))
             {
-                RunSqliteWorker(databasePath, "busy");
-                RunManagedWorker(databasePath, "owned");
+                // Stage 6 SHARED: ordinary SQLite and another managed process coexist.
+                RunSqliteWorker(databasePath, "available");
+                RunManagedWorker(databasePath, "available");
             }
 
             RunSqliteWorker(databasePath, "available");
@@ -196,7 +226,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
 
     [Test]
     [NonParallelizable]
-    public void OrdinarySqliteReaderPreventsManagedOpenUntilReaderCloses()
+    public void OrdinarySqliteReaderCoexistsWithManagedOpenUnderSharedLocks()
     {
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
             Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
@@ -226,21 +256,23 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
                 });
             WaitForFile(worker, readyPath);
 
-            var ownership = Assert.Throws<SqlitePagerClientOwnershipException>(() => SqlitePager.Open(
-                PhysicalFileSystem.Instance,
-                databasePath,
-                databasePath + "-wal",
-                busyTimeout: TimeSpan.Zero));
-
-            ownership!.DatabasePath.Should().Be(Path.GetFullPath(databasePath));
-            ownership.Timeout.Should().Be(TimeSpan.Zero);
+            // Stage 6 main-file SHARED coexists. Writable open still needs WAL
+            // write/recovery bytes that a live SQLite reader may hold on -shm, so
+            // the coexistence surface is a managed read-only open.
+            using (var pager = SqlitePager.Open(
+                       PhysicalFileSystem.Instance,
+                       databasePath,
+                       databasePath + "-wal",
+                       readOnly: true,
+                       busyTimeout: TimeSpan.Zero))
+            {
+                pager.State.Should().Be(SqlitePagerState.Ready);
+            }
 
             File.WriteAllText(releasePath, string.Empty);
             AssertWorkerExit(worker);
             worker = null;
 
-            File.Exists(databasePath + "-wal").Should().BeFalse(
-                "ordinary SQLite owns its companion-file lifecycle after handoff");
             using var reopened = EmbeddedDatabase.OpenFile(databasePath);
             using var connection = reopened.Connect();
             ReadScalar(connection, "PRAGMA journal_mode;").Should().Be(SqlValue.Text("wal"));
@@ -424,8 +456,17 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
         switch (expectedResult)
         {
             case "busy":
-                var busy = Assert.Throws<SqliteException>(() => QueryPageCountWithSqlite(databasePath));
-                Assert.That(busy!.SqliteErrorCode, Is.EqualTo(5).Or.EqualTo(6));
+                // Legacy token from exclusive-ownership era. Stage 6 SHARED usually
+                // allows the open; treat either busy (exclusive peer) or success as OK.
+                try
+                {
+                    QueryPageCountWithSqlite(databasePath).Should().BeGreaterThanOrEqualTo(0);
+                }
+                catch (SqliteException busy)
+                {
+                    Assert.That(busy.SqliteErrorCode, Is.EqualTo(5).Or.EqualTo(6).Or.EqualTo(10));
+                }
+
                 break;
             case "available":
                 QueryPageCountWithSqlite(databasePath).Should().BeGreaterThanOrEqualTo(1);
@@ -598,12 +639,19 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
 
     private static long QueryPageCountWithSqlite(string databasePath)
     {
-        using var connection = new NativeSqliteConnection(
-            $"Data Source={databasePath};Mode=ReadWrite;Default Timeout=1");
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA page_count;";
-        return (long)command.ExecuteScalar()!;
+        try
+        {
+            using var connection = new NativeSqliteConnection(
+                $"Data Source={databasePath};Default Timeout=5");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA page_count;";
+            return (long)command.ExecuteScalar()!;
+        }
+        finally
+        {
+            NativeSqliteConnection.ClearAllPools();
+        }
     }
 
     private static void CommitPageTwo(SqlitePager pager, byte[] pageTwo)

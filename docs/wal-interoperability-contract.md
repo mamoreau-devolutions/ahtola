@@ -6,14 +6,14 @@ to share a physical database with `tursodb` / the Turso core under the same WAL,
 `-shm`, lock, and handoff rules those engines already use — not invent a
 managed-only WAL dialect.
 
-**Status today: Stage 0 — process-exclusive ownership.** Managed physical
-databases are *not* yet concurrently interoperable with Turso, ordinary SQLite
-clients, or other managed processes. One read-only exception: an explicit
-`Foreign Read Only=True` connection may read a database owned by an ordinary
-SQLite (or Turso) client without claiming ownership (§1.9). This document is the
-normative description of what the managed pager does today, why each guard
-exists, and the staged work required before Turso-compatible multi-process WAL
-access can be claimed.
+**Status today: Stages 1–6 core attached.** Physical pagers publish a real
+WAL-index, pin read marks, checkpoint under `WAL_CKPT_LOCK`, use SQLite busy
+backoff, recover with `iChange` bumps, and hold a Stage 6 **main-file SHARED**
+lock (not exclusive 512-byte ownership) so ordinary SQLite/Turso SHARED readers
+can coexist. Remaining polish: PENDING/RESERVED writer upgrades for DELETE-mode
+parity and expanded differential Turso stress. An explicit
+`Foreign Read Only=True` connection may still read without main-file locks
+(§1.9).
 
 Nothing here describes behavior that is unimplemented, and nothing here authorizes
 relaxing a guard ahead of the stage that replaces it.
@@ -37,8 +37,8 @@ upstream Turso / `tursodb` tree (SQLite-compatible WAL-index and lock bytes).
 
 | Property | Current behavior |
 | --- | --- |
-| Locked range | `[0x4000_0000, 0x4000_0200)` — 512 bytes covering SQLite's `PENDING_BYTE`, `RESERVED_BYTE`, and the full 510-byte `SHARED` range |
-| Lock kind | Exclusive/write. Windows `FileStream.Lock` (`LockFile`); Linux `fcntl(F_OFD_SETLK, F_WRLCK)` through `LinuxOpenFileDescriptionLocks` |
+| Locked range | One byte in SQLite's SHARED range `[0x4000_0002, 0x4000_0200)` (stable FNV slot per canonical path) |
+| Lock kind | Stage 6 SHARED via `SqliteWalByteRangeLock` (Windows `LockFileEx` shared; Linux OFD read lock) |
 | Platform gate | Windows, or 64-bit Linux with a 32-byte `struct flock`. Every other platform throws `PlatformNotSupportedException` at open |
 | Applies to | `PhysicalFileSystem` only, after unwrapping `AhtolaEncryptionFileSystem`. In-memory and custom file systems receive no cross-process boundary at all |
 | Lifetime | Acquired by the first `SqlitePager.Create`/`Open` for a path, reference-counted across every managed pager in the process, released only when the last one is disposed |
@@ -63,20 +63,22 @@ Consequences callers may rely on:
 
 ### 1.2 `-shm` is a byte-lock carrier, not a WAL-index
 
-`SqliteWalSharedMemoryLocks` opens `<database>-shm` and uses it **only** to place
-byte-range locks. The file is never mapped, never read, and never written, so it
-stays zero bytes long for the entire life of a managed database.
+`SqliteWalSharedMemoryLocks` places write/ckpt/recovery/reader byte-range locks on
+`<database>-shm`. Separately, `PhysicalSqliteWalSharedMemoryMapping` maps the file
+as a real SQLite WAL-index and holds the DMS shared lock at byte 128 for the
+mapping lifetime.
 
 Managed roles are placed inside SQLite's reserved lock area, which begins at shm
-offset 120 (`SQLITE_SHM_BASE`, the `WalCkptInfo.aLock[8]` field):
+offset 120 (`WIN_SHM_BASE` / `SQLITE_SHM_BASE`):
 
 | shm byte | SQLite role | Managed use |
 | ---: | --- | --- |
 | 120 | `WAL_WRITE_LOCK` | Writer takes exclusive `[120, 1)` |
 | 121 | `WAL_CKPT_LOCK` | Never taken on its own |
 | 122 | `WAL_RECOVER_LOCK` | Writable open and WAL tail recovery take exclusive `[122, 1)` |
-| 123–127 | `WAL_READ_LOCK(0..4)` | Reader takes the first free byte |
-| 120–127 | — | Checkpoint and `SqlitePager.Create` take exclusive `[120, 8)` |
+| 123–127 | `WAL_READ_LOCK(0..4)` | Reader takes the first free byte (**shared** `LockFileEx`/OFD) |
+| 120–127 | — | Checkpoint takes exclusive `[120, 8)` |
+| 128 | DMS (`WIN_SHM_DMS` / unix dead-man switch) | Held **shared** for the lifetime of a mapped `-shm` so peers do not truncate a live index |
 
 Additional current behavior:
 
@@ -177,6 +179,25 @@ relies on the fact that a managed physical database is already owned exclusively
 by one process, so every contending connection is in-process. It is also
 independent of `SqlitePagerLockManager`, whose writer lease is taken and released
 inside a single commit and therefore cannot be held across a SQL transaction.
+
+The resulting classic-model contract is:
+
+- One active writer per database identity. Explicit-transaction writers queue
+  FIFO so a contended reservation rotates across connections. Autocommit
+  statements barge instead: each statement is an implicit transaction, and
+  queueing them would recreate the EF migrations-lock convoy by handing the
+  reservation to a waiting loser before the current owner's next statement.
+- Reads are snapshot-isolated against that writer. A managed read transaction
+  pins its WAL frame/page snapshot and does not observe later commits until it
+  ends; autocommit statements may capture a newer snapshot at the next statement
+  boundary. There is no timestamp ordering, multi-writer conflict detection, or
+  Turso MVCC row-version lifecycle.
+- `VdbeTransactionContext` is not this transaction manager. It snapshots the
+  interpreter's scalar registers for VDBE BEGIN/SAVEPOINT/COMMIT/ROLLBACK
+  execution and never interacts with the pager, WAL, or durable store.
+- `SqlTransactionControl` is not the parser or transaction manager either. It
+  is a lexical scanner used by the ADO.NET layers to recognize COMMIT/END/
+  ROLLBACK boundaries in raw SQL for connection bookkeeping.
 
 Not covered: two connections that both have live snapshots still reject the
 loser's commit with the pre-existing catalog-version conflict rather than a lock
@@ -349,11 +370,17 @@ ranges, timeout reporting, and release on disposal. This primitive is not
 connected to `SqliteWalSharedMemoryLocks`, normal `-shm` activity, the pager,
 or any read-mark, writer, or checkpoint role.
 
+**Stage 1 pager attach (in progress):** the physical managed pager maps `-shm`
+and publishes/rebuilds a dual-header WAL-index on create/open, commit, and
+checkpoint reset under Stage 0 ownership. Frame lookup can validate against the
+WAL scan. This does **not** yet attach Stage 2 read marks, Stage 3 writer roles
+beyond ownership locks, or multi-process stock-SQLite interoperability.
+
 **Remaining pager gate:** attach the detached reader protocol to managed
 connections; implement runtime writer/checkpointer coordination; and run
 differential cross-process stress while all of those mechanisms are attached
-to the pager. Until all of those are complete, the managed pager has no shared
-runtime WAL-index behavior or concurrent stock-SQLite interoperability.
+to the pager. Until Stages 2–6 complete, concurrent stock-SQLite
+interoperability is still not claimed.
 
 ### Stage 2 — read marks and the reader protocol
 
@@ -515,13 +542,14 @@ the Stage 0 boundary:
 
 | Test | Contract clause |
 | --- | --- |
-| `ManagedWalActivityNeverMaterializesASqliteWalIndex` | §1.2 — `-shm` stays zero bytes across commits and checkpoints |
+| `ManagedWalCommitPublishesValidatedSqliteWalIndex` | Stage 1 — physical pager publishes dual-header WAL-index under Stage 0 ownership |
 | `ManagedWriterClaimsSqliteWalWriteLockByte` | §1.2 — the writer occupies byte 120 |
 | `ManagedWritableOpenClaimsSqliteWalRecoveryLockByte` | §1.2, §1.6 — a writable open occupies byte 122 |
 | `ManagedReaderClaimsTheFirstFreeSqliteReadMarkLockByte` | §1.2 — readers walk bytes 123–127 (Windows only; see below) |
 | `ManagedReaderIsBusyWhenEverySqliteReadMarkLockByteIsHeld` | §1.3, §1.4 — five reader slots, then busy |
-| `ManagedCheckpointDemandsTheEntireSqliteWalLockArea` | §1.3 — checkpoint exclusion is coarser than SQLite's |
-| `ManagedRolesNeverClaimSqliteCheckpointLockByteAlone` | §1.3 — byte 121 is unused by managed roles |
+| `ManagedPassiveCheckpointHonorsHeldReadMarksWithoutCoarseLockArea` | Stage 3 — PASSIVE uses marks/`mxSafeFrame`; reset still needs exclusive marks |
+| `ManagedCheckpointClaimsSqliteCheckpointLockByte` | Stage 3 — checkpoint takes `WAL_CKPT_LOCK` (byte 121) |
+| `ManagedCheckpointPublishesWalIndexBackfillProgress` | Stage 3 — `nBackfill`/`nBackfillAttempted` published after install |
 | `ManagedRolesStayInsideSqliteReservedSharedMemoryLockArea` | §1.2 — no locks outside bytes 120–127 |
 | `ManagedReadOnlyOpenRefusesToCreateAMissingSharedMemoryLockCarrier` | §1.2, §3 — read-only opens never create `-shm` |
 | `PooledReopenSurvivesSharedMemoryCarrierRemovedByNativeClose` (`ManagedConnectionPoolingTests.cs`) | §1.2 — a read-write pager recreates a missing carrier on demand like a native read-write connection, and the pooling catalog refresh tolerates its absence |

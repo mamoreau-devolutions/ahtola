@@ -29,6 +29,25 @@ internal sealed class SelectStatementCompiler
     private readonly VdbeNumericAffinity _moduloAffinity;
     private readonly VdbeNumericAffinity _integerAffinity;
 
+    private static string FormatOpenReadTable(ScanTarget target)
+    {
+        if (target.IndexName is null)
+            return target.TableName;
+
+        // Covering indexes append " COVERING" to the logical index name.
+        if (target.IndexName.EndsWith(" COVERING", StringComparison.Ordinal))
+        {
+            var name = target.IndexName[..^" COVERING".Length];
+            return $"{target.TableName} USING COVERING INDEX {name}";
+        }
+
+        // Multi-index OR unions use joined names (idx_a+idx_b).
+        if (target.IndexName.Contains('+', StringComparison.Ordinal))
+            return $"{target.TableName} USING MULTI-INDEX OR {target.IndexName}";
+
+        return $"{target.TableName} USING INDEX {target.IndexName}";
+    }
+
     public SelectStatementCompiler(
         Func<Expression, bool> isConstant,
         Func<Expression, SqlValue> fold,
@@ -117,41 +136,38 @@ internal sealed class SelectStatementCompiler
     {
         compiled = null!;
 
-        // P1-21 reverse traversal: `ORDER BY rowid DESC` on a single table with no
-        // WHERE/GROUP BY/HAVING/LIMIT/OFFSET/DISTINCT lowers to a backward table scan
-        // (Last/Prev) instead of the sorter route, so rows are visited in descending
-        // rowid order without materializing a sorter. Only the bare rowid/_rowid_/oid
-        // reference is detected here; the INTEGER-PK-alias column name (e.g. `id`)
-        // resolves to a declared column (`IsTargetRowIdReference` returns false) and
-        // stays on the sorter path. Index-backed backward walks need the TableAccessPlan
-        // optimizer seam (absent) and are intentionally not handled. ScanTarget materializes
-        // table cursor sources in rowid order, so walking positions backward follows physical
-        // rowids in descending order.
-        if (statement.OrderBy.Count == 1
-            && statement.OrderBy[0].Descending
-            && statement.Where is null
-            && statement.GroupBy.Count == 0
-            && statement.Having is null
-            && statement.Limit is null
-            && statement.Offset is null
-            && !statement.Distinct
-            && _resolveScanTarget(statement.Source!) is { } descTarget
-            && descTarget.HasRowId
-            && statement.OrderBy[0].Expression is ColumnExpression descColumn
-            && IsTargetRowIdReference(descColumn, descTarget))
-        {
-            return TryCompileReverseRowidScan(statement, descTarget, out compiled);
-        }
+        // ORDER BY elision (Turso order.rs eliminate_order_by subset):
+                // Bare rowid / INTEGER PK alias:
+                //   ASC  → plain Rewind/Next (physical rowid order)
+                //   DESC → Last/Prev reverse scan
+                // Secondary-index ORDER BY is elided by the caller stripping OrderBy after
+                // materializing rows in index order (see TryCompileManagedIndexSelect).
+                // WHERE/GROUP BY/HAVING/LIMIT/OFFSET/DISTINCT still block the plain scan path
+                // except WHERE which is handled below as usual.
+                if (TryGetBareRowidOrderBy(statement, out var rowidOrderTarget, out var rowidOrderDescending))
+                {
+                    if (rowidOrderDescending)
+                        return TryCompileReverseRowidScan(statement, rowidOrderTarget, out compiled);
 
-        if (statement.Having is not null
-            || statement.GroupBy.Count != 0
-            || statement.OrderBy.Count != 0
-            || statement.Limit is not null
-            || statement.Offset is not null
-            || statement.Projections.Count == 0)
-        {
-            return false;
-        }
+                    // ASC: fall through into the forward-scan compiler with OrderBy elided.
+                }
+                else
+                {
+                    rowidOrderTarget = null;
+                    rowidOrderDescending = false;
+                }
+
+                var elideOrderBy = rowidOrderTarget is not null && !rowidOrderDescending;
+
+                if (statement.Having is not null
+                    || statement.GroupBy.Count != 0
+                    || (statement.OrderBy.Count != 0 && !elideOrderBy)
+                    || statement.Limit is not null
+                    || statement.Offset is not null
+                    || statement.Projections.Count == 0)
+                {
+                    return false;
+                }
 
         var target = _resolveScanTarget(statement.Source!);
         if (target is null)
@@ -217,9 +233,7 @@ internal sealed class SelectStatementCompiler
             {
                 new OpenReadCursorInstruction(
                     seekCursor,
-                    target.IndexName is null
-                        ? target.TableName
-                        : $"{target.TableName} USING INDEX {target.IndexName}",
+                    FormatOpenReadTable(target),
                     target.Columns.Length),
                 rhsLoad,
                 new SeekRowidInstruction(
@@ -309,9 +323,7 @@ internal sealed class SelectStatementCompiler
             {
                 new OpenReadCursorInstruction(
                     seekCursor,
-                    target.IndexName is null
-                        ? target.TableName
-                        : $"{target.TableName} USING INDEX {target.IndexName}",
+                    FormatOpenReadTable(target),
                     target.Columns.Length),
                 new LoadConstantInstruction(startRowIdRegister, ((LiteralExpression)startBound).Value),
             };
@@ -412,9 +424,7 @@ internal sealed class SelectStatementCompiler
         {
             new OpenReadCursorInstruction(
                 cursor,
-                target.IndexName is null
-                    ? target.TableName
-                    : $"{target.TableName} USING INDEX {target.IndexName}",
+                FormatOpenReadTable(target),
                 target.Columns.Length),
             new RewindCursorInstruction(cursor, new ProgramCounter(closeAddr)),
         };
@@ -494,9 +504,7 @@ internal sealed class SelectStatementCompiler
         {
             new OpenReadCursorInstruction(
                 cursor,
-                target.IndexName is null
-                    ? target.TableName
-                    : $"{target.TableName} USING INDEX {target.IndexName}",
+                FormatOpenReadTable(target),
                 target.Columns.Length),
             new LastCursorInstruction(cursor, new ProgramCounter(closeAddr)),
         };
@@ -576,17 +584,90 @@ internal sealed class SelectStatementCompiler
 
     private static bool IsTargetRowIdReference(ColumnExpression column, ScanTarget target)
     {
-        if (!target.HasRowId || target.ResolveColumnIndex(column.Name) is not null)
+        if (!target.HasRowId)
             return false;
 
         var separator = column.Name.IndexOf('.');
+        if (separator >= 0
+            && !string.Equals(
+                column.Name[..separator],
+                target.Qualifier,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         var bareName = separator < 0 ? column.Name : column.Name[(separator + 1)..];
-        return EmbeddedTable.IsRowidAliasName(bareName)
-            && (separator < 0
-                || string.Equals(
-                    column.Name[..separator],
-                    target.Qualifier,
-                    StringComparison.OrdinalIgnoreCase));
+
+        // Bare rowid/_rowid_/oid that is not also a declared column name.
+        if (target.ResolveColumnIndex(column.Name) is null)
+            return EmbeddedTable.IsRowidAliasName(bareName);
+
+        // INTEGER PRIMARY KEY column aliases the rowid; ORDER BY id is ORDER BY rowid.
+        return IsIntegerPrimaryKeyRowidAlias(bareName, target);
+    }
+
+    /// <summary>
+    /// True when <paramref name="bareName"/> is the single-column INTEGER PRIMARY KEY
+    /// that aliases the table's rowid (SQLite's rowid-alias rule).
+    /// </summary>
+    private static bool IsIntegerPrimaryKeyRowidAlias(string bareName, ScanTarget target)
+    {
+        if (target.ColumnDefinitions is null || target.ColumnDefinitions.Count == 0)
+            return false;
+
+        var aliasIndex = -1;
+        var primaryKeyCount = 0;
+        for (var index = 0; index < target.ColumnDefinitions.Count; index++)
+        {
+            var definition = target.ColumnDefinitions[index];
+            if (definition is null || !definition.PrimaryKey)
+                continue;
+
+            primaryKeyCount++;
+            aliasIndex = index;
+        }
+
+        if (primaryKeyCount != 1 || aliasIndex < 0)
+            return false;
+
+        var alias = target.ColumnDefinitions[aliasIndex]!;
+        if (alias.PrimaryKeyDescending || !EmbeddedTable.IsIntegerDeclaredType(alias.DeclaredType))
+            return false;
+
+        return string.Equals(alias.Name, bareName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(target.Columns[aliasIndex], bareName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// True when the statement is a single-table scan whose only ordering key is
+    /// bare rowid (ASC or DESC) and no other clause blocks elision.
+    /// </summary>
+    private bool TryGetBareRowidOrderBy(
+        SelectStatement statement,
+        out ScanTarget target,
+        out bool descending)
+    {
+        target = null!;
+        descending = false;
+        if (statement.OrderBy.Count != 1
+            || statement.Where is not null
+            || statement.GroupBy.Count != 0
+            || statement.Having is not null
+            || statement.Limit is not null
+            || statement.Offset is not null
+            || statement.Distinct
+            || _resolveScanTarget(statement.Source!) is not { } resolved
+            || !resolved.HasRowId
+            || statement.OrderBy[0].Expression is not ColumnExpression column
+            || !IsTargetRowIdReference(column, resolved))
+        {
+            return false;
+        }
+
+        target = resolved;
+        descending = statement.OrderBy[0].Descending;
+        return true;
     }
 
     /// <summary>

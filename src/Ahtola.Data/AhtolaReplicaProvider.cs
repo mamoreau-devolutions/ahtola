@@ -190,6 +190,12 @@ public sealed class AhtolaReplicaOptions
                 "Partial bootstrap requires BootstrapIfEmpty=True because it configures the initial remote bootstrap.");
         }
 
+        if (PartialBootstrap is not null && RemoteEncryption is not null)
+        {
+            throw new InvalidOperationException(
+                "Partial bootstrap cannot be combined with remote encryption.");
+        }
+
         if (PartialBootstrap?.Kind == AhtolaPartialBootstrapKind.Query && PullBytesThreshold is not null)
         {
             throw new InvalidOperationException(

@@ -659,22 +659,192 @@ public class CompiledSortedScanExecutionTests
     }
 
     [Test]
-    public void OrderByRowidAscDoesNotEmitReverseScan()
+    public void OrderByRowidAscElidesSorterAndUsesForwardScan()
     {
         var database = new EmbeddedDatabase();
         using var connection = database.Connect();
         Execute(connection, "CREATE TABLE t(v TEXT);");
         Execute(connection, "INSERT INTO t VALUES ('a'),('b'),('c');");
 
-        // ASC is not the reverse-scan gate (Descending only); a bare `ORDER BY rowid` key
-        // also declines the sorter route, so this runs on the evaluator (EXPLAIN throws),
-        // and ascending order is still correct.
-        AssertExplainUsesEvaluator(connection, "SELECT v FROM t ORDER BY rowid ASC;");
+        // ASC rowid order matches the physical scan order, so the compiler elides
+        // the sorter and emits a plain Rewind/Next plan (no Sorter*, no Last/Prev).
+        RouteUsesSorter(connection, "SELECT v FROM t ORDER BY rowid ASC;").Should().BeFalse();
+        var opcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT v FROM t ORDER BY rowid ASC;"));
+        opcodes.Should().Contain("Rewind");
+        opcodes.Should().Contain("Next");
+        opcodes.Should().NotContain("Last");
+        opcodes.Should().NotContain("Prev");
+        opcodes.Should().NotContain(op => op.Contains("Sorter", StringComparison.Ordinal));
 
         ReadRows(connection, "SELECT v FROM t ORDER BY rowid ASC;")
             .Select(row => row[0])
             .Should()
             .Equal(SqlValue.Text("a"), SqlValue.Text("b"), SqlValue.Text("c"));
+    }
+
+    [Test]
+    public void OrderBySecondaryIndexElidesSorter()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b TEXT);");
+        Execute(connection, "CREATE INDEX idx_t_a ON t(a);");
+        Execute(connection, "INSERT INTO t VALUES (3,'c'),(1,'a'),(2,'b');");
+
+        // Index order satisfies ORDER BY a; compiled plan must not open a sorter.
+        RouteUsesSorter(connection, "SELECT b FROM t ORDER BY a;").Should().BeFalse();
+        var opcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT b FROM t ORDER BY a;"));
+        opcodes.Should().Contain("Rewind");
+        opcodes.Should().NotContain(op => op.Contains("Sorter", StringComparison.Ordinal));
+
+        ReadRows(connection, "SELECT b FROM t ORDER BY a;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("a"), SqlValue.Text("b"), SqlValue.Text("c"));
+    }
+
+    [Test]
+    public void OrClauseUsesMultiIndexUnion()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b INT, c TEXT);");
+        Execute(connection, "CREATE INDEX idx_a ON t(a);");
+        Execute(connection, "CREATE INDEX idx_b ON t(b);");
+        Execute(connection, "INSERT INTO t VALUES (1,10,'x'),(2,20,'y'),(3,10,'z'),(1,30,'w');");
+
+        var plan = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT c FROM t WHERE a = 1 OR b = 20;");
+        plan.Should().ContainSingle();
+        plan[0][3].AsText().Should().Contain("MULTI-INDEX OR");
+        plan[0][3].AsText().Should().Contain("idx_a");
+        plan[0][3].AsText().Should().Contain("idx_b");
+
+        ReadRows(connection, "SELECT c FROM t WHERE a = 1 OR b = 20 ORDER BY c;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("w"), SqlValue.Text("x"), SqlValue.Text("y"));
+    }
+
+    [Test]
+    public void AccessMethodPrefersEqualitySearchOverAlphabeticalOrderOnlyIndex()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b INT, c TEXT);");
+        // Alphabetical first index only supports ORDER BY a — not the WHERE b=? SEARCH.
+        Execute(connection, "CREATE INDEX idx_a ON t(a);");
+        Execute(connection, "CREATE INDEX idx_b ON t(b);");
+        Execute(connection, "INSERT INTO t VALUES (1,10,'x'),(2,20,'y'),(3,10,'z');");
+
+        var plan = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT c FROM t WHERE b = 10;");
+        plan.Should().ContainSingle();
+        plan[0][3].AsText().Should().Contain("USING INDEX idx_b");
+        plan[0][3].AsText().Should().Contain("SEARCH");
+        plan[0][3].AsText().Should().NotContain("idx_a");
+
+        ReadRows(connection, "SELECT c FROM t WHERE b = 10 ORDER BY c;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("x"), SqlValue.Text("z"));
+    }
+
+    [Test]
+    public void AccessMethodPrefersLongerEqualityPrefix()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b INT, c INT);");
+        Execute(connection, "CREATE INDEX idx_a ON t(a);");
+        Execute(connection, "CREATE INDEX idx_ab ON t(a, b);");
+        Execute(connection, "INSERT INTO t VALUES (1,2,3),(1,2,4),(1,9,5);");
+
+        var plan = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT c FROM t WHERE a = 1 AND b = 2;");
+        plan.Should().ContainSingle();
+        plan[0][3].AsText().Should().Contain("USING INDEX idx_ab");
+
+        ReadRows(connection, "SELECT c FROM t WHERE a = 1 AND b = 2;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Integer(3), SqlValue.Integer(4));
+    }
+
+    [Test]
+    public void AccessMethodPrefersSelectiveIndexUsingSqliteStat1()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b INT, c TEXT);");
+        Execute(connection, "CREATE INDEX idx_a ON t(a);");
+        Execute(connection, "CREATE INDEX idx_b ON t(b);");
+        // Many distinct a values (selective), few distinct b values (unselective).
+        for (var i = 1; i <= 40; i++)
+            Execute(connection, $"INSERT INTO t VALUES ({i}, {(i % 2) + 1}, 'r{i}');");
+        Execute(connection, "ANALYZE;");
+
+        // With both predicates either index is SEARCH-able; stat1 leading-avg should prefer
+        // selective idx_a (avg≈1) over unselective idx_b (avg≈20).
+        var planBoth = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT c FROM t WHERE a = 7 AND b = 1;");
+        planBoth.Should().ContainSingle();
+        planBoth[0][3].AsText().Should().Contain("USING INDEX idx_a");
+        planBoth[0][3].AsText().Should().NotContain("idx_b");
+    }
+
+    [Test]
+    public void CoveringIndexIsReportedInExplainQueryPlan()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(a INT, b TEXT);");
+        Execute(connection, "CREATE INDEX idx_t_a ON t(a);");
+        Execute(connection, "INSERT INTO t VALUES (1,'x'),(2,'y');");
+
+        // SELECT a ORDER BY a only needs the index key — COVERING INDEX.
+        var covering = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT a FROM t ORDER BY a;");
+        covering.Should().ContainSingle();
+        covering[0][3].AsText().Should().Contain("USING COVERING INDEX idx_t_a");
+
+        // EXPLAIN bytecode OpenRead also labels COVERING when coverage is proven.
+        var explain = ReadRows(connection, "EXPLAIN SELECT a FROM t ORDER BY a;");
+        explain.Select(row => row[1].AsText() + "|" + row[5].AsText())
+            .Should()
+            .Contain(line => line.Contains("OpenRead", StringComparison.Ordinal)
+                && line.Contains("USING COVERING INDEX idx_t_a", StringComparison.Ordinal));
+
+        // SELECT b needs a non-indexed column — plain USING INDEX.
+        var nonCovering = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT b FROM t ORDER BY a;");
+        nonCovering.Should().ContainSingle();
+        nonCovering[0][3].AsText().Should().Contain("USING INDEX idx_t_a");
+        nonCovering[0][3].AsText().Should().NotContain("COVERING");
+    }
+
+    [Test]
+    public void OrderByIntegerPrimaryKeyAliasElidesSorter()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);");
+        Execute(connection, "INSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c');");
+
+        // INTEGER PRIMARY KEY aliases rowid, so ORDER BY id is the same as ORDER BY rowid.
+        RouteUsesSorter(connection, "SELECT v FROM t ORDER BY id ASC;").Should().BeFalse();
+        var ascOpcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT v FROM t ORDER BY id ASC;"));
+        ascOpcodes.Should().Contain("Rewind");
+        ascOpcodes.Should().NotContain(op => op.Contains("Sorter", StringComparison.Ordinal));
+
+        RouteUsesSorter(connection, "SELECT v FROM t ORDER BY id DESC;").Should().BeFalse();
+        var descOpcodes = Opcodes(ReadRows(connection, "EXPLAIN SELECT v FROM t ORDER BY id DESC;"));
+        descOpcodes.Should().Contain("Last");
+        descOpcodes.Should().Contain("Prev");
+        descOpcodes.Should().NotContain(op => op.Contains("Sorter", StringComparison.Ordinal));
+
+        ReadRows(connection, "SELECT v FROM t ORDER BY id ASC;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("a"), SqlValue.Text("b"), SqlValue.Text("c"));
+        ReadRows(connection, "SELECT v FROM t ORDER BY id DESC;")
+            .Select(row => row[0])
+            .Should()
+            .Equal(SqlValue.Text("c"), SqlValue.Text("b"), SqlValue.Text("a"));
     }
 
     [Test]

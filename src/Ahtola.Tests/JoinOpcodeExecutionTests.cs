@@ -373,6 +373,50 @@ public class JoinOpcodeExecutionTests
             maximumRows: 1));
     }
 
+    [Test]
+    public void EquiJoinProbeFiltersRightCandidatesBeforeCondition()
+    {
+        var leftRows = new List<SqlValue[]>
+        {
+            new[] { SqlValue.Integer(1) },
+            new[] { SqlValue.Integer(2) },
+            new[] { SqlValue.Integer(3) },
+        };
+        var rightRows = new List<SqlValue[]>
+        {
+            new[] { SqlValue.Integer(2), SqlValue.Text("a") },
+            new[] { SqlValue.Integer(9), SqlValue.Text("skip") },
+            new[] { SqlValue.Integer(2), SqlValue.Text("b") },
+            new[] { SqlValue.Integer(1), SqlValue.Text("c") },
+        };
+        var conditionCalls = 0;
+        var probe = new VdbeJoinEquiProbe(
+            left => "N" + left.Values[0].AsInteger(),
+            right => "N" + right.Values[0].AsInteger());
+        var root = new VdbeJoinOperatorPlan(
+            new VdbeJoinScanPlan("l", 1, new VdbeCursorSource(leftRows)),
+            new VdbeJoinScanPlan("r", 2, new VdbeCursorSource(rightRows)),
+            VdbeJoinKind.Inner,
+            condition: (leftRow, rightRow, combinedRow) =>
+            {
+                _ = leftRow;
+                _ = rightRow;
+                _ = combinedRow;
+                conditionCalls++;
+                return true;
+            },
+            equiProbe: probe);
+
+        var joined = root.Enumerate(maximumRows: null)
+            .Select(row => (row.Values[0].AsInteger(), row.Values[2].AsText()))
+            .ToArray();
+
+        joined.Should().Equal((1L, "c"), (2L, "a"), (2L, "b"));
+        // Without the probe the condition would run 3*4=12 times; with it only the
+        // matching buckets (1 + 2 + 0) are checked.
+        conditionCalls.Should().Be(3);
+    }
+
     // 0 LoadConstant r0=<seed> / 1 FilterRegisters r[0..0] -> 3 / 2 ResultRow r[0..0] / 3 Halt.
     // A true predicate falls through to the ResultRow; a false predicate jumps past it to Halt.
     private static VdbeProgram SingleRegisterFilter(VdbeRowPredicate predicate, SqlValue seed)

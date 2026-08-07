@@ -732,8 +732,14 @@ public sealed class ManagedBackupSnapshotTests
                 Assert.Ignore("Symbolic links are not supported on this host.");
             }
 
-            Assert.Throws<Ahtola.Core.Storage.SqlitePagerClientOwnershipException>(
-                () => OpenManagedConnection(aliasPath));
+            // Stage 6: symlink aliases resolve to the same canonical path and share
+            // one process-local SHARED lease (refcount), same as dual open of the
+            // same database file.
+            using (var alias = OpenManagedConnection(aliasPath))
+            {
+                alias.ExecuteScalar<string>("SELECT value FROM preserved;").Should().Be("source");
+            }
+
             source.ExecuteScalar<string>("SELECT value FROM preserved;").Should().Be("source");
         }
         finally

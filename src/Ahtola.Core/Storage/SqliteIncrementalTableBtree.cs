@@ -11,13 +11,18 @@ namespace Ahtola.Core.Storage;
 /// read or rewritten.
 /// </para>
 /// <para>
-/// Only the growth half of SQLite's balancing rules is implemented: a full page
+/// The growth half of SQLite's balancing rules is implemented: a full page
 /// splits and promotes separators into its parent, and a full root deepens the
-/// tree while keeping its catalog page number. Merging under-full pages,
-/// defragmenting a page's free space, and returning pages to the freelist are
-/// deliberately absent; those cases raise
-/// <see cref="SqliteBtreeMaintenanceRequiredException"/> so the caller can fall
-/// back to a complete rewrite.
+/// tree while keeping its catalog page number. Overflow chains released by
+/// DELETE/UPDATE are returned to the freelist via
+/// <see cref="ISqliteBtreePageIo.FreePage"/>. Empty non-root leaves are freed and
+/// unlinked (with single-child interior collapse into the parent/root). Under-full
+/// non-empty leaves merge into a left or right sibling when both cell sets fit
+/// on one page, and two-way sibling redistribution rebalances when merge does
+/// not fit. Three-way multi-sibling balance and index-tree shrink remain out of
+/// scope (callers fall back to a complete rewrite). Leaf/interior images are
+/// always packed compactly on write, so freeblock-style in-page defragmentation
+/// is not required.
 /// </para>
 /// <para>
 /// The managed loader requires an interior separator to equal the exact maximum
@@ -81,12 +86,7 @@ public sealed class SqliteIncrementalTableBtree
         }
 
         var cells = view.Cells.Select(cell => cell.Cell).ToList();
-        if (cells[search.Index].FirstOverflowPage is not null)
-        {
-            throw new SqliteBtreeMaintenanceRequiredException(
-                $"Replacing rowid {rowId} would release its overflow chain, which requires freelist maintenance.");
-        }
-
+        FreeOverflowIfPresent(cells[search.Index]);
         cells.RemoveAt(search.Index);
         cells.Insert(search.Index, CreateLeafCell(rowId, record));
         WriteLeafAndPropagate(path, cells, appendedAtEnd: false);
@@ -109,23 +109,345 @@ public sealed class SqliteIncrementalTableBtree
         }
 
         var cells = view.Cells.Select(cell => cell.Cell).ToList();
-        if (cells[search.Index].FirstOverflowPage is not null)
-        {
-            throw new SqliteBtreeMaintenanceRequiredException(
-                $"Deleting rowid {rowId} would release its overflow chain, which requires freelist maintenance.");
-        }
-
+        FreeOverflowIfPresent(cells[search.Index]);
         var removedMaximum = search.Index == cells.Count - 1;
         cells.RemoveAt(search.Index);
         if (cells.Count == 0 && path.Count > 1)
         {
-            throw new SqliteBtreeMaintenanceRequiredException(
-                $"Deleting rowid {rowId} would empty child page {leafPage}, which requires page merging.");
+            // Empty non-root leaf: drop its parent pointer first, then free it.
+            RemoveChildLink(path, path.Count - 2);
+            _io.FreePage(leafPage);
+            return;
         }
 
         WriteSinglePage(leafPage, BuildLeafImage(leafPage, cells));
         if (removedMaximum && cells.Count > 0)
             UpdateSeparatorChain(path, cells[^1].RowId);
+
+        // If the leaf is now well under full, try to merge or redistribute with a sibling
+        // so deleted space is reclaimed without waiting for VACUUM.
+        TryMergeUnderfullLeaf(path, cells);
+    }
+
+                /// <summary>
+                /// Merges an under-full non-root leaf into a neighboring sibling when both
+                /// sets of cells fit on one page. When merge does not fit and this leaf is
+                /// below half full, redistributes cells evenly with one sibling (two-way).
+                /// Three-way multi-sibling balance and index-tree shrink remain out of scope.
+                /// </summary>
+                private void TryMergeUnderfullLeaf(List<PathEntry> path, List<SqliteTableLeafCell> cells)
+                {
+                    if (path.Count < 2 || cells.Count == 0)
+                        return;
+
+                    var leafPage = path[^1].PageNumber;
+                    var capacity = LeafCapacity(leafPage);
+                    var used = LeafUsedBytes(cells);
+                    // Only attempt a sibling merge when this leaf has meaningful free space
+                    // (below ~3/4 full). Fits-check below still decides whether merge happens.
+                    if (used * 4 > capacity * 3)
+                        return;
+
+                    // Redistribute only when well under half full so ordinary sparse deletes
+                    // still prefer merge-when-fit and do not thrash packing on every remove.
+                    var allowRedistribute = used * 2 <= capacity;
+
+                    var parentEntry = path[^2];
+                    var parentLinks = ReadChildLinks(ParseInterior(parentEntry.PageNumber));
+                    var childIndex = parentEntry.ChildIndex;
+                    if (childIndex < 0 || childIndex >= parentLinks.Count)
+                        return;
+
+                    // Prefer merging into the left sibling (keeps lower page numbers live).
+                    if (childIndex > 0
+                        && ParseHeaderType(parentLinks[childIndex - 1].PageNumber) == SqliteBtreePageType.TableLeaf)
+                    {
+                        var leftPage = parentLinks[childIndex - 1].PageNumber;
+                        var leftCells = ParseLeaf(leftPage).Cells.Select(cell => cell.Cell).ToList();
+                        if (LeafCellsFit(leftPage, leftCells, cells))
+                        {
+                            leftCells.AddRange(cells);
+                            WriteSinglePage(leftPage, BuildLeafImage(leftPage, leftCells));
+                            // Left sibling now owns this key range; refresh its separator then
+                            // drop this child from the parent. If we were the right-most child,
+                            // the left sibling becomes right-most and keeps the open upper bound.
+                            var leftUpperBound = childIndex + 1 == parentLinks.Count
+                                ? long.MaxValue
+                                : leftCells[^1].RowId;
+                            parentLinks[childIndex - 1] = parentLinks[childIndex - 1] with
+                            {
+                                MaximumRowId = leftUpperBound,
+                            };
+                            parentLinks.RemoveAt(childIndex);
+                            WriteOrCollapseParent(path, path.Count - 2, parentLinks);
+                            _io.FreePage(leafPage);
+                            return;
+                        }
+
+                        if (allowRedistribute
+                            && TryRedistributeLeafPair(
+                                path,
+                                parentLinks,
+                                leftIndex: childIndex - 1,
+                                leftPage,
+                                leftCells,
+                                leafPage,
+                                cells))
+                        {
+                            return;
+                        }
+                    }
+
+                    if (childIndex + 1 < parentLinks.Count
+                        && ParseHeaderType(parentLinks[childIndex + 1].PageNumber) == SqliteBtreePageType.TableLeaf)
+                    {
+                        var rightPage = parentLinks[childIndex + 1].PageNumber;
+                        var rightCells = ParseLeaf(rightPage).Cells.Select(cell => cell.Cell).ToList();
+                        if (LeafCellsFit(leafPage, cells, rightCells))
+                        {
+                            cells.AddRange(rightCells);
+                            WriteSinglePage(leafPage, BuildLeafImage(leafPage, cells));
+                            // Keep this page; drop the right sibling and inherit its upper bound.
+                            parentLinks[childIndex] = parentLinks[childIndex] with
+                            {
+                                MaximumRowId = parentLinks[childIndex + 1].MaximumRowId,
+                            };
+                            parentLinks.RemoveAt(childIndex + 1);
+                            WriteOrCollapseParent(path, path.Count - 2, parentLinks);
+                            _io.FreePage(rightPage);
+                            return;
+                        }
+
+                        if (allowRedistribute)
+                        {
+                            TryRedistributeLeafPair(
+                                path,
+                                parentLinks,
+                                leftIndex: childIndex,
+                                leafPage,
+                                cells,
+                                rightPage,
+                                rightCells);
+                        }
+                    }
+                }
+
+                /// <summary>
+                /// Evenly redistributes cells across two adjacent table leaves when a full
+                /// merge does not fit. Updates the left child's parent separator to the new
+                /// left maximum rowid. No-op when either side would end empty or either page
+                /// cannot hold its half.
+                /// </summary>
+                private bool TryRedistributeLeafPair(
+                    List<PathEntry> path,
+                    List<ChildLink> parentLinks,
+                    int leftIndex,
+                    uint leftPage,
+                    List<SqliteTableLeafCell> leftCells,
+                    uint rightPage,
+                    List<SqliteTableLeafCell> rightCells)
+                {
+                    if (leftCells.Count + rightCells.Count < 2)
+                        return false;
+
+                    var combined = new List<SqliteTableLeafCell>(leftCells.Count + rightCells.Count);
+                    combined.AddRange(leftCells);
+                    combined.AddRange(rightCells);
+
+                    var total = LeafUsedBytes(combined);
+                    var target = total / 2;
+                    var split = 1;
+                    var running = 0;
+                    // Leave at least one cell on each side.
+                    for (var index = 0; index < combined.Count - 1; index++)
+                    {
+                        running += combined[index].EncodedLength + sizeof(ushort);
+                        split = index + 1;
+                        if (running >= target)
+                            break;
+                    }
+
+                    var newLeft = combined.GetRange(0, split);
+                    var newRight = combined.GetRange(split, combined.Count - split);
+                    if (newLeft.Count == 0 || newRight.Count == 0)
+                        return false;
+                    if (!LeafCellsFit(leftPage, newLeft, [])
+                        || !LeafCellsFit(rightPage, newRight, []))
+                    {
+                        return false;
+                    }
+
+                    // Skip no-op redistribute that does not move any cells.
+                    if (newLeft.Count == leftCells.Count
+                        && newRight.Count == rightCells.Count
+                        && newLeft[^1].RowId == leftCells[^1].RowId)
+                    {
+                        return false;
+                    }
+
+                    WriteSinglePage(leftPage, BuildLeafImage(leftPage, newLeft));
+                    WriteSinglePage(rightPage, BuildLeafImage(rightPage, newRight));
+
+                    // Left child's separator is always the max rowid on the left leaf; the
+                    // right child keeps its existing upper bound (next separator or open max).
+                    parentLinks[leftIndex] = parentLinks[leftIndex] with
+                    {
+                        MaximumRowId = newLeft[^1].RowId,
+                    };
+                    WriteOrCollapseParent(path, path.Count - 2, parentLinks);
+                    return true;
+                }
+
+    /// <summary>
+    /// Writes <paramref name="links"/> into the interior at <paramref name="level"/>,
+    /// or collapses a single-child interior the same way empty-leaf reclaim does.
+    /// </summary>
+    private void WriteOrCollapseParent(List<PathEntry> path, int level, List<ChildLink> links)
+    {
+        var entry = path[level];
+        if (links.Count == 0)
+        {
+            throw new InvalidDataException(
+                $"SQLite table-interior page {entry.PageNumber} lost every child during leaf merge.");
+        }
+
+        if (links.Count == 1)
+        {
+            var soleChild = links[0].PageNumber;
+            if (level == 0)
+            {
+                AbsorbChildIntoPage(entry.PageNumber, soleChild);
+                return;
+            }
+
+            var parentEntry = path[level - 1];
+            var parentLinks = ReadChildLinks(ParseInterior(parentEntry.PageNumber));
+            parentLinks[parentEntry.ChildIndex] = parentLinks[parentEntry.ChildIndex] with
+            {
+                PageNumber = soleChild,
+            };
+            WriteSinglePage(parentEntry.PageNumber, BuildInteriorImage(parentEntry.PageNumber, parentLinks));
+            _io.FreePage(entry.PageNumber);
+            return;
+        }
+
+        WriteSinglePage(entry.PageNumber, BuildInteriorImage(entry.PageNumber, links));
+    }
+
+    private bool LeafCellsFit(uint pageNumber, List<SqliteTableLeafCell> left, List<SqliteTableLeafCell> right)
+        => LeafUsedBytes(left) + LeafUsedBytes(right) <= LeafCapacity(pageNumber);
+
+    private static int LeafUsedBytes(List<SqliteTableLeafCell> cells)
+    {
+        var used = 0;
+        foreach (var cell in cells)
+            used += cell.EncodedLength + sizeof(ushort);
+        return used;
+    }
+
+    private SqliteBtreePageType ParseHeaderType(uint pageNumber)
+        => SqliteBtreePageHeader.Parse(_io.ReadPage(pageNumber), IsFirstPage(pageNumber)).PageType;
+
+    /// <summary>
+    /// Drops the child pointer recorded at <paramref name="level"/> and collapses
+    /// a single-child interior into its parent (or root) when required.
+    /// </summary>
+    private void RemoveChildLink(List<PathEntry> path, int level)
+    {
+        var entry = path[level];
+        var links = ReadChildLinks(ParseInterior(entry.PageNumber));
+        if (entry.ChildIndex < 0 || entry.ChildIndex >= links.Count)
+        {
+            throw new InvalidOperationException(
+                $"SQLite table-interior page {entry.PageNumber} has no child index {entry.ChildIndex}.");
+        }
+
+        links.RemoveAt(entry.ChildIndex);
+        if (links.Count == 0)
+        {
+            throw new InvalidDataException(
+                $"SQLite table-interior page {entry.PageNumber} lost every child during empty-leaf reclaim.");
+        }
+
+        if (links.Count == 1)
+        {
+            var soleChild = links[0].PageNumber;
+            if (level == 0)
+            {
+                AbsorbChildIntoPage(entry.PageNumber, soleChild);
+                return;
+            }
+
+            // Interior with one remaining child is illegal on disk; retarget the
+                        // grandparent pointer at the sole survivor, then free the interior.
+                        var parentEntry = path[level - 1];
+                        var parentLinks = ReadChildLinks(ParseInterior(parentEntry.PageNumber));
+                        parentLinks[parentEntry.ChildIndex] = parentLinks[parentEntry.ChildIndex] with
+                        {
+                            PageNumber = soleChild,
+                        };
+                        WriteSinglePage(parentEntry.PageNumber, BuildInteriorImage(parentEntry.PageNumber, parentLinks));
+                        _io.FreePage(entry.PageNumber);
+            return;
+        }
+
+        WriteSinglePage(entry.PageNumber, BuildInteriorImage(entry.PageNumber, links));
+    }
+
+    /// <summary>
+    /// Copies <paramref name="childPage"/>'s b-tree payload into
+    /// <paramref name="destinationPage"/> (preserving page-1 DB header bytes)
+    /// and frees the child page. Used when the root collapses after its last
+    /// sibling pointer is removed.
+    /// </summary>
+    private void AbsorbChildIntoPage(uint destinationPage, uint childPage)
+    {
+        if (destinationPage == childPage)
+            return;
+
+        var childHeader = SqliteBtreePageHeader.Parse(_io.ReadPage(childPage), IsFirstPage(childPage));
+        switch (childHeader.PageType)
+        {
+            case SqliteBtreePageType.TableLeaf:
+                {
+                    var cells = ParseLeaf(childPage).Cells.Select(cell => cell.Cell).ToList();
+                    WriteSinglePage(destinationPage, BuildLeafImage(destinationPage, cells));
+                    break;
+                }
+            case SqliteBtreePageType.TableInterior:
+                {
+                    var links = ReadChildLinks(ParseInterior(childPage));
+                    WriteSinglePage(destinationPage, BuildInteriorImage(destinationPage, links));
+                    break;
+                }
+            default:
+                throw new InvalidDataException(
+                    $"SQLite page {childPage} cannot be absorbed into table root {destinationPage}.");
+        }
+
+        _io.FreePage(childPage);
+    }
+
+    private void FreeOverflowIfPresent(SqliteTableLeafCell cell)
+    {
+        if (cell.FirstOverflowPage is not { } firstOverflowPage)
+            return;
+
+        var localLength = cell.LocalPayload.Length;
+        if (cell.PayloadLength < (ulong)localLength)
+        {
+            throw new InvalidDataException(
+                "SQLite table-leaf cell local payload exceeds its logical payload length.");
+        }
+
+        var overflowLength = cell.PayloadLength - (ulong)localLength;
+        if (overflowLength == 0)
+        {
+            throw new InvalidDataException(
+                "SQLite table-leaf cell has an unnecessary overflow page.");
+        }
+
+        SqliteOverflowChainWriter.Free(_io, firstOverflowPage, overflowLength);
     }
 
     private void WriteLeafAndPropagate(

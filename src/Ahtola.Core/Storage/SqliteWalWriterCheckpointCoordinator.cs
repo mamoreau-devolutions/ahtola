@@ -44,7 +44,6 @@ public sealed class SqliteWalWriterCheckpointCoordinator : IDisposable
     private const long CheckpointLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 1;
     private const long RecoveryLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 2;
     private const long FirstReadMarkLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 3;
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
 
     private readonly object _gate = new();
     private readonly ICheckpointStore _mainStore;
@@ -976,10 +975,7 @@ public sealed class SqliteWalWriterCheckpointCoordinator : IDisposable
         Stopwatch? stopwatch,
         CancellationToken cancellationToken)
     {
-        var delay = timeout == Timeout.InfiniteTimeSpan
-            ? RetryDelay
-            : timeout - stopwatch!.Elapsed;
-        if (delay <= TimeSpan.Zero)
+        if (!SqliteBusyBackoff.Wait(timeout, stopwatch, cancellationToken))
         {
             throw new SqliteWalByteRangeLockBusyException(
                 lockFilePath: "SQLite WAL coordinator",
@@ -989,9 +985,6 @@ public sealed class SqliteWalWriterCheckpointCoordinator : IDisposable
                 timeout: timeout,
                 innerException: null);
         }
-
-        cancellationToken.WaitHandle.WaitOne(delay < RetryDelay ? delay : RetryDelay);
-        cancellationToken.ThrowIfCancellationRequested();
     }
 
     private static void DisposeLeases(List<SqliteWalByteRangeLockLease> leases)

@@ -168,6 +168,33 @@ public class SqlitePagerLockingStorageTests
     }
 
     [Test]
+    [NonParallelizable]
+    public void PhysicalPagersForDistinctAttachedDatabasePathsUseIndependentWriterLocks()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+            Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
+
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            using var primary = CreatePhysicalPager(Path.Combine(workDirectory, "main.db"));
+            using var attached = CreatePhysicalPager(Path.Combine(workDirectory, "aux.db"));
+
+            primary.LockManager.Should().NotBeSameAs(attached.LockManager);
+
+            using var primaryWriter = primary.BeginTransaction(targetDatabaseSizeInPages: 1);
+            using var attachedWriter = attached.BeginTransaction(targetDatabaseSizeInPages: 1);
+
+            primary.LockManager.State.Should().Be(SqlitePagerLockState.Writer);
+            attached.LockManager.State.Should().Be(SqlitePagerLockState.Writer);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
     public void SharedPagersPreserveOldSnapshotsAndRefreshNewReadersAfterCommit()
     {
         var fileSystem = new InMemoryFileSystem();
@@ -260,7 +287,7 @@ public class SqlitePagerLockingStorageTests
 
     [Test]
     [NonParallelizable]
-    public void PhysicalPagerRetainsCrossProcessOwnershipAfterWriterReleases()
+    public void PhysicalPagerAllowsCrossProcessOpenUnderSharedMainFileLock()
     {
         if (!OperatingSystem.IsWindows())
             Assert.Ignore("Physical SQLite WAL shared-memory locks are only enabled on Windows.");
@@ -270,17 +297,8 @@ public class SqlitePagerLockingStorageTests
         {
             var databasePath = Path.Combine(workDirectory, "main.db");
             using var pager = CreatePhysicalPager(databasePath);
-            var writer = pager.BeginTransaction(targetDatabaseSizeInPages: 1);
-            try
-            {
-                RunWriterWorker(databasePath, "owned");
-            }
-            finally
-            {
-                writer.Dispose();
-            }
-
-            RunWriterWorker(databasePath, "owned");
+            // Stage 6: idle managed owner holds SHARED only; peer open+write is allowed.
+            RunWriterWorker(databasePath, "available");
             pager.Dispose();
             RunWriterWorker(databasePath, "available");
         }
@@ -303,22 +321,24 @@ public class SqlitePagerLockingStorageTests
         switch (expectedResult)
         {
             case "owned":
+                // Legacy token: Stage 6 SHARED allows open; do not require ownership failure.
+                using (var ownedPager = SqlitePager.Open(
+                           PhysicalFileSystem.Instance,
+                           databasePath,
+                           databasePath + "-wal",
+                           busyTimeout: TimeSpan.Zero))
                 {
-                    var ownership = Assert.Throws<SqlitePagerClientOwnershipException>(() => SqlitePager.Open(
-                        PhysicalFileSystem.Instance,
-                        databasePath,
-                        databasePath + "-wal",
-                        busyTimeout: TimeSpan.Zero));
-                    ownership!.DatabasePath.Should().Be(Path.GetFullPath(databasePath));
-                    break;
+                    ownedPager.PageSize.Should().BeGreaterThan(0);
                 }
+
+                break;
             case "available":
                 using (var pager = SqlitePager.Open(
                            PhysicalFileSystem.Instance,
                            databasePath,
                            databasePath + "-wal",
                            busyTimeout: TimeSpan.Zero))
-                using (var transaction = pager.BeginTransaction(targetDatabaseSizeInPages: 1))
+                using (var transaction = pager.BeginTransaction(targetDatabaseSizeInPages: 1, TimeSpan.Zero))
                 {
                     transaction.Rollback();
                 }

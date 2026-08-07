@@ -47,9 +47,13 @@ public interface ISqlitePageAllocator
 /// <see cref="SqlitePageStore"/>.
 /// </summary>
 /// <remarks>
-/// This allocator does not inspect or reclaim the SQLite freelist. Reserved
-/// page numbers become durable only when the caller writes the corresponding
-/// mutation through a WAL or page-store checkpoint path.
+/// This low-level helper remains append-only for callers that stage page images
+/// without freelist header ownership (split writers, unit tests). Ordinary DML
+/// allocation goes through <see cref="SqliteStagedBtreePageIo.AllocatePage"/>,
+/// which reuses freelist leaves/trunks before growing the file, matching Turso
+/// <c>Pager::allocate_page</c>. Reserved page numbers become durable only when
+/// the caller writes the corresponding mutation through a WAL or page-store
+/// checkpoint path.
 /// </remarks>
 public sealed class SqliteAppendOnlyPageAllocator : ISqlitePageAllocator
 {

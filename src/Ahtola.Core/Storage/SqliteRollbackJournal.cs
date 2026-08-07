@@ -60,49 +60,66 @@ internal static class SqliteRollbackJournal
         using var journal = fileSystem.OpenFile(journalPath, FileOpenMode.OpenExisting, readOnly: true);
         var header = ReadHeader(journal);
         var recordSize = checked((long)header.PageSize + 8);
-        var requiredLength = checked((long)SectorSize + (long)header.RecordCount * recordSize);
-        if (journal.Length != requiredLength)
-        {
-            throw new InvalidDataException(
-                "Managed recovery supports only the single-segment rollback journals it creates. "
-                + "Use SQLite to recover this external rollback journal before reopening it with the managed provider.");
-        }
-
         var page = new byte[header.PageSize];
         Span<byte> pageNumberBytes = stackalloc byte[4];
         Span<byte> checksumBytes = stackalloc byte[4];
-        var recordOffset = (long)SectorSize;
         var restoredPages = new HashSet<uint>();
-        var pageNumbers = new uint[checked((int)header.RecordCount)];
-        for (var index = 0; index < pageNumbers.Length; index++)
-        {
-            ReadExact(journal, recordOffset, pageNumberBytes, "SQLite rollback journal page number");
-            var pageNumber = BinaryPrimitives.ReadUInt32BigEndian(pageNumberBytes);
-            if (pageNumber == 0 || pageNumber > header.InitialDatabasePageCount)
-                throw new InvalidDataException($"SQLite rollback journal contains invalid page number {pageNumber}.");
-            if (!restoredPages.Add(pageNumber))
-                throw new InvalidDataException($"SQLite rollback journal contains duplicate page {pageNumber}.");
+        var pageNumbers = new List<uint>();
+        var recordOffset = (long)header.SectorSize;
 
-            ReadExact(journal, recordOffset + 4, page, $"SQLite rollback journal page {pageNumber}");
-            ReadExact(
-                journal,
-                recordOffset + 4 + header.PageSize,
-                checksumBytes,
-                $"SQLite rollback journal checksum for page {pageNumber}");
-            var expectedChecksum = BinaryPrimitives.ReadUInt32BigEndian(checksumBytes);
-            var actualChecksum = ComputeChecksum(page, header.ChecksumNonce);
-            if (actualChecksum != expectedChecksum)
+        if (header.RecordCount == uint.MaxValue)
+        {
+            // SQLite writes 0xffffffff when a journal header is finalized without a
+            // known record count (crash mid-transaction). Scan complete records until
+            // EOF or a zero page-number terminator.
+            while (recordOffset + recordSize <= journal.Length)
+            {
+                ReadExact(journal, recordOffset, pageNumberBytes, "SQLite rollback journal page number");
+                var pageNumber = BinaryPrimitives.ReadUInt32BigEndian(pageNumberBytes);
+                if (pageNumber == 0)
+                    break;
+                ValidateAndCollectRecord(
+                    journal,
+                    header,
+                    page,
+                    checksumBytes,
+                    recordOffset,
+                    pageNumber,
+                    restoredPages,
+                    pageNumbers);
+                recordOffset += recordSize;
+            }
+        }
+        else
+        {
+            var requiredLength = checked((long)header.SectorSize + ((long)header.RecordCount * recordSize));
+            // Trailing bytes after the declared records are ignored (SQLite may leave
+            // preallocated journal capacity). Truncation below the declared payload is not.
+            if (journal.Length < requiredLength)
             {
                 throw new InvalidDataException(
-                    $"SQLite rollback journal checksum for page {pageNumber} is invalid.");
+                    "SQLite rollback journal is truncated before its declared page records.");
             }
 
-            pageNumbers[index] = pageNumber;
-            recordOffset += recordSize;
+            for (var index = 0; index < header.RecordCount; index++)
+            {
+                ReadExact(journal, recordOffset, pageNumberBytes, "SQLite rollback journal page number");
+                var pageNumber = BinaryPrimitives.ReadUInt32BigEndian(pageNumberBytes);
+                ValidateAndCollectRecord(
+                    journal,
+                    header,
+                    page,
+                    checksumBytes,
+                    recordOffset,
+                    pageNumber,
+                    restoredPages,
+                    pageNumbers);
+                recordOffset += recordSize;
+            }
         }
 
         using var database = fileSystem.OpenFile(databasePath, FileOpenMode.OpenExisting);
-        recordOffset = SectorSize;
+        recordOffset = header.SectorSize;
         foreach (var pageNumber in pageNumbers)
         {
             ReadExact(journal, recordOffset + 4, page, $"SQLite rollback journal page {pageNumber}");
@@ -114,6 +131,38 @@ internal static class SqliteRollbackJournal
         database.FlushToDisk();
         journal.Dispose();
         Invalidate(journalPath, fileSystem);
+    }
+
+    private static void ValidateAndCollectRecord(
+        IFile journal,
+        JournalHeader header,
+        byte[] page,
+        Span<byte> checksumBytes,
+        long recordOffset,
+        uint pageNumber,
+        HashSet<uint> restoredPages,
+        List<uint> pageNumbers)
+    {
+        if (pageNumber == 0 || pageNumber > header.InitialDatabasePageCount)
+            throw new InvalidDataException($"SQLite rollback journal contains invalid page number {pageNumber}.");
+        if (!restoredPages.Add(pageNumber))
+            throw new InvalidDataException($"SQLite rollback journal contains duplicate page {pageNumber}.");
+
+        ReadExact(journal, recordOffset + 4, page, $"SQLite rollback journal page {pageNumber}");
+        ReadExact(
+            journal,
+            recordOffset + 4 + header.PageSize,
+            checksumBytes,
+            $"SQLite rollback journal checksum for page {pageNumber}");
+        var expectedChecksum = BinaryPrimitives.ReadUInt32BigEndian(checksumBytes);
+        var actualChecksum = ComputeChecksum(page, header.ChecksumNonce);
+        if (actualChecksum != expectedChecksum)
+        {
+            throw new InvalidDataException(
+                $"SQLite rollback journal checksum for page {pageNumber} is invalid.");
+        }
+
+        pageNumbers.Add(pageNumber);
     }
 
     internal static void Commit(
@@ -210,23 +259,21 @@ internal static class SqliteRollbackJournal
         var initialDatabasePageCount = BinaryPrimitives.ReadUInt32BigEndian(header[16..]);
         var sectorSize = BinaryPrimitives.ReadUInt32BigEndian(header[20..]);
         var pageSize = checked((int)BinaryPrimitives.ReadUInt32BigEndian(header[24..]));
-        if (sectorSize != SectorSize)
+        // SQLite sector sizes are powers of two. Accept common values so journals
+        // written by stock SQLite/Turso can be recovered, not only Ahtola's 512.
+        if (sectorSize < 512
+            || sectorSize > 65536
+            || (sectorSize & (sectorSize - 1)) != 0)
         {
             throw new InvalidDataException(
-                $"Managed recovery does not support external SQLite rollback-journal sector size {sectorSize}. "
-                + "Use SQLite to recover the journal before reopening it with the managed provider.");
+                $"SQLite rollback journal sector size {sectorSize} is invalid.");
         }
-        if (recordCount == uint.MaxValue)
-        {
-            throw new InvalidDataException(
-                "Managed recovery does not support external SQLite rollback journals with sentinel record counts. "
-                + "Use SQLite to recover the journal before reopening it with the managed provider.");
-        }
+
         _ = SqlitePageSize.Encode(pageSize);
         if (initialDatabasePageCount == 0)
             throw new InvalidDataException("SQLite rollback journal declares an empty original database.");
 
-        return new JournalHeader(recordCount, checksumNonce, initialDatabasePageCount, pageSize);
+        return new JournalHeader(recordCount, checksumNonce, initialDatabasePageCount, pageSize, sectorSize);
     }
 
     private static void WriteHeader(
@@ -292,5 +339,6 @@ internal static class SqliteRollbackJournal
         uint RecordCount,
         uint ChecksumNonce,
         uint InitialDatabasePageCount,
-        int PageSize);
+        int PageSize,
+        uint SectorSize);
 }

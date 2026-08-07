@@ -18,6 +18,17 @@ public class VdbeProgramTests
         ((int)VdbeOpcode.Cast).Should().Be(68);
         ((int)VdbeOpcode.RowSetTest).Should().Be(74);
         ((int)VdbeOpcode.Program).Should().Be(75);
+        ((int)VdbeOpcode.NotExists).Should().Be(76);
+        ((int)VdbeOpcode.Found).Should().Be(77);
+        ((int)VdbeOpcode.HaltIfNull).Should().Be(78);
+        ((int)VdbeOpcode.OpenEphemeral).Should().Be(79);
+        ((int)VdbeOpcode.EphemeralInsert).Should().Be(80);
+        ((int)VdbeOpcode.NoConflict).Should().Be(81);
+        ((int)VdbeOpcode.FkCounter).Should().Be(82);
+        ((int)VdbeOpcode.FkIfZero).Should().Be(83);
+        ((int)VdbeOpcode.FkCheck).Should().Be(84);
+        ((int)VdbeOpcode.SeekGE).Should().Be(85);
+        ((int)VdbeOpcode.IdxDelete).Should().Be(96);
 
         typeof(VdbeProgram).GetConstructor(
             [

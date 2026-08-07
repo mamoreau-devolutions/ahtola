@@ -45,6 +45,12 @@ public sealed class AhtolaBatchCommand : DbBatchCommand
 
     public override int RecordsAffected => _recordsAffected;
 
+    /// <summary>
+    /// Gets or sets the server-side condition for this command when the batch runs over a remote
+    /// connection. Local batches reject conditional commands instead of ignoring the condition.
+    /// </summary>
+    public AhtolaRemoteBatchCondition? RemoteCondition { get; set; }
+
     public override bool CanCreateParameter => true;
 
     public override DbParameter CreateParameter()

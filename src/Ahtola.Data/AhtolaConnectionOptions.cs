@@ -54,6 +54,32 @@ public class AhtolaConnectionOptions
 
     public AhtolaEncryptionCipher? GetEncryptionCipher() => _builder.GetEncryptionCipher();
 
+    internal AhtolaRemoteEncryptionOptions? GetRemoteEncryptionOptions()
+    {
+        var cipher = GetEncryptionCipher();
+        var key = _builder.GetOption("Encryption Key");
+        if (cipher is null && string.IsNullOrWhiteSpace(key))
+            return null;
+        if (cipher is null)
+            throw new InvalidOperationException("Encryption Cipher is required when Encryption Key is specified.");
+        if (string.IsNullOrWhiteSpace(key))
+            throw new InvalidOperationException("Encryption Key is required when Encryption Cipher is specified.");
+
+        return new AhtolaRemoteEncryptionOptions(
+            key,
+            cipher.Value switch
+            {
+                AhtolaEncryptionCipher.Aes128Gcm => AhtolaRemoteEncryptionCipher.Aes128Gcm,
+                AhtolaEncryptionCipher.Aes256Gcm => AhtolaRemoteEncryptionCipher.Aes256Gcm,
+                AhtolaEncryptionCipher.Aegis256 => AhtolaRemoteEncryptionCipher.Aegis256,
+                AhtolaEncryptionCipher.Aegis256x2 => AhtolaRemoteEncryptionCipher.Aegis256X2,
+                AhtolaEncryptionCipher.Aegis128l => AhtolaRemoteEncryptionCipher.Aegis128L,
+                AhtolaEncryptionCipher.Aegis128x2 => AhtolaRemoteEncryptionCipher.Aegis128X2,
+                AhtolaEncryptionCipher.Aegis128x4 => AhtolaRemoteEncryptionCipher.Aegis128X4,
+                _ => throw new ArgumentOutOfRangeException(nameof(cipher), cipher, "Unknown remote encryption cipher."),
+            });
+    }
+
     internal ManagedLocalOpenOptions GetManagedLocalOpenOptions()
     {
         var mode = ParseManagedOpenMode(Mode);

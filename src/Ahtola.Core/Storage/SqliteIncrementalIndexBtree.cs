@@ -13,7 +13,8 @@ namespace Ahtola.Core.Storage;
 /// SQLite stores a real index entry in every interior separator cell, so a
 /// split promotes one cell out of a page rather than duplicating a key. A
 /// deletion whose key lives in an interior page, or that would empty a leaf,
-/// requires the merging rules this writer deliberately omits and raises
+/// requires separator pull-down / page-merge rules this writer deliberately
+/// omits (unlike table trees, index separators are live keys) and raises
 /// <see cref="SqliteBtreeMaintenanceRequiredException"/> instead.
 /// </para>
 /// </remarks>
@@ -85,20 +86,37 @@ public sealed class SqliteIncrementalIndexBtree
         }
 
         var entries = ReadLeafEntries(view);
-        if (entries[search.Index].Cell.FirstOverflowPage is not null)
+                FreeOverflowIfPresent(entries[search.Index].Cell);
+                entries.RemoveAt(search.Index);
+                if (entries.Count == 0 && path.Count > 1)
+                {
+                    throw new SqliteBtreeMaintenanceRequiredException(
+                        $"Removing an index key would empty child page {leafPage}, which requires page merging.");
+                }
+
+                _io.WritePage(leafPage, BuildLeafImage(entries));
+            }
+
+    private void FreeOverflowIfPresent(SqliteIndexLeafCell cell)
+    {
+        if (cell.FirstOverflowPage is not { } firstOverflowPage)
+            return;
+
+        var localLength = cell.LocalPayload.Length;
+        if (cell.PayloadLength < (ulong)localLength)
         {
-            throw new SqliteBtreeMaintenanceRequiredException(
-                "Removing an overflowing index key would release its overflow chain, which requires freelist maintenance.");
+            throw new InvalidDataException(
+                "SQLite index-leaf cell local payload exceeds its logical payload length.");
         }
 
-        entries.RemoveAt(search.Index);
-        if (entries.Count == 0 && path.Count > 1)
+        var overflowLength = cell.PayloadLength - (ulong)localLength;
+        if (overflowLength == 0)
         {
-            throw new SqliteBtreeMaintenanceRequiredException(
-                $"Removing an index key would empty child page {leafPage}, which requires page merging.");
+            throw new InvalidDataException(
+                "SQLite index-leaf cell has an unnecessary overflow page.");
         }
 
-        _io.WritePage(leafPage, BuildLeafImage(entries));
+        SqliteOverflowChainWriter.Free(_io, firstOverflowPage, overflowLength);
     }
 
     private void WriteLeafAndPropagate(List<PathEntry> path, List<IndexEntry> entries)

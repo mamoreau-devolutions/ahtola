@@ -368,6 +368,22 @@ public sealed class ManagedAutoIncrementTests
     }
 
     [Test]
+    public void NonAutoIncrementMaximumRowidUsesAnAvailableRandomPositiveRowid()
+    {
+        var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY)");
+        Execute(connection, "INSERT INTO t VALUES (9223372036854775807)");
+        Execute(connection, "INSERT INTO t DEFAULT VALUES");
+
+        var generated = QueryManaged(connection, "SELECT id FROM t WHERE id <> 9223372036854775807").Rows;
+
+        generated.Should().HaveCount(1);
+        var rowId = long.Parse(generated[0]["I:".Length..], CultureInfo.InvariantCulture);
+        rowId.Should().BeInRange(1, long.MaxValue - 1);
+    }
+
+    [Test]
     public void ExplainInsertDoesNotAllocateOrRequireRuntimeSequenceState()
     {
         var database = new EmbeddedDatabase();
