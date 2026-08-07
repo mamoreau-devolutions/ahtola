@@ -20,25 +20,95 @@ public sealed class MvccStoreUnitTests
     public void ConcurrentCommitsWithDisjointWritesSucceed()
     {
         var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
         var a = store.BeginTransaction();
         var b = store.BeginTransaction();
-        store.RecordWrite(a.Id, new MvccRowId(TableId: -1, RowId: 1));
-        store.RecordWrite(b.Id, new MvccRowId(TableId: -1, RowId: 2));
+        store.Insert(a.Id, new MvccRowId(table, 1), [SqlValue.Integer(1)]);
+        store.Insert(b.Id, new MvccRowId(table, 2), [SqlValue.Integer(2)]);
         store.Commit(a.Id);
         store.Commit(b.Id);
     }
 
     [Test]
-    public void ConcurrentCommitsWithOverlappingWritesRaiseWriteWriteConflict()
+    public void ConcurrentDeletesOnSameRowRaiseWriteWriteConflict()
     {
         var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var seed = store.BeginTransaction();
+        store.Insert(seed.Id, new MvccRowId(table, 7), [SqlValue.Text("x")]);
+        store.Commit(seed.Id);
+
         var a = store.BeginTransaction();
         var b = store.BeginTransaction();
-        store.RecordWrite(a.Id, new MvccRowId(TableId: -1, RowId: 7));
-        store.RecordWrite(b.Id, new MvccRowId(TableId: -1, RowId: 7));
-        store.Commit(a.Id);
-        var act = () => store.Commit(b.Id);
+        store.Delete(a.Id, new MvccRowId(table, 7)).Should().BeTrue();
+        var act = () => store.Delete(b.Id, new MvccRowId(table, 7));
         act.Should().Throw<EmbeddedWriteWriteConflictException>();
+    }
+
+    [Test]
+    public void ReaderDoesNotSeeUncommittedWritesFromPeer()
+    {
+        var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var writer = store.BeginTransaction();
+        store.Insert(writer.Id, new MvccRowId(table, 1), [SqlValue.Integer(42)]);
+
+        var reader = store.BeginTransaction();
+        store.TryRead(reader.Id, new MvccRowId(table, 1), out _).Should().BeFalse();
+
+        store.Commit(writer.Id);
+
+        // Reader began before writer committed — snapshot isolation keeps it dark.
+        store.TryRead(reader.Id, new MvccRowId(table, 1), out _).Should().BeFalse();
+
+        var later = store.BeginTransaction();
+        store.TryRead(later.Id, new MvccRowId(table, 1), out var cells).Should().BeTrue();
+        cells![0].Should().Be(SqlValue.Integer(42));
+    }
+
+    [Test]
+    public void WriterSeesOwnUncommittedInserts()
+    {
+        var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var tx = store.BeginTransaction();
+        store.Insert(tx.Id, new MvccRowId(table, 3), [SqlValue.Text("mine")]);
+        store.TryRead(tx.Id, new MvccRowId(table, 3), out var cells).Should().BeTrue();
+        cells![0].Should().Be(SqlValue.Text("mine"));
+    }
+
+    [Test]
+    public void UpdateReplacesVisibleVersion()
+    {
+        var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var seed = store.BeginTransaction();
+        store.Insert(seed.Id, new MvccRowId(table, 1), [SqlValue.Text("old")]);
+        store.Commit(seed.Id);
+
+        var tx = store.BeginTransaction();
+        store.Update(tx.Id, new MvccRowId(table, 1), [SqlValue.Text("new")]).Should().BeTrue();
+        store.TryRead(tx.Id, new MvccRowId(table, 1), out var cells).Should().BeTrue();
+        cells![0].Should().Be(SqlValue.Text("new"));
+        store.Commit(tx.Id);
+
+        var reader = store.BeginTransaction();
+        store.TryRead(reader.Id, new MvccRowId(table, 1), out cells).Should().BeTrue();
+        cells![0].Should().Be(SqlValue.Text("new"));
+    }
+
+    [Test]
+    public void RollbackDropsUncommittedVersions()
+    {
+        var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var tx = store.BeginTransaction();
+        store.Insert(tx.Id, new MvccRowId(table, 9), [SqlValue.Integer(9)]);
+        store.Rollback(tx.Id);
+
+        var reader = store.BeginTransaction();
+        store.TryRead(reader.Id, new MvccRowId(table, 9), out _).Should().BeFalse();
+        store.ScanVisible(reader.Id).Should().BeEmpty();
     }
 
     [Test]
@@ -48,5 +118,23 @@ public sealed class MvccStoreUnitTests
         _ = store.BeginExclusiveTransaction();
         var act = () => store.BeginTransaction();
         act.Should().Throw<EmbeddedBusyException>();
+    }
+
+    [Test]
+    public void ScanVisibleReturnsCommittedRowsOnly()
+    {
+        var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var a = store.BeginTransaction();
+        store.Insert(a.Id, new MvccRowId(table, 1), [SqlValue.Integer(1)]);
+        store.Insert(a.Id, new MvccRowId(table, 2), [SqlValue.Integer(2)]);
+        store.Commit(a.Id);
+
+        var b = store.BeginTransaction();
+        store.Insert(b.Id, new MvccRowId(table, 3), [SqlValue.Integer(3)]);
+
+        var reader = store.BeginTransaction();
+        var visible = store.ScanVisible(reader.Id);
+        visible.Select(row => row.RowId.RowId).OrderBy(id => id).Should().Equal(1L, 2L);
     }
 }

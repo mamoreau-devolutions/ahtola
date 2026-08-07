@@ -19,9 +19,7 @@ internal enum MvccTransactionState : byte
 }
 
 /// <summary>
-/// One in-flight or completed MVCC transaction. Phase 1 tracks timestamps and
-/// write sets so concurrent commits can detect write-write conflicts; full
-/// row-version chains land as the DML path routes through the store.
+/// One in-flight MVCC transaction: begin timestamp, write set, and lifecycle.
 /// </summary>
 internal sealed class MvccTransaction
 {
@@ -103,19 +101,22 @@ internal sealed class MvccTransaction
 }
 
 /// <summary>
-/// Per-database MVCC store (Turso <c>MvStore</c>). Phase 1 provides clock-ordered
-/// concurrent transactions, write-set conflict detection, and the attachment
-/// point for later row-version / logical-log work. Classic catalog DML still
-/// mutates <see cref="EmbeddedDatabase"/> tables; concurrent mode uses this
-/// store for transaction identity and WW checks at commit.
+/// Per-database MVCC store (Turso <c>MvStore</c>): logical clock, version chains,
+/// concurrent transactions, and first-committer-wins write-write conflicts.
 /// </summary>
 internal sealed class MvStore
 {
     private readonly ILogicalClock _clock;
     private readonly object _gate = new();
     private readonly Dictionary<ulong, MvccTransaction> _transactions = [];
-    private readonly List<(ulong CommitTs, HashSet<MvccRowId> Writes)> _committedWriteHistory = [];
+    private readonly Dictionary<ulong, MvccTransactionState> _finalizedStates = [];
+    private readonly Dictionary<ulong, ulong> _finalizedCommitTimestamps = [];
+    private readonly Dictionary<MvccRowId, List<MvccRowVersion>> _rows = [];
+    private readonly Dictionary<string, long> _tableIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<long, string> _tableNames = [];
+    private long _nextTableId = -2;
     private ulong _nextTxId = 1;
+    private ulong _nextVersionId = 1;
     private ulong? _exclusiveTxId;
 
     internal MvStore(ILogicalClock? clock = null)
@@ -125,7 +126,27 @@ internal sealed class MvStore
 
     internal ILogicalClock Clock => _clock;
 
-    /// <summary>Begin a non-exclusive concurrent MVCC transaction.</summary>
+    /// <summary>Stable negative table id for <paramref name="tableName"/>.</summary>
+    internal long GetOrCreateTableId(string tableName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tableName);
+        lock (_gate)
+        {
+            if (_tableIds.TryGetValue(tableName, out var id))
+                return id;
+            id = _nextTableId--;
+            _tableIds[tableName] = id;
+            _tableNames[id] = tableName;
+            return id;
+        }
+    }
+
+    internal bool TryGetTableName(long tableId, out string? name)
+    {
+        lock (_gate)
+            return _tableNames.TryGetValue(tableId, out name);
+    }
+
     internal MvccTransaction BeginTransaction()
     {
         lock (_gate)
@@ -133,9 +154,7 @@ internal sealed class MvStore
             if (_exclusiveTxId is not null)
                 throw new EmbeddedBusyException();
 
-            var beginTs = _clock is MvccClock mvccClock
-                ? mvccClock.GetBeginTimestamp()
-                : _clock.GetTimestamp(static _ => { });
+            var beginTs = NextBeginTimestamp();
             var id = new MvccTxId(_nextTxId++);
             var tx = new MvccTransaction(id, beginTs);
             _transactions.Add(id.Value, tx);
@@ -143,10 +162,6 @@ internal sealed class MvStore
         }
     }
 
-    /// <summary>
-    /// Begin or upgrade to an exclusive MVCC write transaction (Turso
-    /// <c>begin_exclusive_tx</c>). Only one exclusive writer may be active.
-    /// </summary>
     internal MvccTransaction BeginExclusiveTransaction(MvccTxId? existing = null)
     {
         lock (_gate)
@@ -164,9 +179,7 @@ internal sealed class MvStore
                 return existingTx;
             }
 
-            var beginTs = _clock is MvccClock mvccClock
-                ? mvccClock.GetBeginTimestamp()
-                : _clock.GetTimestamp(static _ => { });
+            var beginTs = NextBeginTimestamp();
             var id = new MvccTxId(_nextTxId++);
             var tx = new MvccTransaction(id, beginTs);
             _transactions.Add(id.Value, tx);
@@ -181,20 +194,132 @@ internal sealed class MvStore
             return _transactions.TryGetValue(id.Value, out transaction);
     }
 
-    internal void RecordWrite(MvccTxId id, MvccRowId rowId)
+    /// <summary>Insert a new live version created by <paramref name="txId"/>.</summary>
+    internal void Insert(MvccTxId txId, MvccRowId rowId, SqlValue[] cells)
     {
+        ArgumentNullException.ThrowIfNull(cells);
         lock (_gate)
         {
-            if (!_transactions.TryGetValue(id.Value, out var tx))
-                throw new InvalidOperationException($"Unknown MVCC transaction {id}.");
+            var tx = RequireActive(txId);
+            var version = new MvccRowVersion(
+                _nextVersionId++,
+                begin: MvccStamp.FromTxId(txId),
+                end: null,
+                cells: (SqlValue[])cells.Clone());
+            if (!_rows.TryGetValue(rowId, out var chain))
+            {
+                chain = [];
+                _rows[rowId] = chain;
+            }
+
+            chain.Add(version);
             tx.RecordWrite(rowId);
         }
     }
 
     /// <summary>
-    /// Commit with first-committer-wins write-write conflict detection.
-    /// The commit timestamp is generated and the transaction enters
-    /// <see cref="MvccTransactionState.Preparing"/> atomically under the clock lock.
+    /// Delete the version visible to <paramref name="txId"/> by setting its end
+    /// stamp. Returns false when no visible version exists.
+    /// </summary>
+    internal bool Delete(MvccTxId txId, MvccRowId rowId)
+    {
+        lock (_gate)
+        {
+            var tx = RequireActive(txId);
+            if (!_rows.TryGetValue(rowId, out var chain))
+                return false;
+
+            for (var i = chain.Count - 1; i >= 0; i--)
+            {
+                var version = chain[i];
+                if (!IsVisibleTo(version, tx))
+                    continue;
+                if (IsWriteWriteConflict(tx, version))
+                    throw new EmbeddedWriteWriteConflictException();
+
+                version.End = MvccStamp.FromTxId(txId);
+                tx.RecordWrite(rowId);
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>Delete-then-insert update (Turso <c>update</c>).</summary>
+    internal bool Update(MvccTxId txId, MvccRowId rowId, SqlValue[] cells)
+    {
+        if (!Delete(txId, rowId))
+            return false;
+        Insert(txId, rowId, cells);
+        return true;
+    }
+
+    /// <summary>Read the version visible to <paramref name="txId"/>, if any.</summary>
+    internal bool TryRead(MvccTxId txId, MvccRowId rowId, out SqlValue[]? cells)
+    {
+        lock (_gate)
+        {
+            var tx = RequireActive(txId);
+            cells = null;
+            if (!_rows.TryGetValue(rowId, out var chain))
+                return false;
+
+            for (var i = chain.Count - 1; i >= 0; i--)
+            {
+                var version = chain[i];
+                if (!IsVisibleTo(version, tx))
+                    continue;
+                if (version.IsTombstone)
+                    return false;
+                cells = (SqlValue[])version.Cells.Clone();
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Scan every row id that has at least one version visible to
+    /// <paramref name="txId"/> (newest visible non-tombstone wins).
+    /// </summary>
+    internal IReadOnlyList<(MvccRowId RowId, SqlValue[] Cells)> ScanVisible(MvccTxId txId)
+    {
+        lock (_gate)
+        {
+            var tx = RequireActive(txId);
+            var results = new List<(MvccRowId, SqlValue[])>();
+            foreach (var (rowId, chain) in _rows)
+            {
+                for (var i = chain.Count - 1; i >= 0; i--)
+                {
+                    var version = chain[i];
+                    if (!IsVisibleTo(version, tx))
+                        continue;
+                    if (!version.IsTombstone)
+                        results.Add((rowId, (SqlValue[])version.Cells.Clone()));
+                    break;
+                }
+            }
+
+            return results;
+        }
+    }
+
+    /// <summary>Record a write-set entry without mutating version chains (catalog-path DML).</summary>
+    internal void RecordWrite(MvccTxId id, MvccRowId rowId)
+    {
+        lock (_gate)
+        {
+            var tx = RequireActive(id);
+            tx.RecordWrite(rowId);
+        }
+    }
+
+    /// <summary>
+    /// Commit with first-committer-wins WW detection. Rewrites in-flight TxID
+    /// stamps on version chains to the commit timestamp (Turso rewrite step).
     /// </summary>
     internal void Commit(MvccTxId id)
     {
@@ -202,52 +327,46 @@ internal sealed class MvStore
         HashSet<MvccRowId> writes;
         lock (_gate)
         {
-            if (!_transactions.TryGetValue(id.Value, out tx!))
-                throw new InvalidOperationException($"Unknown MVCC transaction {id}.");
-            if (tx.State != MvccTransactionState.Active)
-                throw new InvalidOperationException($"MVCC transaction {id} is {tx.State}.");
+            tx = RequireActive(id);
             writes = tx.SnapshotWriteSet().ToHashSet();
-        }
 
-        lock (_gate)
-        {
-            foreach (var (commitTs, committedWrites) in _committedWriteHistory)
+            foreach (var rowId in writes)
             {
-                if (commitTs < tx.BeginTimestamp)
+                if (!_rows.TryGetValue(rowId, out var chain))
                     continue;
-                if (writes.Count == 0)
-                    break;
-                if (writes.Overlaps(committedWrites))
-                    throw new EmbeddedWriteWriteConflictException();
+                foreach (var version in chain)
+                {
+                    if (IsWriteWriteConflict(tx, version))
+                        throw new EmbeddedWriteWriteConflictException();
+                }
             }
         }
 
-        _clock.GetTimestamp(ts =>
-        {
-            // Publish Preparing under the clock lock (Turso SI invariant).
-            tx.MarkPreparing(ts);
-        });
+        _clock.GetTimestamp(ts => tx.MarkPreparing(ts));
 
         lock (_gate)
         {
             var commitTs = tx.CommitTimestamp
                 ?? throw new InvalidOperationException("Preparing transaction missing commit timestamp.");
-            foreach (var (otherTs, committedWrites) in _committedWriteHistory)
+
+            foreach (var rowId in writes)
             {
-                if (otherTs < tx.BeginTimestamp || otherTs >= commitTs)
+                if (!_rows.TryGetValue(rowId, out var chain))
                     continue;
-                if (writes.Overlaps(committedWrites))
+                foreach (var version in chain)
                 {
-                    tx.MarkAborted();
-                    ClearExclusive(id);
-                    _transactions.Remove(id.Value);
-                    throw new EmbeddedWriteWriteConflictException();
+                    if (IsWriteWriteConflict(tx, version))
+                    {
+                        AbortLocked(id, tx);
+                        throw new EmbeddedWriteWriteConflictException();
+                    }
                 }
             }
 
+            RewriteStampsLocked(id, commitTs);
             tx.MarkCommitted();
-            if (writes.Count != 0)
-                _committedWriteHistory.Add((commitTs, writes));
+            _finalizedStates[id.Value] = MvccTransactionState.Committed;
+            _finalizedCommitTimestamps[id.Value] = commitTs;
             ClearExclusive(id);
             _transactions.Remove(id.Value);
             PruneHistoryLocked(tx.BeginTimestamp);
@@ -262,10 +381,154 @@ internal sealed class MvStore
                 return;
             if (tx.State is MvccTransactionState.Committed)
                 throw new InvalidOperationException("Cannot roll back a committed MVCC transaction.");
-            tx.MarkAborted();
-            ClearExclusive(id);
-            _transactions.Remove(id.Value);
+            AbortLocked(id, tx);
         }
+    }
+
+    private void AbortLocked(MvccTxId id, MvccTransaction tx)
+    {
+        foreach (var (rowId, chain) in _rows.ToArray())
+        {
+            for (var i = chain.Count - 1; i >= 0; i--)
+            {
+                var version = chain[i];
+                if (version.Begin is { IsTimestamp: false, Value: var beginTx } && beginTx == id.Value)
+                {
+                    chain.RemoveAt(i);
+                    continue;
+                }
+
+                if (version.End is { IsTimestamp: false, Value: var endTx } && endTx == id.Value)
+                    version.End = null;
+            }
+
+            if (chain.Count == 0)
+                _rows.Remove(rowId);
+        }
+
+        tx.MarkAborted();
+        _finalizedStates[id.Value] = MvccTransactionState.Aborted;
+        ClearExclusive(id);
+        _transactions.Remove(id.Value);
+    }
+
+    private void RewriteStampsLocked(MvccTxId id, ulong commitTs)
+    {
+        var stamp = MvccStamp.FromTimestamp(commitTs);
+        foreach (var chain in _rows.Values)
+        {
+            foreach (var version in chain)
+            {
+                if (version.Begin is { IsTimestamp: false, Value: var beginTx } && beginTx == id.Value)
+                    version.Begin = stamp;
+                if (version.End is { IsTimestamp: false, Value: var endTx } && endTx == id.Value)
+                    version.End = stamp;
+            }
+        }
+    }
+
+    private MvccTransaction RequireActive(MvccTxId id)
+    {
+        if (!_transactions.TryGetValue(id.Value, out var tx))
+            throw new InvalidOperationException($"Unknown MVCC transaction {id}.");
+        if (tx.State != MvccTransactionState.Active)
+            throw new InvalidOperationException($"MVCC transaction {id} is {tx.State}.");
+        return tx;
+    }
+
+    private ulong NextBeginTimestamp()
+        => _clock is MvccClock mvccClock
+            ? mvccClock.GetBeginTimestamp()
+            : _clock.GetTimestamp(static _ => { });
+
+    private bool IsVisibleTo(MvccRowVersion version, MvccTransaction tx)
+        => IsBeginVisible(version, tx) && IsEndVisible(version, tx);
+
+    private bool IsBeginVisible(MvccRowVersion version, MvccTransaction tx)
+    {
+        if (version.Begin is null)
+            return true;
+
+        var begin = version.Begin.Value;
+        if (begin.IsTimestamp)
+            return begin.Value <= tx.BeginTimestamp;
+
+        if (begin.Value == tx.Id.Value)
+            return true;
+
+        return LookupCreatorVisibility(begin.Value, tx);
+    }
+
+    private bool IsEndVisible(MvccRowVersion version, MvccTransaction tx)
+    {
+        // True means the version is still live for this reader (deletion not yet visible).
+        if (version.End is null)
+            return true;
+
+        var end = version.End.Value;
+        if (end.IsTimestamp)
+            return end.Value > tx.BeginTimestamp;
+
+        if (end.Value == tx.Id.Value)
+            return false;
+
+        return !LookupCreatorVisibility(end.Value, tx);
+    }
+
+    private bool LookupCreatorVisibility(ulong otherTxId, MvccTransaction reader)
+    {
+        if (_transactions.TryGetValue(otherTxId, out var other))
+        {
+            return other.State switch
+            {
+                MvccTransactionState.Committed =>
+                    other.CommitTimestamp is { } cts && cts <= reader.BeginTimestamp,
+                MvccTransactionState.Preparing =>
+                    other.CommitTimestamp is { } pts && pts <= reader.BeginTimestamp,
+                MvccTransactionState.Active => false,
+                MvccTransactionState.Aborted => false,
+                _ => false,
+            };
+        }
+
+        if (_finalizedStates.TryGetValue(otherTxId, out var finalized))
+        {
+            if (finalized != MvccTransactionState.Committed)
+                return false;
+            return _finalizedCommitTimestamps.TryGetValue(otherTxId, out var cts)
+                && cts <= reader.BeginTimestamp;
+        }
+
+        return false;
+    }
+
+    private bool IsWriteWriteConflict(MvccTransaction tx, MvccRowVersion version)
+    {
+        if (version.End is null)
+            return false;
+
+        var end = version.End.Value;
+        if (end.IsTimestamp)
+            return end.Value > tx.BeginTimestamp;
+
+        if (end.Value == tx.Id.Value)
+            return false;
+
+        if (_transactions.TryGetValue(end.Value, out var other))
+        {
+            return other.State is MvccTransactionState.Active
+                or MvccTransactionState.Preparing
+                or MvccTransactionState.Committed;
+        }
+
+        if (_finalizedStates.TryGetValue(end.Value, out var finalized)
+            && finalized == MvccTransactionState.Committed
+            && _finalizedCommitTimestamps.TryGetValue(end.Value, out var cts))
+        {
+            return cts > tx.BeginTimestamp;
+        }
+
+        return false;
     }
 
     private void ClearExclusive(MvccTxId id)
@@ -283,6 +546,27 @@ internal sealed class MvStore
                 lowestActiveBegin = Math.Min(lowestActiveBegin, active.BeginTimestamp);
         }
 
-        _committedWriteHistory.RemoveAll(entry => entry.CommitTs < lowestActiveBegin);
+        foreach (var (rowId, chain) in _rows.ToArray())
+        {
+            chain.RemoveAll(version =>
+                version.End is { IsTimestamp: true, Value: var endTs }
+                && endTs < lowestActiveBegin);
+
+            if (chain.Count == 0)
+                _rows.Remove(rowId);
+        }
+
+        if (_finalizedStates.Count > 4096)
+        {
+            var stale = _finalizedCommitTimestamps
+                .Where(pair => pair.Value < lowestActiveBegin)
+                .Select(pair => pair.Key)
+                .ToArray();
+            foreach (var key in stale)
+            {
+                _finalizedStates.Remove(key);
+                _finalizedCommitTimestamps.Remove(key);
+            }
+        }
     }
 }

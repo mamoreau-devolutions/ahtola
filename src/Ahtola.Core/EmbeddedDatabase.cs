@@ -1829,7 +1829,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         long version,
         PragmaHeaderMetadata? pragmaHeader = null,
         bool forceFullRewrite = false,
-        TimeSpan busyTimeout = default)
+        TimeSpan busyTimeout = default,
+        bool concurrent = false)
     {
         lock (_gate)
         {
@@ -1837,7 +1838,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 throw new EmbeddedSqlException("attempt to write a readonly database");
 
             if (_version != version)
+            {
+                // Concurrent MVCC writers that lost the catalog race after their
+                // store-level WW check still cannot safely replace the live catalog
+                // until row-level merge is complete — surface a WW conflict, not busy.
+                if (concurrent)
+                    throw new EmbeddedWriteWriteConflictException(
+                        "write-write conflict: concurrent transaction catalog is stale");
                 throw new EmbeddedSqlException("database is locked");
+            }
 
             if (_fileStore is null)
             {
@@ -43434,7 +43443,8 @@ public sealed class EmbeddedConnection : IDisposable
                         ? null
                         : state.PragmaHeader,
                     state.ForceFullCatalogRewrite,
-                    busyTimeout: BusyTimeout);
+                    busyTimeout: BusyTimeout,
+                    concurrent: _transactionIsConcurrent);
             }
             catch (EmbeddedPostCommitMaintenanceException)
             {
