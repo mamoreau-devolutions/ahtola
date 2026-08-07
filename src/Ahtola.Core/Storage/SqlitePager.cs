@@ -66,6 +66,7 @@ public sealed class SqlitePager : IDisposable
     private readonly string _databasePath;
     private readonly string _walPath;
     private readonly string _journalPath;
+    private readonly string _sharedMemoryPath;
     private readonly SqlitePageStore _pageStore;
     private SqliteWalFile? _wal;
     private readonly SqlitePagerLockManager _lockManager;
@@ -83,6 +84,8 @@ public sealed class SqlitePager : IDisposable
     private SqlitePagerState _state;
     private TimeSpan _busyTimeout;
     private readonly bool _foreignReadOnly;
+    private ISqliteWalSharedMemoryMapping? _walIndexMapping;
+    private SqliteWalIndexSharedMemory? _walIndex;
 
     private SqlitePager(
         IFileSystem fileSystem,
@@ -100,6 +103,7 @@ public sealed class SqlitePager : IDisposable
         _databasePath = databasePath;
         _walPath = walPath;
         _journalPath = databasePath + "-journal";
+        _sharedMemoryPath = string.Concat(Path.GetFullPath(databasePath), "-shm");
         _pageStore = pageStore;
         _wal = wal;
         _journalMode = journalMode;
@@ -107,6 +111,51 @@ public sealed class SqlitePager : IDisposable
         _pageCache = new SqlitePagerReadCache(pageCacheCapacity);
         _recoveryInfo = CreateEmptyRecoveryInfo();
         _visibleRecoveryInfo = CreateEmptyRecoveryInfo();
+    }
+
+    /// <summary>
+    /// Stage 1 WAL-index accessor when the physical pager has mapped <c>-shm</c>.
+    /// Detached from Stages 2–6 lock/reader/writer protocol; ownership remains Stage 0.
+    /// </summary>
+    internal SqliteWalIndexSharedMemory? WalIndex
+    {
+        get
+        {
+            lock (_gate)
+                return _walIndex;
+        }
+    }
+
+    /// <summary>Stage 1 test hook: validate the published index against this pager's WAL.</summary>
+    internal SqliteWalIndexHeaderRegion ReadValidatedWalIndexHeader()
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (_walIndex is null || _wal is null)
+            {
+                throw new InvalidOperationException(
+                    "This SQLite pager has not attached a Stage 1 WAL-index mapping.");
+            }
+
+            return _walIndex.ReadValidatedHeader(_wal);
+        }
+    }
+
+    /// <summary>Stage 1 test hook: resolve a page through the published WAL-index.</summary>
+    internal uint? FindWalIndexFrame(uint pageNumber)
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (_walIndex is null || _wal is null)
+            {
+                throw new InvalidOperationException(
+                    "This SQLite pager has not attached a Stage 1 WAL-index mapping.");
+            }
+
+            return _walIndex.FindFrame(_wal, pageNumber);
+        }
     }
 
     /// <summary>The durable transaction format currently used by this pager.</summary>
@@ -323,6 +372,7 @@ public sealed class SqlitePager : IDisposable
                 effectiveLockManager,
                 pageCacheCapacity);
             pager.InitializeCommittedView(wal.ScanRecovery());
+            pager.AttachAndPublishWalIndex(readOnly: false);
             pager._lockGeneration = createLock.PublishStorageChange();
             pager._state = SqlitePagerState.Ready;
             pager._busyTimeout = busyTimeout ?? TimeSpan.Zero;
@@ -512,6 +562,8 @@ public sealed class SqlitePager : IDisposable
                                     "SQLite WAL changed between authenticated recovery scanning and tail repair.");
                             }
                         }
+
+                        pager.AttachAndPublishWalIndex(readOnly);
                     }
                     else if (journalMode == SqliteJournalMode.Delete)
                     {
@@ -969,9 +1021,11 @@ public sealed class SqlitePager : IDisposable
                     createdWal = null;
                     _recoveryInfo = RequireWal().ScanRecovery();
                     _visibleRecoveryInfo = _recoveryInfo;
+                    AttachAndPublishWalIndex(readOnly: false);
                 }
                 else
                 {
+                    DisposeWalIndex();
                     _wal?.Dispose();
                     _wal = null;
                     _recoveryInfo = CreateEmptyRecoveryInfo();
@@ -1135,6 +1189,11 @@ public sealed class SqlitePager : IDisposable
                     _recoveryInfo = CreateEmptyRecoveryInfo();
                     _visibleRecoveryInfo = CreateRecoveryVisibleInfo(_recoveryInfo);
                     retainedCommittedFrameCount = 0;
+                    PublishWalIndexFromCurrentWal();
+                }
+                else
+                {
+                    PublishWalIndexFromCurrentWal();
                 }
 
                 _pageCache.Clear();
@@ -1170,6 +1229,7 @@ public sealed class SqlitePager : IDisposable
                 _activeTransaction = null;
                 _activeReadTransactions.Clear();
                 _state = SqlitePagerState.Disposed;
+                DisposeWalIndex();
                 _wal?.Dispose();
                 _pageStore.Dispose();
             }
@@ -1229,6 +1289,7 @@ public sealed class SqlitePager : IDisposable
                 }
 
                 PublishCommittedTransaction(transaction, recovery);
+                PublishWalIndexFromCurrentWal();
                 _lockGeneration = transaction.PublishStorageChange();
                 _activeTransaction = null;
                 _state = SqlitePagerState.Ready;
@@ -1868,6 +1929,88 @@ public sealed class SqlitePager : IDisposable
         _recoveryInfo = recovery;
         _visibleRecoveryInfo = recovery;
         ValidateVisiblePageSources();
+    }
+
+    /// <summary>
+    /// Stage 1: map physical <c>-shm</c> and publish a dual-header WAL-index that
+    /// matches an independent WAL scan. Stage 0 ownership is unchanged.
+    /// </summary>
+    private void AttachAndPublishWalIndex(bool readOnly)
+    {
+        if (_foreignReadOnly
+            || !_lockManager.UsesFileBackedWalLocks
+            || _wal is null
+            || _journalMode != SqliteJournalMode.Wal)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_walIndex is null)
+            {
+                if (readOnly)
+                {
+                    if (!File.Exists(_sharedMemoryPath))
+                        return;
+
+                    var length = new FileInfo(_sharedMemoryPath).Length;
+                    if (length == 0)
+                        return;
+
+                    _walIndexMapping = PhysicalFileSystem.Instance.OpenSharedMemory(
+                        _sharedMemoryPath,
+                        FileOpenMode.OpenExisting,
+                        readOnly: true);
+                    _walIndex = new SqliteWalIndexSharedMemory(_walIndexMapping);
+                    _ = _walIndex.ReadValidatedHeader(_wal);
+                    return;
+                }
+
+                _walIndexMapping = PhysicalFileSystem.Instance.OpenSharedMemory(
+                    _sharedMemoryPath,
+                    FileOpenMode.OpenOrCreate,
+                    readOnly: false);
+                _walIndex = new SqliteWalIndexSharedMemory(_walIndexMapping);
+            }
+
+            if (!readOnly)
+                PublishWalIndexFromCurrentWal();
+        }
+        catch
+        {
+            DisposeWalIndex();
+            throw;
+        }
+    }
+
+    private void PublishWalIndexFromCurrentWal()
+    {
+        if (_walIndex is null || _wal is null || _walIndexMapping is null)
+            return;
+        if (_walIndexMapping.IsReadOnly)
+        {
+            throw new InvalidOperationException(
+                "Cannot publish a SQLite WAL-index through a read-only shared-memory mapping.");
+        }
+
+        var mainPageCount = _committedPageCount != 0
+            ? _committedPageCount
+            : _pageStore.PageCount;
+        if (mainPageCount == 0)
+        {
+            throw new InvalidDataException(
+                "Cannot publish a SQLite WAL-index without a nonzero main-database page count.");
+        }
+
+        _walIndex.RebuildFromWal(_wal, mainPageCount);
+    }
+
+    private void DisposeWalIndex()
+    {
+        _walIndex = null;
+        _walIndexMapping?.Dispose();
+        _walIndexMapping = null;
     }
 
     private void ValidatePageOneImage(

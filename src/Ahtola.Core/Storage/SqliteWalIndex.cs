@@ -17,7 +17,9 @@ public enum SqliteWalIndexByteOrder
 /// <remarks>
 /// This capability is deliberately separate from <see cref="IFileSystem"/> until
 /// a production implementation provides mapped, cross-process-visible memory on
-/// every supported physical platform. No managed pager currently consumes it.
+/// every supported physical platform. The physical pager consumes
+/// <see cref="PhysicalFileSystem"/> mappings for Stage 1 WAL-index publication
+/// under Stage 0 ownership; Stages 2–6 still attach reader/writer protocols.
 /// </remarks>
 public interface ISqliteWalSharedMemoryFileSystem
 {
@@ -1279,17 +1281,23 @@ public sealed class SqliteWalIndexSharedMemory
 
     private void EnsureWritableBlocks(int blockCount)
     {
-        EnsureMappedBlocks(blockCount: 1);
-        var requiredLength = checked((long)blockCount * SqliteWalIndexLayout.BlockSize);
-        if (_mapping.Length >= requiredLength)
-            return;
+        if (blockCount <= 0)
+            throw new ArgumentOutOfRangeException(nameof(blockCount), "SQLite WAL-index block count must be positive.");
 
-        _mapping.Write(requiredLength - 1, stackalloc byte[1]);
+        // Grow first: a freshly created lock-carrier -shm is zero-length until the
+        // pager (or SQLite) publishes the first WAL-index region.
+        var requiredLength = checked((long)blockCount * SqliteWalIndexLayout.BlockSize);
         if (_mapping.Length < requiredLength)
         {
-            throw new InvalidDataException(
-                $"SQLite WAL-index mapping did not grow to its required {requiredLength} bytes.");
+            _mapping.Write(requiredLength - 1, stackalloc byte[1]);
+            if (_mapping.Length < requiredLength)
+            {
+                throw new InvalidDataException(
+                    $"SQLite WAL-index mapping did not grow to its required {requiredLength} bytes.");
+            }
         }
+
+        EnsureMappedBlocks(blockCount);
     }
 
     private void PublishFrameIndex(uint frameNumber, uint pageNumber)

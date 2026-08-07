@@ -7,12 +7,10 @@ namespace Ahtola.Tests;
 
 /// <summary>
 /// Characterizes the WAL interoperability contract documented in
-/// <c>docs/wal-interoperability-contract.md</c>. These tests pin the observable
-/// Stage 0 boundary between the managed pager and ordinary SQLite / Turso
-/// clients: the <c>-shm</c> file is a byte-lock carrier only, managed roles
-/// occupy exactly SQLite's reserved lock-byte range, and managed lock demands
-/// are deliberately stricter than the shared Turso/SQLite WAL protocol until
-/// later stages land.
+/// <c>docs/wal-interoperability-contract.md</c>. These tests pin Stage 0
+/// ownership and lock-byte roles, plus Stage 1 pager WAL-index publication
+/// under that ownership. Concurrent stock-SQLite interoperability still waits
+/// on Stages 2–6.
 /// </summary>
 /// <remarks>
 /// External contention is produced from a worker process because POSIX record
@@ -31,7 +29,7 @@ public class SqliteWalInteroperabilityContractTests
 
     [Test]
     [NonParallelizable]
-    public void ManagedWalActivityNeverMaterializesASqliteWalIndex()
+    public void ManagedWalCommitPublishesValidatedSqliteWalIndex()
     {
         var workDirectory = CreateWorkDirectory();
         try
@@ -47,15 +45,22 @@ public class SqliteWalInteroperabilityContractTests
                 SqliteWalHeader.Size,
                 "the managed pager must have appended WAL frames for this characterization to be meaningful");
             File.Exists(sharedMemoryPath).Should().BeTrue();
-            new FileInfo(sharedMemoryPath).Length.Should().Be(
-                0,
-                "the managed pager uses -shm purely as a byte-lock carrier and never writes a WAL-index");
+            new FileInfo(sharedMemoryPath).Length.Should().BeGreaterThanOrEqualTo(
+                SqliteWalIndexLayout.HeaderRegionSize,
+                "Stage 1 physical pager publishes a real SQLite WAL-index into -shm under ownership");
+
+            pager.WalIndex.Should().NotBeNull();
+            var region = pager.ReadValidatedWalIndexHeader();
+            region.Header.MaximumFrame.Should().BeGreaterThan(0u);
+            pager.FindWalIndexFrame(pageNumber: 2).Should().NotBeNull(
+                "frame lookup via the published index must agree with the committed page");
 
             pager.CheckpointToMainStoreAndResetWal();
 
-            new FileInfo(sharedMemoryPath).Length.Should().Be(
-                0,
-                "checkpointing publishes no WAL-index header, read marks, or backfill counter");
+            new FileInfo(sharedMemoryPath).Length.Should().BeGreaterThanOrEqualTo(
+                SqliteWalIndexLayout.HeaderRegionSize,
+                "checkpoint/reset republishes a coherent zero-frame WAL-index rather than truncating -shm to a lock-only carrier");
+            pager.ReadValidatedWalIndexHeader().Header.MaximumFrame.Should().Be(0u);
         }
         finally
         {

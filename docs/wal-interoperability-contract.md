@@ -368,11 +368,17 @@ ranges, timeout reporting, and release on disposal. This primitive is not
 connected to `SqliteWalSharedMemoryLocks`, normal `-shm` activity, the pager,
 or any read-mark, writer, or checkpoint role.
 
+**Stage 1 pager attach (in progress):** the physical managed pager maps `-shm`
+and publishes/rebuilds a dual-header WAL-index on create/open, commit, and
+checkpoint reset under Stage 0 ownership. Frame lookup can validate against the
+WAL scan. This does **not** yet attach Stage 2 read marks, Stage 3 writer roles
+beyond ownership locks, or multi-process stock-SQLite interoperability.
+
 **Remaining pager gate:** attach the detached reader protocol to managed
 connections; implement runtime writer/checkpointer coordination; and run
 differential cross-process stress while all of those mechanisms are attached
-to the pager. Until all of those are complete, the managed pager has no shared
-runtime WAL-index behavior or concurrent stock-SQLite interoperability.
+to the pager. Until Stages 2–6 complete, concurrent stock-SQLite
+interoperability is still not claimed.
 
 ### Stage 2 — read marks and the reader protocol
 
@@ -534,7 +540,7 @@ the Stage 0 boundary:
 
 | Test | Contract clause |
 | --- | --- |
-| `ManagedWalActivityNeverMaterializesASqliteWalIndex` | §1.2 — `-shm` stays zero bytes across commits and checkpoints |
+| `ManagedWalCommitPublishesValidatedSqliteWalIndex` | Stage 1 — physical pager publishes dual-header WAL-index under Stage 0 ownership |
 | `ManagedWriterClaimsSqliteWalWriteLockByte` | §1.2 — the writer occupies byte 120 |
 | `ManagedWritableOpenClaimsSqliteWalRecoveryLockByte` | §1.2, §1.6 — a writable open occupies byte 122 |
 | `ManagedReaderClaimsTheFirstFreeSqliteReadMarkLockByte` | §1.2 — readers walk bytes 123–127 (Windows only; see below) |
