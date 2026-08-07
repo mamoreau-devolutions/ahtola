@@ -93,10 +93,13 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 4. Stop demanding the entire `[120, 8)` range for every checkpoint once protocol is live (keep Stage 0 ownership separately).
 5. Recovery rebuild under full recovery lock set when tails are dirty.
 
+**Partial landing:** commit path uses incremental `PublishCommittedFrames` when the prior dual-header is valid (Stage 3 writer publication order), falling back to `RebuildFromWal`. Full coordinator attach (CKPT_LOCK-only checkpoint, drop coarse `[120,8)` demand) remains.
+
 **Exit criteria**
 
-- [ ] Managed writer publish + passive/full checkpoint agree with independent scan and header fields.
-- [ ] Detached Stage 3 process-isolation tests remain green when invoked through pager hooks where applicable.
+- [x] Managed writer incremental publish agrees with independent scan after commit (under Stage 0 writer lock).
+- [ ] Passive/full checkpoint via coordinator roles + `nBackfill` accounting on pager.
+- [ ] Stop coarse full-range checkpoint lock demand.
 - [ ] Still no ownership relaxation.
 
 ---

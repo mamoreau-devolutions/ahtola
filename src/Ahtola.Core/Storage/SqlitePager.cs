@@ -1365,6 +1365,8 @@ public sealed class SqlitePager : IDisposable
 
                 var wal = RequireWal();
                 ValidateWalHasNotChanged();
+                var priorWalIndexHeader = TryReadValidatedWalIndexHeader(wal);
+                var priorCommittedFrameCount = _committedFrameCount;
                 for (var index = 0; index < transaction.WriteOrder.Count; index++)
                 {
                     var pageNumber = transaction.WriteOrder[index];
@@ -1384,7 +1386,11 @@ public sealed class SqlitePager : IDisposable
                 }
 
                 PublishCommittedTransaction(transaction, recovery);
-                PublishWalIndexFromCurrentWal();
+                PublishWalIndexAfterCommit(
+                    wal,
+                    priorWalIndexHeader,
+                    priorCommittedFrameCount,
+                    recovery);
                 _lockGeneration = transaction.PublishStorageChange();
                 _activeTransaction = null;
                 _state = SqlitePagerState.Ready;
@@ -2099,6 +2105,66 @@ public sealed class SqlitePager : IDisposable
         }
 
         _walIndex.RebuildFromWal(_wal, mainPageCount);
+    }
+
+    private SqliteWalIndexHeader? TryReadValidatedWalIndexHeader(SqliteWalFile wal)
+    {
+        if (_walIndex is null || _walIndexMapping is null || _walIndexMapping.IsReadOnly)
+            return null;
+
+        try
+        {
+            return _walIndex.ReadValidatedHeader(wal).Header;
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Stage 3 writer publication: append is already durable; publish frame/hash
+    /// entries and dual headers incrementally when the prior index is trustworthy,
+    /// otherwise rebuild from the WAL scan.
+    /// </summary>
+    private void PublishWalIndexAfterCommit(
+        SqliteWalFile wal,
+        SqliteWalIndexHeader? priorHeader,
+        long priorCommittedFrameCount,
+        SqliteWalRecoveryInfo recovery)
+    {
+        if (_walIndex is null || _walIndexMapping is null)
+            return;
+        if (_walIndexMapping.IsReadOnly)
+        {
+            throw new InvalidOperationException(
+                "Cannot publish a SQLite WAL-index through a read-only shared-memory mapping.");
+        }
+
+        if (priorHeader is not null
+            && priorHeader.MaximumFrame == (uint)priorCommittedFrameCount
+            && recovery.LastCommittedFrameNumber > priorCommittedFrameCount)
+        {
+            var frames = new List<SqliteWalFrame>(
+                checked((int)(recovery.LastCommittedFrameNumber - priorCommittedFrameCount)));
+            for (var frameNumber = priorCommittedFrameCount + 1;
+                 frameNumber <= recovery.LastCommittedFrameNumber;
+                 frameNumber++)
+            {
+                frames.Add(wal.ReadFrame(frameNumber));
+            }
+
+            var commitFrame = frames[^1].Header;
+            var committedHeader = priorHeader.WithCommittedFrames(
+                checked((uint)recovery.LastCommittedFrameNumber),
+                recovery.LastCommittedDatabaseSizeInPages,
+                commitFrame.Checksum1,
+                commitFrame.Checksum2);
+            _walIndex.PublishCommittedFrames(priorHeader, frames, committedHeader, wal);
+            return;
+        }
+
+        PublishWalIndexFromCurrentWal();
     }
 
     private void DisposeWalIndex()
