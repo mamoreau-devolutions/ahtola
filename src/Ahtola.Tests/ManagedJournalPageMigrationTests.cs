@@ -194,7 +194,6 @@ public sealed class ManagedJournalPageMigrationTests
     [TestCase("PERSIST")]
     [TestCase("MEMORY")]
     [TestCase("OFF")]
-    [TestCase("MVCC")]
     public void UnsupportedJournalModePreservesTheCurrentWalMode(string requestedMode)
     {
         var fileSystem = new InMemoryFileSystem();
@@ -205,6 +204,18 @@ public sealed class ManagedJournalPageMigrationTests
 
         ReadValue(connection, $"PRAGMA journal_mode={requestedMode};").Should().Be(SqlValue.Text("wal"));
         ReadValue(connection, "PRAGMA journal_mode;").Should().Be(SqlValue.Text("wal"));
+    }
+
+    [Test]
+    public void MvccJournalModeIsAcceptedOnAWalDatabase()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using var database = EmbeddedDatabase.OpenFile("mvcc-journal-mode.db", fileSystem);
+        using var connection = database.Connect();
+
+        ReadValue(connection, "PRAGMA journal_mode=WAL;").Should().Be(SqlValue.Text("wal"));
+        ReadValue(connection, "PRAGMA journal_mode=MVCC;").Should().Be(SqlValue.Text("mvcc"));
+        ReadValue(connection, "PRAGMA journal_mode;").Should().Be(SqlValue.Text("mvcc"));
     }
 
     [Test]

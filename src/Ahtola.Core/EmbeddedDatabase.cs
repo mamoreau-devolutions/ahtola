@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Ahtola.Core.Compilation;
 using Ahtola.Core.Execution;
+using Ahtola.Core.Mvcc;
 using Ahtola.Core.Parsing;
 using Ahtola.Core.Storage;
 
@@ -288,6 +289,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
     internal int? _inMemoryPageSize;
     private uint _maxPageCount = 4294967294;
     private readonly EmbeddedTransactionLock _transactionLock;
+    /// <summary>
+    /// Opt-in Turso MVCC store. When non-null, <c>PRAGMA journal_mode</c> reports
+    /// <c>mvcc</c> and <c>BEGIN CONCURRENT</c> is accepted.
+    /// </summary>
+    private MvStore? _mvStore;
 
     public EmbeddedDatabase()
     {
@@ -424,10 +430,29 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
     /// <summary>
     /// Whether an EXCLUSIVE transaction also excludes readers. SQLite only does
-    /// that under a rollback journal; in WAL mode EXCLUSIVE behaves as IMMEDIATE
-    /// because WAL readers never contend with the writer.
+    /// that under a rollback journal; in WAL and MVCC modes EXCLUSIVE behaves as
+    /// IMMEDIATE because readers never contend with the writer.
     /// </summary>
-    internal bool ExclusiveTransactionsExcludeReaders => GetJournalMode() != SqliteJournalMode.Wal;
+    internal bool ExclusiveTransactionsExcludeReaders
+    {
+        get
+        {
+            var mode = GetJournalMode();
+            return mode is not (SqliteJournalMode.Wal or SqliteJournalMode.Mvcc);
+        }
+    }
+
+    /// <summary>Whether Turso MVCC mode is enabled on this database.</summary>
+    internal bool IsMvccEnabled
+    {
+        get { lock (_gate) return _mvStore is not null; }
+    }
+
+    /// <summary>The per-database MVCC store, or null when classic mode is active.</summary>
+    internal MvStore? MvStore
+    {
+        get { lock (_gate) return _mvStore; }
+    }
 
     internal bool IsReadOnly => _readOnly;
 
@@ -1992,13 +2017,66 @@ public sealed partial class EmbeddedDatabase : IDisposable
     internal SqliteJournalMode GetJournalMode()
     {
         lock (_gate)
+        {
+            if (_mvStore is not null)
+                return SqliteJournalMode.Mvcc;
             return _fileStore is null ? SqliteJournalMode.Delete : _fileStore.JournalMode;
+        }
+    }
+
+    /// <summary>
+    /// Enables Turso MVCC mode. Attaches an <see cref="MvStore"/> and reports
+    /// <c>journal_mode=mvcc</c>. File-backed databases keep their durable WAL/DELETE
+    /// pager underneath for page I/O; the MVCC header marker (version 255) and
+    /// logical-log durability land in a later phase.
+    /// </summary>
+    internal SqliteJournalMode EnableMvccMode()
+    {
+        lock (_gate)
+            return EnableMvccModeLocked(BusyTimeout);
+    }
+
+    private SqliteJournalMode EnableMvccModeLocked(TimeSpan busyTimeout)
+    {
+        if (_readOnly)
+            throw new EmbeddedSqlException("attempt to write a readonly database");
+        if (_activeTransactions != 0)
+            throw new EmbeddedSqlException("cannot change journal mode while a transaction is active");
+        if (_activeStatementReaders != 0)
+            throw new EmbeddedSqlException("cannot change journal mode while a SQL statement is in progress");
+        if (_activeBlobMutations.Count != 0)
+            throw new EmbeddedSqlException("cannot change journal mode while a blob handle is active");
+        if (_mvStore is not null)
+            return SqliteJournalMode.Mvcc;
+
+        // File-backed MVCC still needs a WAL open for page durability (Turso).
+        if (_fileStore is not null
+            && _fileStore.JournalMode != SqliteJournalMode.Wal
+            && _fileSystem is not null
+            && _fileCatalogWriteLock is not null)
+        {
+            lock (_fileCatalogWriteLock)
+            {
+                using var catalogWriteLease = EnterPhysicalFileCatalogWriteLock(_fileSystem, _databasePath);
+                EnsureFileCatalogVersionCurrent(busyTimeout);
+                using var writeRegistration = RegisterCatalogWrite(_databasePath);
+                _ = _fileStore.SwitchJournalMode(SqliteJournalMode.Wal);
+                _fileCatalogVersion = ReadFileCatalogVersion(_fileSystem, _databasePath);
+            }
+        }
+
+        _mvStore = new MvStore();
+        _version++;
+        return SqliteJournalMode.Mvcc;
     }
 
     internal SqliteJournalMode SwitchJournalMode(SqliteJournalMode journalMode, TimeSpan busyTimeout = default)
     {
         lock (_gate)
         {
+            if (journalMode == SqliteJournalMode.Mvcc)
+                return EnableMvccModeLocked(busyTimeout);
+
             if (_fileStore is null)
                 throw new EmbeddedSqlException("In-memory databases support only MEMORY journal mode.");
             if (_readOnly)
@@ -2011,6 +2089,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 throw new EmbeddedSqlException("cannot change journal mode while a blob handle is active");
             if (_fileSystem is null || _fileCatalogWriteLock is null)
                 throw new InvalidOperationException("The managed file catalog persistence state is not initialized.");
+
+            // Leaving MVCC returns to the underlying durable pager mode.
+            _mvStore = null;
 
             lock (_fileCatalogWriteLock)
             {
@@ -38949,6 +39030,9 @@ public sealed class EmbeddedConnection : IDisposable
     private EmbeddedDatabase? _autocommitWriteReservation;
     private readonly List<EmbeddedDatabase> _writeReservations = [];
     private bool _transactionOpenedBySavepoint;
+    /// <summary>When set, the open SQL transaction is a Turso <c>BEGIN CONCURRENT</c> MVCC tx.</summary>
+    private bool _transactionIsConcurrent;
+    private readonly Dictionary<EmbeddedDatabase, MvccTxId> _mvccTransactions = [];
     private readonly List<SavepointEntry> _savepoints = [];
     private long _lastInsertRowId;
     private bool _queryOnly;
@@ -43058,7 +43142,7 @@ public sealed class EmbeddedConnection : IDisposable
 
     private void BeginTransaction(bool openedBySavepoint, TransactionMode mode)
     {
-        if (mode == TransactionMode.Concurrent)
+        if (mode == TransactionMode.Concurrent && !_database.IsMvccEnabled)
         {
             throw new EmbeddedSqlException(
                 "Concurrent transaction mode is only supported when MVCC is enabled");
@@ -43071,29 +43155,45 @@ public sealed class EmbeddedConnection : IDisposable
             .Prepend(_database)
             .ToArray();
 
-        // SQLite takes the write lock on every database in the transaction when the
-        // mode is IMMEDIATE or EXCLUSIVE, before anything else can fail. Acquiring
-        // first means a competing writer surfaces busy at BEGIN, which is the whole
-        // reason applications choose those modes.
-        if (mode != TransactionMode.Deferred)
+        var concurrent = mode == TransactionMode.Concurrent;
+        // CONCURRENT does not take the classic write reservation (Turso multi-writer).
+        // IMMEDIATE/EXCLUSIVE still do — including when MVCC is enabled (exclusive MVCC tx).
+        if (mode is TransactionMode.Immediate or TransactionMode.Exclusive)
             AcquireTransactionWriteReservations(databases, mode);
 
         var states = new Dictionary<EmbeddedDatabase, TransactionDatabaseState>();
+        var mvccTxs = new Dictionary<EmbeddedDatabase, MvccTxId>();
         try
         {
             foreach (var database in databases)
             {
-                if (mode == TransactionMode.Deferred)
+                if (mode == TransactionMode.Deferred || concurrent)
                     database.TransactionLock.ThrowIfReadBlocked(this, BusyTimeout);
                 var snapshot = database.CreateTransactionSnapshot(busyTimeout: BusyTimeout);
                 states.Add(database, new TransactionDatabaseState(
                     snapshot.Catalog,
                     snapshot.Version,
                     snapshot.PragmaHeader));
+
+                if (concurrent && database.MvStore is { } store)
+                {
+                    var tx = store.BeginTransaction();
+                    mvccTxs.Add(database, tx.Id);
+                }
+                else if (!concurrent
+                    && database.MvStore is { } exclusiveStore
+                    && mode is TransactionMode.Immediate or TransactionMode.Exclusive)
+                {
+                    // Write-mode statements under MVCC take an exclusive MVCC tx (Turso).
+                    var tx = exclusiveStore.BeginExclusiveTransaction();
+                    mvccTxs.Add(database, tx.Id);
+                }
             }
         }
         catch
         {
+            foreach (var (database, txId) in mvccTxs)
+                database.MvStore?.Rollback(txId);
             foreach (var database in states.Keys)
                 database.EndTransaction();
             ReleaseTransactionWriteReservations();
@@ -43104,6 +43204,10 @@ public sealed class EmbeddedConnection : IDisposable
         _transactionWriteDatabase = null;
         _transactionMutationDatabase = null;
         _transactionOpenedBySavepoint = openedBySavepoint;
+        _transactionIsConcurrent = concurrent;
+        _mvccTransactions.Clear();
+        foreach (var pair in mvccTxs)
+            _mvccTransactions[pair.Key] = pair.Value;
         _savepoints.Clear();
     }
 
@@ -43228,6 +43332,11 @@ public sealed class EmbeddedConnection : IDisposable
     {
         if (_transactionDatabases is not null)
         {
+            // BEGIN CONCURRENT uses the MVCC store for multi-writer isolation and
+            // must not take the classic single-writer reservation.
+            if (_transactionIsConcurrent)
+                return;
+
             // A DEFERRED transaction takes its write reservation here, at the first
             // write, exactly where SQLite escalates to RESERVED. IMMEDIATE and
             // EXCLUSIVE already hold it, so this is a no-op for them.
@@ -43293,6 +43402,14 @@ public sealed class EmbeddedConnection : IDisposable
             ResetTransactionState();
             FireRollbackHook();
             throw new EmbeddedCommitVetoException();
+        }
+
+        // MVCC commit protocol first (clock + WW conflict), then classic catalog publish.
+        foreach (var (database, txId) in _mvccTransactions.ToArray())
+        {
+            if (database.MvStore is { } store)
+                store.Commit(txId);
+            _mvccTransactions.Remove(database);
         }
 
         var persistentChanges = changed
@@ -43508,32 +43625,67 @@ public sealed class EmbeddedConnection : IDisposable
     {
         var database = ResolvePragmaDatabase(statement.Schema);
         var isTempDatabase = ReferenceEquals(database, _tempDatabase);
-        var current = isTempDatabase
-            ? "wal"
-            : database.IsFileBacked
-            ? database.GetJournalMode().ToString().ToLowerInvariant()
-            : "memory";
+        var current = DescribeJournalMode(database, isTempDatabase);
         if (statement.Mode is null)
             return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
 
         // Turso's JournalMode opcode keeps non-main databases in their existing mode.
         // The connection-local temp catalog has no managed pager, but SQL observes its
-        // WAL-compatible mode rather than that implementation detail.
+        // WAL-compatible mode rather than that implementation detail. temp.journal_mode=mvcc
+        // is ignored (still reports wal) — see temp_tables_mvcc.sqltest.
         if (isTempDatabase)
             return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
-        if (!database.IsFileBacked)
+
+        if (!TryParseJournalMode(statement.Mode, out var requested))
             return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
-        if (!Enum.TryParse<SqliteJournalMode>(statement.Mode, ignoreCase: true, out var requested))
-            return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
-        if (requested == database.GetJournalMode())
-            return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
+        if (requested == database.GetJournalMode()
+            || (requested == SqliteJournalMode.Mvcc && database.IsMvccEnabled))
+        {
+            return new ExecutionResult(
+                ["journal_mode"],
+                [[SqlValue.Text(DescribeJournalMode(database, isTempDatabase: false))]],
+                0);
+        }
+
         if (_queryOnly || database.IsReadOnly)
             return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
         if (_transactionDatabases is not null)
             throw new EmbeddedSqlException("cannot change journal mode while a transaction is active");
 
+        // In-memory main DBs only accept MVCC as a logical mode switch; other modes stay "memory".
+        if (!database.IsFileBacked)
+        {
+            if (requested != SqliteJournalMode.Mvcc)
+                return new ExecutionResult(["journal_mode"], [[SqlValue.Text(current)]], 0);
+            var memoryResult = database.EnableMvccMode().ToString().ToLowerInvariant();
+            return new ExecutionResult(["journal_mode"], [[SqlValue.Text(memoryResult)]], 0);
+        }
+
         var result = database.SwitchJournalMode(requested, busyTimeout: BusyTimeout).ToString().ToLowerInvariant();
         return new ExecutionResult(["journal_mode"], [[SqlValue.Text(result)]], 0);
+    }
+
+    private static string DescribeJournalMode(EmbeddedDatabase database, bool isTempDatabase)
+    {
+        if (isTempDatabase)
+            return "wal";
+        if (database.IsMvccEnabled)
+            return "mvcc";
+        if (!database.IsFileBacked)
+            return "memory";
+        return database.GetJournalMode().ToString().ToLowerInvariant();
+    }
+
+    private static bool TryParseJournalMode(string mode, out SqliteJournalMode journalMode)
+    {
+        if (mode.Equals("experimental_mvcc", StringComparison.OrdinalIgnoreCase))
+        {
+            journalMode = SqliteJournalMode.Mvcc;
+            return true;
+        }
+
+        return Enum.TryParse(mode, ignoreCase: true, out journalMode)
+            && journalMode is SqliteJournalMode.Delete or SqliteJournalMode.Wal or SqliteJournalMode.Mvcc;
     }
 
     private ExecutionResult ExecutePragmaPageSize(PragmaPageSizeStatement statement)
@@ -43953,6 +44105,14 @@ public sealed class EmbeddedConnection : IDisposable
         _transactionWriteDatabase = null;
         _transactionMutationDatabase = null;
         _transactionOpenedBySavepoint = false;
+        _transactionIsConcurrent = false;
+        if (_mvccTransactions.Count != 0)
+        {
+            foreach (var (database, txId) in _mvccTransactions)
+                database.MvStore?.Rollback(txId);
+            _mvccTransactions.Clear();
+        }
+
         _savepoints.Clear();
         _deferForeignKeys = false;
         ReleaseTransactionWriteReservations();

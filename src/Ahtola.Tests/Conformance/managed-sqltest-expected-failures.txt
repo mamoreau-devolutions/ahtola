@@ -4,14 +4,7 @@
 #   dotnet test src/Ahtola.Tests/Ahtola.Tests.csproj \
 #     --filter FullyQualifiedName~RegenerateExpectedFailures -- NUnit.Explicit=true
 
-delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'memory'
-mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'
-mvcc-begin-within-concurrent.sqltest::begin-deferred-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'
-mvcc-begin-within-concurrent.sqltest::begin-concurrent-inside-begin-concurrent-errors | error 'Concurrent transaction mode is only supported when MVCC is enabled' does not match pattern 'cannot start a transaction within a transaction'
-mvcc-idxdelete-exact-seek.sqltest::mvcc-idxdelete-exact-seek | expected 4 row(s), got 4 row(s); row 0 expected 'mvcc' but was 'wal'
-mvcc-update-noop.sqltest::mvcc-update-self-does-not-delete-rows | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'wal'
-mvcc-update-noop.sqltest::mvcc-update-self-data-intact | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'wal'
-mvcc-update-noop.sqltest::mvcc-update-self-multiple-rows | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'wal'
-mvcc-update-noop.sqltest::mvcc-update-different-value | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'wal'
-on_conflict.sqltest::mvcc-upsert-set-pk-on-conflict-target-resolves | expected 2 row(s), got 2 row(s); row 0 expected 'mvcc' but was 'memory'
-temp_tables_mvcc.sqltest::temp-autoincrement-is-allowed-when-main-db-is-mvcc | expected 3 row(s), got 3 row(s); row 0 expected 'mvcc' but was 'wal'
+# Phase 1 MVCC surface cleared the previous 11 MVCC-mode markers
+# (journal_mode=mvcc + BEGIN CONCURRENT + sequential DML under MvStore).
+# Remaining MVCC depth (row-version chains, durable logical log, checkpoint SM)
+# is tracked in docs/mvcc-port-contract.md — not as silent expected failures.

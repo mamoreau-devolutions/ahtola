@@ -27,10 +27,20 @@ public sealed class ManagedDocumentedBoundaryTests
 
     private static readonly string[] UnsupportedStatements =
     [
-        "BEGIN CONCURRENT",
         "SELECT * FROM fts5vocab('t', 'row')",
         "CREATE VIRTUAL TABLE vt USING fts5(x)",
     ];
+
+    [Test]
+    public void BeginConcurrentRequiresMvccAndSucceedsWhenEnabled()
+    {
+        using var connection = Open();
+        Assert.Throws<SqliteException>(() => Execute(connection, "BEGIN CONCURRENT"));
+
+        Execute(connection, "PRAGMA journal_mode=mvcc;");
+        Execute(connection, "BEGIN CONCURRENT");
+        Execute(connection, "COMMIT");
+    }
 
     [Test]
     [TestCaseSource(nameof(UnsupportedPragmas))]

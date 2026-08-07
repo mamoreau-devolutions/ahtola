@@ -127,18 +127,28 @@ Additional current behavior:
    readers, the single writer, and checkpoints inside the process; the shm bytes
    are a secondary boundary layered underneath it.
 
-### 1.4 MVCC is unsupported
+### 1.4 MVCC mode (Phase 1)
 
-The managed engine does not implement `journal_mode=mvcc`. It has no durable
-row-version lifecycle, logical-log recovery, checkpoint protocol, or
-cross-process snapshot contract for that mode. A physical-database
-`PRAGMA journal_mode=mvcc` request is therefore an unsupported journal-mode
-request: it leaves the current durable mode unchanged and never persists an
-MVCC marker. In-memory databases continue to report their fixed `memory` mode.
+`PRAGMA journal_mode=mvcc` enables Turso-aligned main-memory MVCC on the
+connection's main database (including in-memory databases). The engine attaches
+an in-process `MvStore` (`src/Ahtola.Core/Mvcc/`) with a Hekaton-style logical
+clock and write-set conflict detection. `BEGIN CONCURRENT` is accepted only when
+MVCC is enabled; nested `BEGIN` still fails with
+`cannot start a transaction within a transaction`.
 
-No managed MVCC implementation is scheduled until durable version recovery and
-concurrency invariants are designed and independently tested. The existing
-Stage 0 WAL ownership boundary is not an MVCC substitute.
+Phase 1 scope and limits:
+
+- Concurrent transactions skip the classic single-writer reservation and use
+  MVCC transaction IDs + first-committer-wins write-write conflicts.
+- Classic catalog DML still mutates `EmbeddedDatabase` table snapshots; full
+  row-version chains and dual-cursor isolation land in later phases.
+- File-backed MVCC keeps a WAL open underneath for page durability (matching
+  Turso). The on-disk header version `255` marker and durable logical log
+  (`db-log`) are **not** persisted yet — reopen falls back to classic WAL until
+  Phase 2.
+- `PRAGMA temp.journal_mode=mvcc` is ignored (temp stays `wal`), matching Turso.
+- MVCC is process-local and does not replace Stage 6 WAL interop. Cross-process
+  MVCC is unsupported (same as Turso v0.7.2).
 
 ### 1.5 Busy semantics today
 

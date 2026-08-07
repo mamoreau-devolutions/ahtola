@@ -433,6 +433,36 @@ public class ManagedTransactionModeLockingTests
     }
 
     [Test]
+    public void ConcurrentTransactionSucceedsAfterMvccIsEnabled()
+    {
+        using var db = new ManagedFileDatabase();
+        using var connection = db.Connect();
+
+        connection.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        connection.ExecuteNonQuery("BEGIN CONCURRENT;");
+        connection.ExecuteNonQuery("INSERT INTO t VALUES (1);");
+        connection.ExecuteNonQuery("COMMIT;");
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT v FROM t;";
+        Convert.ToInt64(command.ExecuteScalar()).Should().Be(1L);
+    }
+
+    [Test]
+    public void NestedBeginInsideConcurrentErrors()
+    {
+        using var db = new ManagedFileDatabase();
+        using var connection = db.Connect();
+
+        connection.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        connection.ExecuteNonQuery("BEGIN CONCURRENT;");
+        var error = Capture(() => connection.ExecuteNonQuery("BEGIN IMMEDIATE;"));
+        error.Should().NotBeNull();
+        error!.Message.Should().Contain("cannot start a transaction within a transaction");
+        connection.ExecuteNonQuery("ROLLBACK;");
+    }
+
+    [Test]
     public void RepeatedTransactionModeKeywordIsRejected()
     {
         using var db = new ManagedFileDatabase();
