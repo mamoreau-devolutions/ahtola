@@ -257,6 +257,36 @@ public class SqliteWalInteroperabilityContractTests
 
     [Test]
     [NonParallelizable]
+    public void ManagedReaderReportsSnapshotBusyWhenReadMarkIsRewritten()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x51));
+
+            using var reader = pager.BeginReadTransaction();
+            reader.WalIndexReadMarkIndex.Should().NotBeNull();
+            var mark = reader.WalIndexReadMarkIndex!.Value;
+            mark.Should().BeGreaterThan(0);
+
+            // Simulate a checkpointer/recovery rewriting the pinned mark while the
+            // shared lock is still held — Stage 4 SQLITE_BUSY_SNAPSHOT.
+            pager.WalIndex!.PublishReadMark(mark, maximumFrame: 1);
+
+            var busy = Assert.Throws<SqlitePagerBusyException>(() => reader.ReadPage(2));
+            busy!.Operation.Should().Be(SqlitePagerLockOperation.Reader);
+            busy.Reason.Should().Be(SqlitePagerBusyReason.Snapshot);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
     public void ManagedCheckpointPublishesWalIndexBackfillProgress()
     {
         var workDirectory = CreateWorkDirectory();

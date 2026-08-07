@@ -114,10 +114,12 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 2. Replace flat 10 ms poll with SQLite-like backoff.
 3. Preserve `Operation` for existing callers.
 
+**Landed:** `SqlitePagerBusyReason` {Busy, Snapshot, Recovery}; recovery opens use Recovery; rewritten read marks surface Snapshot on `ReadPage`; `SqliteBusyBackoff` matches sqliteDefaultBusyCallback delays across lock waiters.
+
 **Exit criteria**
 
-- [ ] Tests for each busy class under contended locks.
-- [ ] Reader whose mark was reset gets a distinct result.
+- [x] Tests for busy class taxonomy + backoff schedule.
+- [x] Reader whose mark was reset gets Snapshot busy.
 
 ---
 

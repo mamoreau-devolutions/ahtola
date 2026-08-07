@@ -43,7 +43,6 @@ internal sealed class SqliteManagedFileOwnership
 {
     private const long PendingByte = 0x4000_0000;
     private const long LockRangeLength = 512;
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
 
     private readonly object _gate = new();
     private readonly string _databasePath;
@@ -243,20 +242,7 @@ internal sealed class SqliteManagedFileOwnership
     }
 
     private static bool WaitForRetry(TimeSpan timeout, Stopwatch? stopwatch)
-    {
-        if (timeout == Timeout.InfiniteTimeSpan)
-        {
-            Thread.Sleep(RetryDelay);
-            return true;
-        }
-
-        var remaining = timeout - stopwatch!.Elapsed;
-        if (remaining <= TimeSpan.Zero)
-            return false;
-
-        Thread.Sleep(remaining < RetryDelay ? remaining : RetryDelay);
-        return true;
-    }
+        => SqliteBusyBackoff.Wait(timeout, stopwatch);
 
     private static TimeSpan RemainingTimeout(TimeSpan timeout, Stopwatch? stopwatch)
     {

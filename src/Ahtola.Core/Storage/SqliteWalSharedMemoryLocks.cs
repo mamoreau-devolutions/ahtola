@@ -28,7 +28,6 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
     private const long FirstReaderLockOffset = 123;
     private const int ReaderLockCount = 5;
     private const long LockRangeLength = 8;
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
 
     private readonly object _gate = new();
     private readonly string _path;
@@ -313,20 +312,7 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
         => timeout == Timeout.InfiniteTimeSpan ? null : Stopwatch.StartNew();
 
     private static bool WaitForRetry(TimeSpan timeout, Stopwatch? stopwatch)
-    {
-        if (timeout == Timeout.InfiniteTimeSpan)
-        {
-            Thread.Sleep(RetryDelay);
-            return true;
-        }
-
-        var remaining = timeout - stopwatch!.Elapsed;
-        if (remaining <= TimeSpan.Zero)
-            return false;
-
-        Thread.Sleep(remaining < RetryDelay ? remaining : RetryDelay);
-        return true;
-    }
+        => SqliteBusyBackoff.Wait(timeout, stopwatch);
 
     private sealed class ReaderLease : IDisposable
     {

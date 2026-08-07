@@ -728,6 +728,14 @@ public sealed class SqlitePager : IDisposable
             {
                 throw new SqlitePagerBusyException(SqlitePagerLockOperation.Reader, timeout, exception);
             }
+            catch (SqliteWalReadSnapshotInvalidatedException exception)
+            {
+                throw new SqlitePagerBusyException(
+                    SqlitePagerLockOperation.Reader,
+                    SqlitePagerBusyReason.Snapshot,
+                    timeout,
+                    exception);
+            }
 
             try
             {
@@ -1631,20 +1639,7 @@ public sealed class SqlitePager : IDisposable
     }
 
     private static bool WaitForWalIndexRetry(TimeSpan timeout, Stopwatch? stopwatch)
-    {
-        if (timeout == Timeout.InfiniteTimeSpan)
-        {
-            Thread.Sleep(10);
-            return true;
-        }
-
-        if (stopwatch is null || stopwatch.Elapsed >= timeout)
-            return false;
-
-        var remaining = timeout - stopwatch.Elapsed;
-        Thread.Sleep(remaining < TimeSpan.FromMilliseconds(10) ? remaining : TimeSpan.FromMilliseconds(10));
-        return stopwatch.Elapsed < timeout;
-    }
+        => SqliteBusyBackoff.Wait(timeout, stopwatch);
 
     /// <inheritdoc />
     public void Dispose()
@@ -2870,6 +2865,19 @@ public sealed class SqlitePagerReadTransaction : IDisposable
         {
             if (_readerLock is null && _walIndexSnapshot is null)
                 throw new ObjectDisposedException(nameof(SqlitePagerReadTransaction));
+
+            try
+            {
+                _walIndexSnapshot?.EnsureStillValid();
+            }
+            catch (SqliteWalReadSnapshotInvalidatedException exception)
+            {
+                throw new SqlitePagerBusyException(
+                    SqlitePagerLockOperation.Reader,
+                    SqlitePagerBusyReason.Snapshot,
+                    TimeSpan.Zero,
+                    exception);
+            }
 
             return _pager.ReadSnapshotPage(_walPageOverlay, PageCount, _cacheGeneration, pageNumber);
         }

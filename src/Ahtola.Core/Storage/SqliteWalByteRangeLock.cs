@@ -81,7 +81,6 @@ public sealed partial class SqliteWalByteRangeLock
     private const int LinuxResourceTemporarilyUnavailable = 11;
     private const int LinuxInvalidArgument = 22;
     private const int WindowsLockViolation = 33;
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(10);
 
     /// <summary>
     /// Creates a lock primitive for an existing file that will carry the requested SQLite WAL locks.
@@ -444,22 +443,7 @@ public sealed partial class SqliteWalByteRangeLock
         TimeSpan timeout,
         Stopwatch? stopwatch,
         CancellationToken cancellationToken)
-    {
-        if (timeout == Timeout.InfiniteTimeSpan)
-        {
-            cancellationToken.WaitHandle.WaitOne(RetryDelay);
-            cancellationToken.ThrowIfCancellationRequested();
-            return true;
-        }
-
-        var remaining = timeout - stopwatch!.Elapsed;
-        if (remaining <= TimeSpan.Zero)
-            return false;
-
-        cancellationToken.WaitHandle.WaitOne(remaining < RetryDelay ? remaining : RetryDelay);
-        cancellationToken.ThrowIfCancellationRequested();
-        return true;
-    }
+        => SqliteBusyBackoff.Wait(timeout, stopwatch, cancellationToken);
 
     private static WindowsOverlapped CreateWindowsOverlapped(long offset)
     {
