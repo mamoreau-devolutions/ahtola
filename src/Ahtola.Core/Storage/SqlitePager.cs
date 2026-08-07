@@ -41,15 +41,13 @@ public sealed record SqliteCheckpointResult(
 /// </summary>
 /// <remarks>
 /// Pagers that use the same <see cref="IFileSystem"/> and storage paths share a
-/// <see cref="SqlitePagerLockManager"/>. Physical-file pagers additionally hold
-/// SQLite's complete main-file lock-byte range for their lifetime (Stage 0
-/// ownership). Stages 1–3 attach a real WAL-index, read marks, and CKPT_LOCK-
-/// based checkpointing under that ownership; Stages 4–6 remain before ordinary
-/// SQLite/Turso concurrent clients may share the live database. Other platforms
-/// fail ownership acquisition rather than silently using only process-local
-/// locks. WAL commits become visible at their flushed commit marker; DELETE-mode
-/// main-file writes are protected by a hot rollback journal. See
-/// <c>docs/wal-interoperability-contract.md</c> for the normative contract.
+/// <see cref="SqlitePagerLockManager"/>. Physical-file pagers hold a Stage 6
+/// SQLite SHARED main-file lock and coordinate WAL through the real WAL-index /
+/// <c>-shm</c> protocol (Stages 1–5). Ordinary SQLite SHARED readers may coexist.
+/// Other platforms fail main-file lock acquisition rather than silently using
+/// only process-local locks. WAL commits become visible at their flushed commit
+/// marker; DELETE-mode main-file writes are protected by a hot rollback journal.
+/// See <c>docs/wal-interoperability-contract.md</c> for the normative contract.
 /// </remarks>
 public sealed class SqlitePager : IDisposable
 {
@@ -1997,13 +1995,10 @@ public sealed class SqlitePager : IDisposable
     /// pager's committed view is current.
     /// </summary>
     /// <remarks>
-    /// A physical database holds SQLite's complete main-file lock-byte range
-    /// exclusively for the lifetime of every pager in this process, so no
-    /// ordinary SQLite client and no other managed process can change durable
-    /// storage. Every in-process commit, checkpoint, and recovery publishes a
-    /// new lock generation, so an unchanged generation proves the committed
-    /// view still matches durable storage. A file-backed lock coordinator
-    /// without that ownership carrier has no such proof and must rescan.
+    /// Foreign read-only has no main-file lease. Physical pagers with a Stage 6
+    /// SHARED lease still detect peer WAL changes via WAL-index identity
+    /// (<c>iChange</c>/<c>mxFrame</c>/salts) inside <see cref="SynchronizeCommittedView"/>.
+    /// A file-backed coordinator without any main-file lease must always rescan.
     /// </remarks>
     private bool RequiresSharedStorageRescan
         => _foreignReadOnly || (_lockManager.UsesFileBackedWalLocks && _clientOwnership is null);
@@ -2687,8 +2682,18 @@ public sealed class SqlitePager : IDisposable
                     FileOpenMode.OpenExisting,
                     readOnly: true);
                 _walIndex = new SqliteWalIndexSharedMemory(_walIndexMapping);
-                var region = _walIndex.ReadValidatedHeader(_wal);
-                ObserveWalIndexIdentity(region.Header);
+                try
+                {
+                    var region = _walIndex.ReadValidatedHeader(_wal);
+                    ObserveWalIndexIdentity(region.Header);
+                }
+                catch (InvalidDataException)
+                {
+                    // Peer engines may hold a torn or mid-update -shm. Read-only
+                    // opens fall back to WAL-scan views rather than failing closed.
+                    DisposeWalIndex();
+                }
+
                 return;
             }
 

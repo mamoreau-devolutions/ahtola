@@ -6,14 +6,14 @@ to share a physical database with `tursodb` / the Turso core under the same WAL,
 `-shm`, lock, and handoff rules those engines already use — not invent a
 managed-only WAL dialect.
 
-**Status today: Stage 0 — process-exclusive ownership.** Managed physical
-databases are *not* yet concurrently interoperable with Turso, ordinary SQLite
-clients, or other managed processes. One read-only exception: an explicit
-`Foreign Read Only=True` connection may read a database owned by an ordinary
-SQLite (or Turso) client without claiming ownership (§1.9). This document is the
-normative description of what the managed pager does today, why each guard
-exists, and the staged work required before Turso-compatible multi-process WAL
-access can be claimed.
+**Status today: Stages 1–6 core attached.** Physical pagers publish a real
+WAL-index, pin read marks, checkpoint under `WAL_CKPT_LOCK`, use SQLite busy
+backoff, recover with `iChange` bumps, and hold a Stage 6 **main-file SHARED**
+lock (not exclusive 512-byte ownership) so ordinary SQLite/Turso SHARED readers
+can coexist. Remaining polish: PENDING/RESERVED writer upgrades for DELETE-mode
+parity and expanded differential Turso stress. An explicit
+`Foreign Read Only=True` connection may still read without main-file locks
+(§1.9).
 
 Nothing here describes behavior that is unimplemented, and nothing here authorizes
 relaxing a guard ahead of the stage that replaces it.
@@ -37,8 +37,8 @@ upstream Turso / `tursodb` tree (SQLite-compatible WAL-index and lock bytes).
 
 | Property | Current behavior |
 | --- | --- |
-| Locked range | `[0x4000_0000, 0x4000_0200)` — 512 bytes covering SQLite's `PENDING_BYTE`, `RESERVED_BYTE`, and the full 510-byte `SHARED` range |
-| Lock kind | Exclusive/write. Windows `FileStream.Lock` (`LockFile`); Linux `fcntl(F_OFD_SETLK, F_WRLCK)` through `LinuxOpenFileDescriptionLocks` |
+| Locked range | One byte in SQLite's SHARED range `[0x4000_0002, 0x4000_0200)` (stable FNV slot per canonical path) |
+| Lock kind | Stage 6 SHARED via `SqliteWalByteRangeLock` (Windows `LockFileEx` shared; Linux OFD read lock) |
 | Platform gate | Windows, or 64-bit Linux with a 32-byte `struct flock`. Every other platform throws `PlatformNotSupportedException` at open |
 | Applies to | `PhysicalFileSystem` only, after unwrapping `AhtolaEncryptionFileSystem`. In-memory and custom file systems receive no cross-process boundary at all |
 | Lifetime | Acquired by the first `SqlitePager.Create`/`Open` for a path, reference-counted across every managed pager in the process, released only when the last one is disposed |

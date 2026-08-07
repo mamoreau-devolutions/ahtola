@@ -4,16 +4,10 @@ using Ahtola.Data.Sqlite;
 namespace Ahtola.Tests;
 
 /// <summary>
-/// Pins the interaction between managed connection pooling and the exclusive
-/// main-file ownership lock described in the "Managed physical databases are not
-/// concurrently interoperable with ordinary SQLite clients" section of
-/// <c>README.md</c>.
-///
-/// Disposing the logical connections is not sufficient to hand a database back to
-/// an ordinary SQLite client: the SQLite facade defaults to <c>Pooling=True</c>, so
-/// a returned handle stays in the managed physical pool and keeps ownership. The
-/// rest of the managed suite clears pools in <c>SetUp</c>/<c>TearDown</c> as
-/// hygiene, which masks this everywhere else.
+/// Pins Stage 6 main-file SHARED locking vs connection pooling.
+/// Managed physical pagers hold SQLite SHARED (not exclusive 512-byte ownership),
+/// so ordinary SQLite readers may open the same database while managed is live.
+/// Pooling still retains the managed physical handle until <c>ClearAllPools</c>.
 /// </summary>
 [NonParallelizable]
 public sealed class ManagedOwnershipHandoffPoolingTests
@@ -37,15 +31,14 @@ public sealed class ManagedOwnershipHandoffPoolingTests
                 managed.ExecuteScalarLong("SELECT COUNT(*) FROM t;").Should().Be(1);
             }
 
-            // The logical connection is disposed, but the physical handle remains
-            // pooled and still owns SQLite's main-file lock-byte range.
-            TryOpenWithOrdinarySqlite(path).Should().NotBeNull(
-                "a pooled managed handle retains exclusive ownership after disposal");
+            // Stage 6 SHARED coexists with ordinary SQLite even while pooled.
+            TryOpenWithOrdinarySqlite(path).Should().BeNull(
+                "Stage 6 SHARED lock must allow ordinary SQLite readers while managed is pooled");
 
             SqliteConnection.ClearAllPools();
 
             TryOpenWithOrdinarySqlite(path).Should().BeNull(
-                "clearing the pool disposes the physical handle and releases ownership");
+                "clearing the pool still leaves a clean handoff for ordinary SQLite");
         }
         finally
         {
@@ -80,7 +73,7 @@ public sealed class ManagedOwnershipHandoffPoolingTests
     }
 
     [Test]
-    public void ReadOnlyManagedUsageAlsoTakesTheOwnershipLock()
+    public void LiveManagedSharedLockAllowsConcurrentOrdinarySqliteReaders()
     {
         var path = CreateDatabasePath();
         try
@@ -90,12 +83,9 @@ public sealed class ManagedOwnershipHandoffPoolingTests
             using (var managed = OpenManaged(path, pooling: true))
             {
                 managed.ExecuteScalarLong("SELECT COUNT(*) FROM t;").Should().Be(1);
+                TryOpenWithOrdinarySqlite(path).Should().BeNull(
+                    "ordinary SQLite must share the database under Stage 6 SHARED locks");
             }
-
-            // No write occurred, yet ownership is still held: every physical pager
-            // takes the same lock regardless of whether it mutates anything.
-            TryOpenWithOrdinarySqlite(path).Should().NotBeNull(
-                "a read-only managed session takes the same ownership lock as a writer");
         }
         finally
         {

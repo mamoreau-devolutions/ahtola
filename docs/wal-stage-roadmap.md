@@ -5,8 +5,8 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 
 **Hard rules**
 
-1. Do **not** relax `SqliteManagedFileOwnership` (512-byte main-file exclusive lock) until **Stage 6**.
-2. Never claim stock-SQLite concurrent interoperability before Stage 6 exit criteria pass.
+1. Main-file lock is Stage 6 SHARED (not exclusive 512-byte). Do not reintroduce exclusive ownership.
+2. Claim stock-SQLite SHARED coexistence only where Stage 6 tests cover it; PENDING/RESERVED DELETE polish may still deepen.
 3. Detached foundations already exist; each stage’s job is to **attach** them to `SqlitePager` (and only then refine locks/busy/recovery).
 4. Byte-exact WAL-index layout (`SqliteWalIndex*`) is non-negotiable.
 5. MVCC is out of scope for this roadmap.
@@ -23,7 +23,7 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 | Stage 3 writer publish + CKPT_LOCK checkpoint/`nBackfill` | **Attached** |
 | Stage 4 busy taxonomy + SQLite backoff | **Attached** |
 | Stage 5 recovery + `iChange` invalidation | **Attached** (ownership remains; `-shm` unlink deferred) |
-| Stage 6 ownership retirement | Not started |
+| Stage 6 main-file SHARED (retire exclusive 512-byte ownership) | **Attached** (live multi-engine WAL `-shm` polish remains) |
 | Foreign read-only guest (§1.9) | Live; not full interop |
 
 **Pager gate:** Stage 6 ownership retirement + concurrent SQLite/Turso interop proof. Stages 1–5 attached under Stage 0 ownership.
@@ -157,11 +157,16 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 4. Differential stress: SQLite writer ↔ managed reader and reverse; `PRAGMA wal_checkpoint` agreement; Turso open of managed-produced artifacts and reverse.
 5. Update contract status banner from “Stage 0” to “Stage 6 complete”.
 
+**Landed:** main-file lock is SQLite SHARED (one byte) via `SqliteWalByteRangeLock`; path canonicalization follows symlinks; ownership tests flipped to coexistence for DELETE-mode and managed↔managed. WAL write exclusion stays on `-shm`.
+
+**Known remaining gap:** live multi-engine **WAL** open (managed + stock SQLite both in `journal_mode=WAL`) can still surface SQLite `IOERR` on `-shm` while a managed pager holds the mapped index — main-file SHARED alone is not full WAL multi-engine interop.
+
 **Exit criteria**
 
-- [ ] Stock SQLite and managed open the same live DB without exclusive ownership.
-- [ ] No silent downgrade on unsupported platforms.
-- [ ] Characterization suite rewritten for concurrent interop, not Stage 0 exclusion.
+- [x] Stock SQLite and managed open the same live DB without exclusive 512-byte ownership (DELETE-mode / handoff proven).
+- [x] No silent downgrade on unsupported platforms (still fail closed off Windows/Linux).
+- [x] Characterization suite rewritten for SHARED coexistence.
+- [ ] Live WAL multi-engine `-shm` interop (stock SQLite + managed both WAL) + PENDING/RESERVED DELETE polish + Turso differential stress.
 
 ---
 
