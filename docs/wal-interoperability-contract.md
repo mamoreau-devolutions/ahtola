@@ -545,8 +545,9 @@ the Stage 0 boundary:
 | `ManagedWritableOpenClaimsSqliteWalRecoveryLockByte` | §1.2, §1.6 — a writable open occupies byte 122 |
 | `ManagedReaderClaimsTheFirstFreeSqliteReadMarkLockByte` | §1.2 — readers walk bytes 123–127 (Windows only; see below) |
 | `ManagedReaderIsBusyWhenEverySqliteReadMarkLockByteIsHeld` | §1.3, §1.4 — five reader slots, then busy |
-| `ManagedCheckpointDemandsTheEntireSqliteWalLockArea` | §1.3 — checkpoint exclusion is coarser than SQLite's |
-| `ManagedRolesNeverClaimSqliteCheckpointLockByteAlone` | §1.3 — byte 121 is unused by managed roles |
+| `ManagedPassiveCheckpointHonorsHeldReadMarksWithoutCoarseLockArea` | Stage 3 — PASSIVE uses marks/`mxSafeFrame`; reset still needs exclusive marks |
+| `ManagedCheckpointClaimsSqliteCheckpointLockByte` | Stage 3 — checkpoint takes `WAL_CKPT_LOCK` (byte 121) |
+| `ManagedCheckpointPublishesWalIndexBackfillProgress` | Stage 3 — `nBackfill`/`nBackfillAttempted` published after install |
 | `ManagedRolesStayInsideSqliteReservedSharedMemoryLockArea` | §1.2 — no locks outside bytes 120–127 |
 | `ManagedReadOnlyOpenRefusesToCreateAMissingSharedMemoryLockCarrier` | §1.2, §3 — read-only opens never create `-shm` |
 | `PooledReopenSurvivesSharedMemoryCarrierRemovedByNativeClose` (`ManagedConnectionPoolingTests.cs`) | §1.2 — a read-write pager recreates a missing carrier on demand like a native read-write connection, and the pooling catalog refresh tolerates its absence |

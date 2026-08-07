@@ -20,7 +20,7 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 | Stage 0 process-exclusive ownership | **Live** on physical pager |
 | Stage 1 WAL-index mapped + published from pager | **Attached** (under ownership) |
 | Stage 2 read marks via `SqliteWalReadSnapshotCoordinator` | **Attached** for physical WAL readers |
-| Stage 3 `SqliteWalWriterCheckpointCoordinator` | **Detached** (next) |
+| Stage 3 writer publish + CKPT_LOCK checkpoint/`nBackfill` | **Attached** (under ownership; coordinator still also usable detached) |
 | Stages 4–6 | Not started |
 | Foreign read-only guest (§1.9) | Live; not full interop |
 
@@ -93,14 +93,14 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 4. Stop demanding the entire `[120, 8)` range for every checkpoint once protocol is live (keep Stage 0 ownership separately).
 5. Recovery rebuild under full recovery lock set when tails are dirty.
 
-**Partial landing:** commit path uses incremental `PublishCommittedFrames` when the prior dual-header is valid (Stage 3 writer publication order), falling back to `RebuildFromWal`. Full coordinator attach (CKPT_LOCK-only checkpoint, drop coarse `[120,8)` demand) remains.
+**Landed:** commit uses incremental `PublishCommittedFrames` when the prior dual-header is valid; physical checkpoint takes `WAL_CKPT_LOCK`, honors held read marks for `mxSafeFrame`, publishes `nBackfill`/`nBackfillAttempted`, and resets only with exclusive marks. Point reads no longer occupy legacy lock-manager mark bytes when the WAL-index protocol is live. Ownership unchanged.
 
 **Exit criteria**
 
 - [x] Managed writer incremental publish agrees with independent scan after commit (under Stage 0 writer lock).
-- [ ] Passive/full checkpoint via coordinator roles + `nBackfill` accounting on pager.
-- [ ] Stop coarse full-range checkpoint lock demand.
-- [ ] Still no ownership relaxation.
+- [x] Passive/full checkpoint via CKPT_LOCK + read marks + `nBackfill` on pager.
+- [x] Stop coarse full-range checkpoint lock demand for physical WAL-index checkpoints.
+- [x] Still no ownership relaxation.
 
 ---
 

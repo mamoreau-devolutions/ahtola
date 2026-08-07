@@ -193,7 +193,7 @@ public class SqliteWalInteroperabilityContractTests
 
     [Test]
     [NonParallelizable]
-    public void ManagedCheckpointDemandsTheEntireSqliteWalLockArea()
+    public void ManagedPassiveCheckpointHonorsHeldReadMarksWithoutCoarseLockArea()
     {
         var workDirectory = CreateWorkDirectory();
         try
@@ -202,15 +202,21 @@ public class SqliteWalInteroperabilityContractTests
             using var pager = CreatePhysicalPager(databasePath);
             CommitPageTwo(pager, CreatePage(pager.PageSize, 0x43));
 
+            // An unused held mark slot must not block PASSIVE (SQLite leaves
+            // mxSafeFrame unchanged for READMARK_NOT_USED). Reset still needs
+            // exclusive ownership of every mark.
             var lastReadMarkOffset = FirstReadMarkLockOffset + ReadMarkLockCount - 1;
             using (HoldSharedMemoryRanges(workDirectory, databasePath, $"{lastReadMarkOffset}:1"))
             {
+                pager.CheckpointToMainStore(TimeSpan.Zero).InstalledPageCount.Should().BeGreaterThan(0);
+
                 var busy = Assert.Throws<SqlitePagerBusyException>(
-                    () => pager.CheckpointToMainStore(TimeSpan.Zero));
+                    () => pager.CheckpointToMainStoreAndResetWal(TimeSpan.Zero));
                 busy!.Operation.Should().Be(SqlitePagerLockOperation.Checkpoint);
             }
 
-            pager.CheckpointToMainStore(TimeSpan.Zero).InstalledPageCount.Should().BeGreaterThan(0);
+            pager.CheckpointToMainStoreAndResetWal(TimeSpan.Zero)
+                .RetainedCommittedFrameCount.Should().Be(0);
         }
         finally
         {
@@ -220,7 +226,7 @@ public class SqliteWalInteroperabilityContractTests
 
     [Test]
     [NonParallelizable]
-    public void ManagedRolesNeverClaimSqliteCheckpointLockByteAlone()
+    public void ManagedCheckpointClaimsSqliteCheckpointLockByte()
     {
         var workDirectory = CreateWorkDirectory();
         try
@@ -238,9 +244,37 @@ public class SqliteWalInteroperabilityContractTests
                 reader.ReadPage(2).Should().NotBeNull();
             }
 
+            // Stage 3: PASSIVE/FULL take WAL_CKPT_LOCK (byte 121) alone.
             var busy = Assert.Throws<SqlitePagerBusyException>(
                 () => pager.CheckpointToMainStore(TimeSpan.Zero));
             busy!.Operation.Should().Be(SqlitePagerLockOperation.Checkpoint);
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void ManagedCheckpointPublishesWalIndexBackfillProgress()
+    {
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var databasePath = Path.Combine(workDirectory, "main.db");
+            using var pager = CreatePhysicalPager(databasePath);
+            CommitPageTwo(pager, CreatePage(pager.PageSize, 0x49));
+
+            var before = pager.ReadValidatedWalIndexHeader();
+            before.Header.MaximumFrame.Should().BeGreaterThan(0u);
+            before.CheckpointInfo.BackfilledFrameCount.Should().Be(0u);
+
+            pager.CheckpointToMainStore(TimeSpan.Zero).InstalledPageCount.Should().BeGreaterThan(0);
+
+            var after = pager.ReadValidatedWalIndexHeader();
+            after.CheckpointInfo.BackfilledFrameCount.Should().Be(after.Header.MaximumFrame);
+            after.CheckpointInfo.BackfillAttemptedFrameCount.Should().Be(after.Header.MaximumFrame);
         }
         finally
         {
