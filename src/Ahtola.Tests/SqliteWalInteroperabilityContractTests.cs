@@ -25,7 +25,9 @@ public class SqliteWalInteroperabilityContractTests
     private const long RecoveryLockOffset = 122;
     private const long FirstReadMarkLockOffset = 123;
     private const int ReadMarkLockCount = 5;
-    private const long SharedMemoryLockAreaLength = 8;
+        // SQLite reserves bytes 120-127 for write/ckpt/recovery/readers and byte 128
+        // for the WAL-index dead-man switch (WIN_SHM_DMS / unix DMS).
+        private const long SharedMemoryLockAreaLength = 9;
 
     [Test]
     [NonParallelizable]

@@ -5,21 +5,18 @@ namespace Ahtola.Core.Storage;
 /// <summary>
 /// Acquires byte-range locks in SQLite's WAL shared-memory file. The component
 /// uses the file only as a lock carrier: it neither maps nor writes the
-/// WAL-index. Physical pagers separately exclude other client processes with a
-/// lifetime main-file ownership lock.
+/// WAL-index. Physical pagers separately coordinate multi-engine coexistence with
+/// Stage 6 main-file SHARED ownership.
 /// </summary>
 /// <remarks>
 /// SQLite reserves bytes 120 through 127 of <c>database-shm</c> for the WAL
 /// write, checkpoint, recovery, and five reader locks. A checkpoint locks the
-/// complete range; readers occupy one reader byte per process. The lock file is
-/// deliberately retained on close because another process can still be using it.
-/// The coordinator keeps one carrier handle while it owns any range. This is
-/// necessary on Linux, where closing any descriptor for a file releases every
-/// process-owned POSIX record lock for that file. Windows and Linux
-/// <see cref="FileStream.Lock"/> report contention immediately, and this
-/// component retries with a bounded delay until the pager busy timeout expires.
-/// See <c>docs/wal-interoperability-contract.md</c> for
-/// the normative lock-byte map and the staged transition to a real WAL-index.
+/// complete range exclusively; readers occupy one reader byte per process in
+/// <b>shared</b> mode so concurrent engines (stock SQLite, Turso, other managed
+/// pagers) can hold overlapping read marks. Writer and recovery ranges remain
+/// exclusive. The lock file is deliberately retained on close because another
+/// process can still be using it. See
+/// <c>docs/wal-interoperability-contract.md</c> for the normative lock-byte map.
 /// </remarks>
 internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
 {
@@ -31,11 +28,10 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
 
     private readonly object _gate = new();
     private readonly string _path;
-    private FileStream? _readOnlyCarrierStream;
-    private FileStream? _readWriteCarrierStream;
+    private readonly SqliteWalByteRangeLock _byteRangeLocks;
     private Exception? _failure;
     private long? _readerLockOffset;
-    private FileStream? _readerLockStream;
+    private SqliteWalByteRangeLockLease? _readerLease;
     private int _readerReferenceCount;
     private int _activeRangeCount;
 
@@ -43,6 +39,7 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
     {
         ArgumentException.ThrowIfNullOrEmpty(databasePath);
         _path = string.Concat(Path.GetFullPath(databasePath), "-shm");
+        _byteRangeLocks = new SqliteWalByteRangeLock(_path);
     }
 
     public IDisposable Acquire(SqlitePagerLockOperation operation, TimeSpan timeout)
@@ -58,28 +55,36 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
         => operation switch
         {
             SqlitePagerLockOperation.Reader => AcquireReader(timeout, pagerReadOnly),
-            SqlitePagerLockOperation.Writer => AcquireRange(
+            SqlitePagerLockOperation.Writer => AcquireExclusiveRange(
                 operation,
                 WriteLockOffset,
                 length: 1,
-                timeout),
-            SqlitePagerLockOperation.Checkpoint => AcquireRange(
+                timeout,
+                allowCreate: true),
+            SqlitePagerLockOperation.Checkpoint => AcquireExclusiveRange(
                 operation,
                 WriteLockOffset,
                 LockRangeLength,
-                timeout),
+                timeout,
+                allowCreate: true),
             _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, "Unknown SQLite WAL lock operation."),
         };
 
     public IDisposable AcquireRecovery(TimeSpan timeout)
-        => AcquireRange(SqlitePagerLockOperation.Writer, RecoveryLockOffset, length: 1, timeout);
+        => AcquireExclusiveRange(
+            SqlitePagerLockOperation.Writer,
+            RecoveryLockOffset,
+            length: 1,
+            timeout,
+            allowCreate: true);
 
     private IDisposable AcquireReader(TimeSpan timeout, bool pagerReadOnly)
     {
+        EnsureCarrierExists(allowCreate: !pagerReadOnly);
         var stopwatch = StartTimeout(timeout);
         while (true)
         {
-            IOException? lastContention = null;
+            Exception? lastContention = null;
             lock (_gate)
             {
                 ThrowIfFailed();
@@ -91,119 +96,86 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
 
                 for (var slot = 0; slot < ReaderLockCount; slot++)
                 {
-                    if (TryLockRange(
+                    if (_byteRangeLocks.TryAcquireShared(
                             FirstReaderLockOffset + slot,
                             length: 1,
-                            readOnly: pagerReadOnly,
-                            out var lockStream,
-                            out lastContention))
+                            out var lease)
+                        && lease is not null)
                     {
                         _readerLockOffset = FirstReaderLockOffset + slot;
-                        _readerLockStream = lockStream;
+                        _readerLease = lease;
                         _readerReferenceCount = 1;
                         _activeRangeCount++;
                         return new ReaderLease(this);
                     }
-                }
 
-                CloseCarrierStreamIfUnused();
+                    lastContention = null;
+                }
             }
 
             if (!WaitForRetry(timeout, stopwatch))
-                throw CreateBusyException(SqlitePagerLockOperation.Reader, timeout, lastContention);
+                throw CreateBusyException(SqlitePagerLockOperation.Reader, timeout, lastContention as IOException);
         }
     }
 
-    private IDisposable AcquireRange(
+    private IDisposable AcquireExclusiveRange(
         SqlitePagerLockOperation operation,
         long offset,
         long length,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        bool allowCreate)
     {
+        EnsureCarrierExists(allowCreate);
         var stopwatch = StartTimeout(timeout);
         while (true)
         {
-            IOException? contention;
+            Exception? contention = null;
             lock (_gate)
             {
                 ThrowIfFailed();
-                if (TryLockRange(offset, length, readOnly: false, out var lockStream, out contention))
+                try
                 {
-                    _activeRangeCount++;
-                    return new RangeLease(this, lockStream, offset, length);
+                    if (_byteRangeLocks.TryAcquireExclusive(offset, length, out var lease)
+                        && lease is not null)
+                    {
+                        _activeRangeCount++;
+                        return new RangeLease(this, lease);
+                    }
                 }
-
-                CloseCarrierStreamIfUnused();
+                catch (IOException exception)
+                {
+                    contention = exception;
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    contention = exception;
+                }
             }
 
             if (!WaitForRetry(timeout, stopwatch))
-                throw CreateBusyException(operation, timeout, contention);
+                throw CreateBusyException(operation, timeout, contention as IOException);
         }
     }
 
-    private bool TryLockRange(
-        long offset,
-        long length,
-        bool readOnly,
-        out FileStream lockStream,
-        out IOException? contention)
+    private void EnsureCarrierExists(bool allowCreate)
     {
-        var stream = GetOrOpenCarrierStream(readOnly);
-        try
-        {
-            Lock(stream, offset, length);
-            lockStream = stream;
-            contention = null;
-            return true;
-        }
-        catch (IOException exception)
-        {
-            lockStream = null!;
-            contention = exception;
-            return false;
-        }
-    }
+        if (File.Exists(_path))
+            return;
 
-    private FileStream GetOrOpenCarrierStream(bool readOnly)
-    {
-        if (readOnly)
+        if (!allowCreate)
         {
-            if (_readWriteCarrierStream is not null)
-                return _readWriteCarrierStream;
-            if (_readOnlyCarrierStream is not null)
-                return _readOnlyCarrierStream;
-
-            try
-            {
-                _readOnlyCarrierStream = new FileStream(
-                    _path,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete,
-                    bufferSize: 1,
-                    FileOptions.None);
-                return _readOnlyCarrierStream;
-            }
-            catch (FileNotFoundException exception)
-            {
-                throw new InvalidOperationException(
-                    "Cannot safely open the managed database read-only because its WAL lock file is missing. "
-                    + "Creating that file would mutate storage.",
-                    exception);
-            }
+            throw new InvalidOperationException(
+                "Cannot safely open the managed database read-only because its WAL lock file is missing. "
+                + "Creating that file would mutate storage.");
         }
 
-        if (_readWriteCarrierStream is not null)
-            return _readWriteCarrierStream;
-
-        _readWriteCarrierStream = new FileStream(
+        using var created = new FileStream(
             _path,
             FileMode.OpenOrCreate,
             FileAccess.ReadWrite,
             FileShare.ReadWrite | FileShare.Delete,
             bufferSize: 1,
             FileOptions.None);
-        return _readWriteCarrierStream;
     }
 
     private void ReleaseReader()
@@ -219,31 +191,29 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
                 return;
             }
 
-            var readerLockOffset = _readerLockOffset
+            var lease = _readerLease
                 ?? throw new InvalidOperationException("SQLite WAL reader lock ownership is inconsistent.");
-            var readerLockStream = _readerLockStream
-                ?? throw new InvalidOperationException("SQLite WAL reader lock stream ownership is inconsistent.");
-            UnlockRange(readerLockStream, readerLockOffset, length: 1);
+            ReleaseLease(lease);
             _readerReferenceCount = 0;
             _readerLockOffset = null;
-            _readerLockStream = null;
+            _readerLease = null;
         }
     }
 
-    private void ReleaseRange(FileStream lockStream, long offset, long length)
+    private void ReleaseRange(SqliteWalByteRangeLockLease lease)
     {
         lock (_gate)
-            UnlockRange(lockStream, offset, length);
+            ReleaseLease(lease);
     }
 
-    private void UnlockRange(FileStream lockStream, long offset, long length)
+    private void ReleaseLease(SqliteWalByteRangeLockLease lease)
     {
         if (_activeRangeCount == 0)
             throw new InvalidOperationException("SQLite WAL shared-memory lock ownership is inconsistent.");
 
         try
         {
-            Unlock(lockStream, offset, length);
+            lease.Dispose();
         }
         catch (IOException exception)
         {
@@ -252,44 +222,6 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
         }
 
         _activeRangeCount--;
-        CloseCarrierStreamIfUnused();
-    }
-
-    private static void Lock(FileStream stream, long offset, long length)
-    {
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
-        {
-            stream.Lock(offset, length);
-            return;
-        }
-
-        throw CreatePlatformNotSupportedException();
-    }
-
-    private static void Unlock(FileStream stream, long offset, long length)
-    {
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
-        {
-            stream.Unlock(offset, length);
-            return;
-        }
-
-        throw CreatePlatformNotSupportedException();
-    }
-
-    private static PlatformNotSupportedException CreatePlatformNotSupportedException()
-        => new(
-            "Managed SQLite WAL locking requires FileStream byte-range locks, which are supported here only on Windows and Linux.");
-
-    private void CloseCarrierStreamIfUnused()
-    {
-        if (_activeRangeCount != 0)
-            return;
-
-        _readOnlyCarrierStream?.Dispose();
-        _readOnlyCarrierStream = null;
-        _readWriteCarrierStream?.Dispose();
-        _readWriteCarrierStream = null;
     }
 
     private void ThrowIfFailed()
@@ -330,22 +262,22 @@ internal sealed class SqliteWalSharedMemoryLocks : ISqlitePagerLockCoordinator
     private sealed class RangeLease : IDisposable
     {
         private SqliteWalSharedMemoryLocks? _owner;
-        private readonly long _offset;
-        private readonly long _length;
-        private readonly FileStream _lockStream;
+        private SqliteWalByteRangeLockLease? _lease;
 
-        internal RangeLease(SqliteWalSharedMemoryLocks owner, FileStream lockStream, long offset, long length)
+        internal RangeLease(SqliteWalSharedMemoryLocks owner, SqliteWalByteRangeLockLease lease)
         {
             _owner = owner;
-            _lockStream = lockStream;
-            _offset = offset;
-            _length = length;
+            _lease = lease;
         }
 
         public void Dispose()
         {
             var owner = Interlocked.Exchange(ref _owner, null);
-            owner?.ReleaseRange(_lockStream, _offset, _length);
+            var lease = Interlocked.Exchange(ref _lease, null);
+            if (owner is null || lease is null)
+                return;
+
+            owner.ReleaseRange(lease);
         }
     }
 }

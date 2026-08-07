@@ -63,20 +63,22 @@ Consequences callers may rely on:
 
 ### 1.2 `-shm` is a byte-lock carrier, not a WAL-index
 
-`SqliteWalSharedMemoryLocks` opens `<database>-shm` and uses it **only** to place
-byte-range locks. The file is never mapped, never read, and never written, so it
-stays zero bytes long for the entire life of a managed database.
+`SqliteWalSharedMemoryLocks` places write/ckpt/recovery/reader byte-range locks on
+`<database>-shm`. Separately, `PhysicalSqliteWalSharedMemoryMapping` maps the file
+as a real SQLite WAL-index and holds the DMS shared lock at byte 128 for the
+mapping lifetime.
 
 Managed roles are placed inside SQLite's reserved lock area, which begins at shm
-offset 120 (`SQLITE_SHM_BASE`, the `WalCkptInfo.aLock[8]` field):
+offset 120 (`WIN_SHM_BASE` / `SQLITE_SHM_BASE`):
 
 | shm byte | SQLite role | Managed use |
 | ---: | --- | --- |
 | 120 | `WAL_WRITE_LOCK` | Writer takes exclusive `[120, 1)` |
 | 121 | `WAL_CKPT_LOCK` | Never taken on its own |
 | 122 | `WAL_RECOVER_LOCK` | Writable open and WAL tail recovery take exclusive `[122, 1)` |
-| 123–127 | `WAL_READ_LOCK(0..4)` | Reader takes the first free byte |
-| 120–127 | — | Checkpoint and `SqlitePager.Create` take exclusive `[120, 8)` |
+| 123–127 | `WAL_READ_LOCK(0..4)` | Reader takes the first free byte (**shared** `LockFileEx`/OFD) |
+| 120–127 | — | Checkpoint takes exclusive `[120, 8)` |
+| 128 | DMS (`WIN_SHM_DMS` / unix dead-man switch) | Held **shared** for the lifetime of a mapped `-shm` so peers do not truncate a live index |
 
 Additional current behavior:
 

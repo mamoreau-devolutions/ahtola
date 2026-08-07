@@ -23,7 +23,8 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 | Stage 3 writer publish + CKPT_LOCK checkpoint/`nBackfill` | **Attached** |
 | Stage 4 busy taxonomy + SQLite backoff | **Attached** |
 | Stage 5 recovery + `iChange` invalidation | **Attached** (ownership remains; `-shm` unlink deferred) |
-| Stage 6 main-file SHARED (retire exclusive 512-byte ownership) | **Attached** (live multi-engine WAL `-shm` polish remains) |
+| Stage 6 main-file SHARED (retire exclusive 512-byte ownership) | **Attached** |
+| Live multi-engine WAL (`-shm` DMS + shared readers) | **Attached** (stock SQLite 3.53+ coexistence proven; Turso binary differential optional) |
 | Foreign read-only guest (§1.9) | Live; not full interop |
 
 **Pager gate:** Stage 6 ownership retirement + concurrent SQLite/Turso interop proof. Stages 1–5 attached under Stage 0 ownership.

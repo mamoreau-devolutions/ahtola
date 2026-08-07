@@ -63,16 +63,17 @@ public sealed partial class PhysicalFileSystem
         {
             return new PhysicalSqliteWalSharedMemoryMapping(
                 handle,
-                readOnly,
-                preventsCarrierReplacement);
+                        path,
+                        readOnly,
+                        preventsCarrierReplacement);
+                }
+                catch
+                {
+                    handle.Dispose();
+                    throw;
+                }
+            }
         }
-        catch
-        {
-            handle.Dispose();
-            throw;
-        }
-    }
-}
 
 /// <summary>
 /// A physical, file-backed SQLite shared-memory mapping. Its mapped range follows
@@ -92,8 +93,16 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
     private const int MsSync = 0x04;
     private const uint DuplicateSameAccess = 0x0000_0002;
 
+    /// <summary>
+    /// SQLite's Windows/Unix WAL-index dead-man switch lock byte. Equals
+    /// <c>WIN_SHM_BASE + SQLITE_SHM_NLOCK</c> (120 + 8). While any engine holds a
+    /// shared DMS lock, a newly attaching engine must not truncate <c>-shm</c>.
+    /// </summary>
+    internal const long DeadManSwitchLockOffset = 128;
+
     private readonly object _gate = new();
     private readonly SafeFileHandle _fileHandle;
+    private readonly SqliteWalByteRangeLockLease? _deadManSwitchLease;
     private SafeWindowsFileMappingHandle? _windowsMapping;
     private SafeMappedViewHandle? _view;
     private long _length;
@@ -101,6 +110,7 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
 
     internal PhysicalSqliteWalSharedMemoryMapping(
         SafeFileHandle fileHandle,
+        string lockFilePath,
         bool readOnly,
         bool preventsCarrierReplacement)
     {
@@ -109,11 +119,27 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
         IsReadOnly = readOnly;
         PreventsCarrierReplacement = preventsCarrierReplacement && OperatingSystem.IsWindows();
 
-        lock (_gate)
-        {
-            MapCurrentFileLengthLocked(RandomAccess.GetLength(_fileHandle));
-        }
-    }
+        // Hold the DMS shared lock for the mapping lifetime so stock SQLite/Turso
+                // do not treat this process as absent and truncate a live -shm mapping
+                // (SQLite winLockSharedMemory / unixLockSharedMemory). On failure the
+                // caller still owns fileHandle and must dispose it.
+                _deadManSwitchLease = new SqliteWalByteRangeLock(lockFilePath).AcquireShared(
+                    DeadManSwitchLockOffset,
+                    length: 1,
+                    timeout: TimeSpan.FromSeconds(5));
+                try
+                {
+                    lock (_gate)
+                    {
+                        MapCurrentFileLengthLocked(RandomAccess.GetLength(_fileHandle));
+                    }
+                }
+                catch
+                {
+                    _deadManSwitchLease.Dispose();
+                    throw;
+                }
+            }
 
     public bool IsReadOnly { get; }
 
@@ -253,30 +279,46 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
     public void Dispose()
     {
         Exception? flushFailure = null;
-        lock (_gate)
-        {
-            if (_disposed)
-                return;
+            Exception? dmsFailure = null;
+            lock (_gate)
+            {
+                if (_disposed)
+                    return;
 
-            _disposed = true;
-            try
-            {
-                FlushMappedViewLocked();
+                _disposed = true;
+                try
+                {
+                    FlushMappedViewLocked();
+                }
+                catch (Exception exception)
+                {
+                    flushFailure = exception;
+                }
+                finally
+                {
+                    DisposeMappedViewLocked();
+                    try
+                    {
+                        _deadManSwitchLease?.Dispose();
+                    }
+                    catch (Exception exception)
+                    {
+                        dmsFailure = exception;
+                    }
+
+                    _fileHandle.Dispose();
+                }
             }
-            catch (Exception exception)
+
+            if (flushFailure is not null)
+                throw new IOException("Failed to flush the SQLite shared-memory mapping during disposal.", flushFailure);
+            if (dmsFailure is not null)
             {
-                flushFailure = exception;
-            }
-            finally
-            {
-                DisposeMappedViewLocked();
-                _fileHandle.Dispose();
+                throw new IOException(
+                    "Failed to release the SQLite WAL-index dead-man switch lock during disposal.",
+                    dmsFailure);
             }
         }
-
-        if (flushFailure is not null)
-            throw new IOException("Failed to flush the SQLite shared-memory mapping during disposal.", flushFailure);
-    }
 
     internal static void ThrowIfPlatformUnsupported()
     {
