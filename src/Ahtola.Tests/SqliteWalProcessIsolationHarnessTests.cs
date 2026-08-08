@@ -633,14 +633,14 @@ public sealed class SqliteWalProcessIsolationHarnessTests
     }
 
     private static bool SupportsCoordinator
-        => OperatingSystem.IsWindows() || (OperatingSystem.IsLinux() && Environment.Is64BitProcess);
+        => OperatingSystem.IsWindows() || (OperatingSystem.IsLinux() && Environment.Is64BitProcess) || OperatingSystem.IsMacOS();
 
     private static void RequireCoordinatorSupport()
     {
         if (!SupportsCoordinator)
         {
             Assert.Ignore(
-                "Detached SQLite WAL writer/checkpoint coordination is supported only on Windows and 64-bit Linux.");
+                "Detached SQLite WAL writer/checkpoint coordination is supported only on Windows, 64-bit Linux, and macOS.");
         }
     }
 

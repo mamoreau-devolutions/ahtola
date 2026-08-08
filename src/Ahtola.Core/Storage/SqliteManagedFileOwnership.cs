@@ -91,12 +91,14 @@ internal sealed class SqliteManagedFileOwnership
             }
         }
 
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsWindows()
+            && !OperatingSystem.IsLinux()
+            && !OperatingSystem.IsMacOS())
         {
             CompleteAcquisitionFailed();
             throw new PlatformNotSupportedException(
                 "Managed physical databases require SQLite main-file byte-range locks, "
-                + "which are supported here only on Windows and Linux.");
+                + "which are supported here only on Windows, Linux, and macOS.");
         }
 
         FileStream? ensureStream = null;

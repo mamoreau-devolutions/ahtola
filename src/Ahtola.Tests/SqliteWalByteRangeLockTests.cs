@@ -11,6 +11,33 @@ public sealed class SqliteWalByteRangeLockTests
     private const long LockOffset = 120;
 
     [Test]
+    public void PlatformMatrixDocumentsSupportedHosts()
+    {
+        // Windows + 64-bit Linux (OFD) + macOS (POSIX F_SETLK). Fail closed elsewhere.
+        var supported =
+            OperatingSystem.IsWindows()
+            || (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+            || OperatingSystem.IsMacOS();
+        SupportsByteRangeLocks.Should().Be(supported);
+
+        if (!supported)
+            return;
+
+        var workDirectory = CreateWorkDirectory();
+        try
+        {
+            var lockPath = CreateLockCarrier(workDirectory);
+            var locks = new SqliteWalByteRangeLock(lockPath);
+            using var lease = locks.AcquireShared(LockOffset, length: 1, TimeSpan.Zero);
+            lease.Should().NotBeNull();
+        }
+        finally
+        {
+            DeleteWorkDirectory(workDirectory);
+        }
+    }
+
+    [Test]
     [NonParallelizable]
     public void IndependentProcessesCanShareTheSameRange()
     {
@@ -435,14 +462,14 @@ public sealed class SqliteWalByteRangeLockTests
     }
 
     private static bool SupportsByteRangeLocks
-        => OperatingSystem.IsWindows() || (OperatingSystem.IsLinux() && Environment.Is64BitProcess);
+        => OperatingSystem.IsWindows() || (OperatingSystem.IsLinux() && Environment.Is64BitProcess) || OperatingSystem.IsMacOS();
 
     private static void RequireByteRangeLockSupport()
     {
         if (!SupportsByteRangeLocks)
         {
             Assert.Ignore(
-                "SQLite WAL byte-range locks are supported only on Windows and 64-bit Linux.");
+                "SQLite WAL byte-range locks are supported only on Windows, 64-bit Linux, and macOS.");
         }
     }
 

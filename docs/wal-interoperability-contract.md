@@ -41,8 +41,8 @@ upstream Turso / `tursodb` tree (SQLite-compatible WAL-index and lock bytes).
 | Property | Current behavior |
 | --- | --- |
 | Locked range | One byte in SQLite's SHARED range `[0x4000_0002, 0x4000_0200)` (stable FNV slot per canonical path) |
-| Lock kind | Stage 6 SHARED via `SqliteWalByteRangeLock` (Windows `LockFileEx` shared; Linux OFD read lock) |
-| Platform gate | Windows, or 64-bit Linux with a 32-byte `struct flock`. Every other platform throws `PlatformNotSupportedException` at open |
+| Lock kind | Stage 6 SHARED via `SqliteWalByteRangeLock` (Windows `LockFileEx` shared; Linux OFD read lock; macOS POSIX `F_SETLK` read lock) |
+| Platform gate | Windows; 64-bit Linux with a 32-byte `struct flock` (OFD); macOS with Darwin `struct flock` (`F_SETLK`). Every other platform throws `PlatformNotSupportedException` at open |
 | Applies to | `PhysicalFileSystem` only, after unwrapping `AhtolaEncryptionFileSystem`. In-memory and custom file systems receive no cross-process boundary at all |
 | Lifetime | Acquired by the first `SqlitePager.Create`/`Open` for a path, reference-counted across every managed pager in the process, released only when the last one is disposed |
 | Registry key | `Path.GetFullPath(...)`, upper-invariant on Windows |
@@ -377,13 +377,15 @@ format component only; they do not establish concurrent interoperability.
 carrier file. Its leases express non-blocking or bounded shared and exclusive
 byte-range acquisition without creating, mapping, or interpreting `-shm`.
 Windows uses `LockFileEx`/`UnlockFileEx` with full 64-bit `OVERLAPPED` offsets;
-64-bit Linux uses `fcntl(F_OFD_SETLK)` with `F_RDLCK` or `F_WRLCK`. Each lease
-owns a dedicated carrier descriptor until it is disposed, so an unrelated
-lease cannot shorten an OFD lock lifetime. Focused worker-process tests cover
-shared-reader coexistence, exclusive and mixed-mode contention, independent
-ranges, timeout reporting, and release on disposal. This primitive is not
-connected to `SqliteWalSharedMemoryLocks`, normal `-shm` activity, the pager,
-or any read-mark, writer, or checkpoint role.
+64-bit Linux uses `fcntl(F_OFD_SETLK)` with `F_RDLCK` or `F_WRLCK`; macOS uses
+POSIX `fcntl(F_SETLK)` with Darwin lock-type constants (process-associated,
+not OFD — matches stock SQLite on Darwin). Each lease owns a dedicated carrier
+descriptor until it is disposed, so an unrelated lease cannot shorten an OFD
+lock lifetime on Linux. Focused worker-process tests cover shared-reader
+coexistence, exclusive and mixed-mode contention, independent ranges, timeout
+reporting, and release on disposal. This primitive is not connected to
+`SqliteWalSharedMemoryLocks`, normal `-shm` activity, the pager, or any
+read-mark, writer, or checkpoint role.
 
 **Stage 1 pager attach (in progress):** the physical managed pager maps `-shm`
 and publishes/rebuilds a dual-header WAL-index on create/open, commit, and

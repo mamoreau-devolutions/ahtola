@@ -90,7 +90,8 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
     private const int ProtRead = 0x1;
     private const int ProtWrite = 0x2;
     private const int MapShared = 0x01;
-    private const int MsSync = 0x04;
+    // Linux MS_SYNC=4; Darwin MS_SYNC=0x0010.
+    private static int MsSyncFlag => OperatingSystem.IsMacOS() ? 0x0010 : 0x04;
     private const uint DuplicateSameAccess = 0x0000_0002;
 
     /// <summary>
@@ -176,7 +177,8 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
                 return duplicate;
             }
 
-            if (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+            if ((OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+                || OperatingSystem.IsMacOS())
             {
                 var descriptor = Native.Dup(_fileHandle);
                 if (descriptor < 0)
@@ -326,9 +328,11 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
             return;
         if (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
             return;
+        if (OperatingSystem.IsMacOS())
+            return;
 
         throw new PlatformNotSupportedException(
-            "Physical SQLite shared-memory mappings are supported only on Windows and 64-bit Linux.");
+            "Physical SQLite shared-memory mappings are supported only on Windows, 64-bit Linux, and macOS.");
     }
 
     private void SynchronizeLengthLocked()
@@ -354,9 +358,10 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
         {
             MapWindowsViewLocked(length);
         }
-        else if (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+        else if ((OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+                 || OperatingSystem.IsMacOS())
         {
-            MapLinuxViewLocked(length);
+            MapUnixViewLocked(length);
         }
         else
         {
@@ -399,7 +404,7 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
         _view = new SafeWindowsMappedViewHandle(address);
     }
 
-    private void MapLinuxViewLocked(long length)
+    private void MapUnixViewLocked(long length)
     {
         var address = Native.Mmap(
             address: 0,
@@ -429,9 +434,10 @@ internal sealed partial class PhysicalSqliteWalSharedMemoryMapping :
             return;
         }
 
-        if (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+        if ((OperatingSystem.IsLinux() && Environment.Is64BitProcess)
+            || OperatingSystem.IsMacOS())
         {
-            if (Native.Msync(address, checked((nuint)_length), MsSync) != 0)
+            if (Native.Msync(address, checked((nuint)_length), MsSyncFlag) != 0)
                 ThrowNativeIOException("msync", Marshal.GetLastPInvokeError());
             RandomAccess.FlushToDisk(_fileHandle);
             return;

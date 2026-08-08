@@ -469,14 +469,14 @@ public sealed class SqliteWalIndexSharedMemoryTests
     }
 
     private static bool SupportsPhysicalMapping
-        => OperatingSystem.IsWindows() || (OperatingSystem.IsLinux() && Environment.Is64BitProcess);
+        => OperatingSystem.IsWindows() || (OperatingSystem.IsLinux() && Environment.Is64BitProcess) || OperatingSystem.IsMacOS();
 
     private static void RequirePhysicalMappingSupport()
     {
         if (!SupportsPhysicalMapping)
         {
             Assert.Ignore(
-                "Physical SQLite shared-memory mappings are supported only on Windows and 64-bit Linux.");
+                "Physical SQLite shared-memory mappings are supported only on Windows, 64-bit Linux, and macOS.");
         }
     }
 

@@ -656,6 +656,9 @@ public class SqliteWalInteroperabilityContractTests
         }
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string Path, long Offset, long Length), IDisposable>
+        s_macOsLeases = new();
+
     private static void LockRange(FileStream stream, long offset, long length)
     {
         if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
@@ -664,8 +667,22 @@ public class SqliteWalInteroperabilityContractTests
             return;
         }
 
+        if (OperatingSystem.IsMacOS())
+        {
+            // FileStream.Lock is unsupported on Darwin; mirror production fcntl locks.
+            var locks = new SqliteWalByteRangeLock(stream.Name);
+            var lease = locks.AcquireExclusive(offset, length, TimeSpan.Zero);
+            if (!s_macOsLeases.TryAdd((stream.Name, offset, length), lease))
+            {
+                lease.Dispose();
+                throw new IOException("byte-range lock already held");
+            }
+
+            return;
+        }
+
         throw new PlatformNotSupportedException(
-            "Managed SQLite WAL locking requires byte-range locks that are supported only on Windows and Linux.");
+            "Managed SQLite WAL locking requires byte-range locks that are supported only on Windows, Linux, and macOS.");
     }
 
     private static void UnlockRange(FileStream stream, long offset, long length)
@@ -676,8 +693,15 @@ public class SqliteWalInteroperabilityContractTests
             return;
         }
 
+        if (OperatingSystem.IsMacOS())
+        {
+            if (s_macOsLeases.TryRemove((stream.Name, offset, length), out var lease))
+                lease.Dispose();
+            return;
+        }
+
         throw new PlatformNotSupportedException(
-            "Managed SQLite WAL locking requires byte-range locks that are supported only on Windows and Linux.");
+            "Managed SQLite WAL locking requires byte-range locks that are supported only on Windows, Linux, and macOS.");
     }
 
     private static FileStream OpenSharedMemoryLockCarrier(string databasePath)

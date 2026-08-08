@@ -165,7 +165,7 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 **Exit criteria**
 
 - [x] Stock SQLite and managed open the same live DB without exclusive 512-byte ownership (DELETE-mode / handoff proven).
-- [x] No silent downgrade on unsupported platforms (still fail closed off Windows/Linux).
+- [x] No silent downgrade on unsupported platforms (still fail closed off Windows/Linux/macOS).
 - [x] Characterization suite rewritten for SHARED coexistence.
 - [x] Live WAL multi-engine `-shm` interop (stock SQLite + managed both WAL; reader/writer both directions + checkpoint).
 - [ ] PENDING/RESERVED DELETE polish + optional Turso differential stress.

@@ -95,15 +95,17 @@ Treat Ahtola as SQLite-*compatible*, not a full SQLite replacement:
   and persists `sqlite_stat1` statistics, but the planner does not yet consume
   them; the first usable index by name wins. Prefer `ORDER BY` when order matters
   (`GROUP BY` is first-encounter order).
-- **File-backed platforms** — Windows and 64-bit Linux only today. In-memory
-  works everywhere; macOS / 32-bit Linux physical opens throw
-  `PlatformNotSupportedException`.
+- **File-backed platforms** — Windows, 64-bit Linux, and macOS. In-memory works
+  everywhere; other platforms (e.g. 32-bit Linux) throw
+  `PlatformNotSupportedException` on physical open. macOS uses POSIX
+  `fcntl(F_SETLK)` (process-associated locks, not Linux OFD); multi-engine
+  claims on macOS need host verification.
 - **Multi-engine files (Stage 6)** — physical opens use SQLite main-file SHARED
-  locking (Windows / 64-bit Linux). Managed and stock SQLite can share the same
-  live WAL database (`-shm` DMS + peer WAL visibility on new statements). Pooling
-  may retain managed handles until `Pooling=False` or
-  `SqliteConnection.ClearAllPools()`. PENDING/RESERVED DELETE-mode polish and a
-  Turso binary differential remain optional depth. See
+  locking (Windows / 64-bit Linux / macOS). Managed and stock SQLite can share
+  the same live WAL database on Windows/Linux (`-shm` DMS + peer WAL visibility
+  on new statements). Pooling may retain managed handles until `Pooling=False`
+  or `SqliteConnection.ClearAllPools()`. PENDING/RESERVED DELETE-mode polish and
+  a Turso binary differential remain optional depth. See
   [docs/wal-interoperability-contract.md](docs/wal-interoperability-contract.md).
 - **Foreign read-only** — `Mode=ReadOnly;Foreign Read Only=True;Pooling=False`
   can read a DB still held by native SQLite/Turso (e.g. winget `index.db`) without

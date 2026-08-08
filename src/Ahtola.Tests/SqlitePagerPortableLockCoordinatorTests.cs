@@ -71,7 +71,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
     [NonParallelizable]
     public void PhysicalPagerAllowsAnotherManagedProcessUnderSharedMainFileLock()
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
             Assert.Ignore("Physical managed WAL lock coordination requires Windows or Linux byte-range locks.");
 
         var workDirectory = CreateWorkDirectory();
@@ -144,7 +144,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
     [NonParallelizable]
     public void ManagedSharedLockAllowsOrdinarySqliteWhilePagersRemainOpen()
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
             Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
 
         var workDirectory = CreateWorkDirectory();
@@ -228,7 +228,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
     [NonParallelizable]
     public void OrdinarySqliteReaderCoexistsWithManagedOpenUnderSharedLocks()
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
             Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
 
         var workDirectory = CreateWorkDirectory();
@@ -290,7 +290,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
     [NonParallelizable]
     public void ConcurrentOwnershipWaiterHonorsItsOwnZeroTimeout()
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
             Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
 
         var workDirectory = CreateWorkDirectory();
@@ -354,7 +354,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
     [NonParallelizable]
     public void ManagedOwnerRecoversCommittedWalBeforeSqliteHandoff()
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
             Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
 
         var workDirectory = CreateWorkDirectory();
@@ -394,7 +394,7 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
     [NonParallelizable]
     public void FailedManagedRecoveryReleasesOwnershipForRepairAndReopen()
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
             Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
 
         var workDirectory = CreateWorkDirectory();
@@ -673,11 +673,26 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
         return page;
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IDisposable> s_macOsMainFileLeases = new();
+
     private static void LockMainFileOwnershipRange(FileStream stream)
     {
         if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
         {
             stream.Lock(0x4000_0000, 512);
+            return;
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            var locks = new SqliteWalByteRangeLock(stream.Name);
+            var lease = locks.AcquireExclusive(0x4000_0000, 512, TimeSpan.Zero);
+            if (!s_macOsMainFileLeases.TryAdd(stream.Name, lease))
+            {
+                lease.Dispose();
+                throw new IOException("main-file ownership range already held");
+            }
+
             return;
         }
 
@@ -689,6 +704,13 @@ public sealed class SqlitePagerPortableLockCoordinatorTests
         if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
         {
             stream.Unlock(0x4000_0000, 512);
+            return;
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            if (s_macOsMainFileLeases.TryRemove(stream.Name, out var lease))
+                lease.Dispose();
             return;
         }
 
