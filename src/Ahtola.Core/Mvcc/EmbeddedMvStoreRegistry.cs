@@ -9,32 +9,64 @@ namespace Ahtola.Core.Mvcc;
 /// </summary>
 internal static class EmbeddedMvStoreRegistry
 {
+    private sealed class Entry
+    {
+        internal required MvStore Store { get; init; }
+        internal int RefCount;
+    }
+
     private sealed class Scope
     {
-        private readonly Dictionary<string, MvStore> _stores = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
 
         internal MvStore GetOrCreate(string key, Func<MvStore> factory)
         {
-            lock (_stores)
+            lock (_entries)
             {
-                if (_stores.TryGetValue(key, out var existing))
-                    return existing;
+                if (_entries.TryGetValue(key, out var existing))
+                {
+                    existing.RefCount++;
+                    return existing.Store;
+                }
+
                 var created = factory();
-                _stores.Add(key, created);
+                _entries.Add(key, new Entry { Store = created, RefCount = 1 });
                 return created;
             }
         }
 
         internal bool TryGet(string key, out MvStore? store)
         {
-            lock (_stores)
-                return _stores.TryGetValue(key, out store);
+            lock (_entries)
+            {
+                if (_entries.TryGetValue(key, out var entry))
+                {
+                    entry.RefCount++;
+                    store = entry.Store;
+                    return true;
+                }
+
+                store = null;
+                return false;
+            }
         }
 
-        internal void Remove(string key)
+        /// <summary>
+        /// Drops one attachment. When the last reference is released, removes the
+        /// entry and returns the store so the caller can dispose the logical log.
+        /// </summary>
+        internal MvStore? Release(string key)
         {
-            lock (_stores)
-                _stores.Remove(key);
+            lock (_entries)
+            {
+                if (!_entries.TryGetValue(key, out var entry))
+                    return null;
+                entry.RefCount--;
+                if (entry.RefCount > 0)
+                    return null;
+                _entries.Remove(key);
+                return entry.Store;
+            }
         }
     }
 
@@ -53,6 +85,9 @@ internal static class EmbeddedMvStoreRegistry
         return ResolveScope(fileSystem, databasePath, out var key).GetOrCreate(key, factory);
     }
 
+    /// <summary>
+    /// Attaches to an existing shared store and increments its refcount.
+    /// </summary>
     internal static bool TryGet(IFileSystem fileSystem, string databasePath, out MvStore? store)
     {
         ArgumentNullException.ThrowIfNull(fileSystem);
@@ -61,12 +96,16 @@ internal static class EmbeddedMvStoreRegistry
         return ResolveScope(fileSystem, databasePath, out var key).TryGet(key, out store);
     }
 
-    internal static void Remove(IFileSystem fileSystem, string databasePath)
+    /// <summary>
+    /// Releases one attachment. Returns the store when this was the last reference
+    /// (caller should dispose the logical log).
+    /// </summary>
+    internal static MvStore? Release(IFileSystem fileSystem, string databasePath)
     {
         ArgumentNullException.ThrowIfNull(fileSystem);
         ArgumentException.ThrowIfNullOrEmpty(databasePath);
 
-        ResolveScope(fileSystem, databasePath, out var key).Remove(key);
+        return ResolveScope(fileSystem, databasePath, out var key).Release(key);
     }
 
     private static Scope ResolveScope(IFileSystem fileSystem, string databasePath, out string key)

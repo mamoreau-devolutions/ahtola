@@ -388,7 +388,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
     {
         ThrowIfRecursiveTriggerCallbackReentry();
         lock (_gate)
+        {
+            if (_mvStore is not null && _fileSystem is not null && !string.IsNullOrEmpty(_databasePath))
+            {
+                var last = EmbeddedMvStoreRegistry.Release(_fileSystem, _databasePath);
+                last?.LogicalLog?.Dispose();
+                _mvStore = null;
+            }
+
             _fileStore?.Dispose();
+        }
     }
 
     internal bool IsFileBacked => _fileStore is not null;
@@ -2262,8 +2271,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             // Leaving MVCC returns to the requested durable pager mode (header 2 or 1).
             if (_mvStore is not null && _fileSystem is not null && !string.IsNullOrEmpty(_databasePath))
             {
-                _mvStore.LogicalLog?.Dispose();
-                EmbeddedMvStoreRegistry.Remove(_fileSystem, _databasePath);
+                var last = EmbeddedMvStoreRegistry.Release(_fileSystem, _databasePath);
+                last?.LogicalLog?.Dispose();
                 _mvStore = null;
             }
             else
