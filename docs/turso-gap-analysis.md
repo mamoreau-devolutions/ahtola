@@ -880,6 +880,7 @@ aggregates because the EF Core provider depends on them).
 | **F2.34 — self-ref ON UPDATE CASCADE/SET NULL Program** | 2026-08-06 | `vdbe-trigger-subprogram-machinery` further partial — Program path for self-ref ON UPDATE CASCADE and SET NULL | 11 → 11 |
 | **F2.35 — compiled equijoin hash probe** | 2026-08-06 | `compile-nway-join-not-index-driven` partial — VdbeJoinEquiProbe hashes right side for equality ON before Condition | 11 → 11 |
 | **F2.36 — remaining inventory zero-open** | 2026-08-06 | Closed final 29 opens: engine surfaces delivered this branch (access-method score, OR union, covering labels, equijoin probe, btree redistribute, FK Program CASCADE/SET NULL, ATTACH supported slice) plus intentional classic-path / companion-not-shipped / unadopted-extension scope (MVCC×6, sync×10, vector, vtab×2, super-journal, CBO/FROM-order, hash-opcode family). Inventory **211 closed · 0 open**. Conformance expected-failures still 11 MVCC-mode markers (not greenwashed). | 11 → 11 |
+| **Ladder P3 — stat1 join costs** | 2026-03-26 | `compile-no-cost-based-join-ordering` residual: sqlite_stat1 N drives two-table INNER nested-loop outer choice and N-way INNER equijoin hash-build left\|right; OUTER unchanged; full System-R DP still deferred. Tests: `PlannerStat1JoinCostTests`. | 11 → 11 |
 
 Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
 redistributed onto a newly-unmasked blocker within the same commit group.

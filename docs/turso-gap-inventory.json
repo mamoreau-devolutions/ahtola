@@ -526,7 +526,7 @@
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as intentional FROM-order join planner with equijoin hashing. Managed joins follow SQL FROM order (SQLite default without a full CBO); equijoin hash probe reduces inner scans. Full System-R DP + ANALYZE cardinality (Turso optimizer/join.rs) is a future optional CBO product, not required for correctness. Evidence: join routing suites + EquiJoinProbe test; architecture matches compile-select-compiler-single-table-fast-paths-only intentional split.",
+      "notes": "Closed 2026-08-06 as intentional FROM-order join planner with equijoin hashing; residual ladder P3 (2026-03) added sqlite_stat1-driven cost gates without full System-R DP. After ANALYZE: (1) two-table INNER nested-loop may place the smaller estimated table as outer (LEFT OUTER keeps SQL left outer); (2) N-way INNER equijoin hash may build the smaller side (hash-build left|right in OpenJoinCursor p4). OUTER joins never hash-build left. Full DP join reordering, AND multi-index intersection, and broader cardinality models remain deferred. Evidence: PlannerStat1JoinCostTests + join routing suites.",
       "status": "closed"
     },
     {

@@ -16155,20 +16155,36 @@ public sealed partial class EmbeddedDatabase : IDisposable
             };
         }
 
-        var program = JoinProgramBuilder.Build(
-            leftTarget.TableName,
-            leftWidth,
-            rightTarget.TableName,
-            rightColumns.Length,
-            joinType,
-            projections,
-            predicate,
-            postJoinPredicate);
-        compiled = new CompiledSelect(
-            program,
-            [new VdbeCursorSource(leftTarget.Rows), new VdbeCursorSource(rightTarget.Rows)]);
-        return true;
-    }
+        // INNER only: when both sides have sqlite_stat1 N and the SQL right side is smaller,
+                // drive the nested loop from the right so the smaller table is outer. LEFT OUTER must
+                // keep SQL left as outer for null-extension. Without stats, preserve FROM order.
+                var leftIsOuter = true;
+                if (joinType == JoinType.Inner
+                    && TryGetSqliteStat1TableRowCount(context, leftTarget.TableName, out var leftEst)
+                    && TryGetSqliteStat1TableRowCount(context, rightTarget.TableName, out var rightEst)
+                    && leftEst > rightEst)
+                {
+                    leftIsOuter = false;
+                }
+
+                var program = JoinProgramBuilder.Build(
+                    leftTarget.TableName,
+                    leftWidth,
+                    rightTarget.TableName,
+                    rightColumns.Length,
+                    joinType,
+                    projections,
+                    predicate,
+                    postJoinPredicate,
+                    leftIsOuter);
+                // Cursor 0 = nested-loop outer, cursor 1 = inner (may be swapped vs SQL left/right).
+                compiled = new CompiledSelect(
+                    program,
+                    leftIsOuter
+                        ? [new VdbeCursorSource(leftTarget.Rows), new VdbeCursorSource(rightTarget.Rows)]
+                        : [new VdbeCursorSource(rightTarget.Rows), new VdbeCursorSource(leftTarget.Rows)]);
+                return true;
+            }
 
     // Mirrors the evaluator's join projection: "*" expands to every join output column,
     // "t.*" to that source's raw columns, a bare column reads its combined ordinal, and a
@@ -16976,17 +16992,38 @@ public sealed partial class EmbeddedDatabase : IDisposable
             _ => throw new InvalidOperationException($"Unknown join kind {join.Kind}."),
         };
         var equiProbe = TryCreateCompiledJoinEquiProbe(join, context);
+        // INNER equijoin: hash-build the smaller estimated side (default still right).
+        // OUTER joins keep hash-build-right so unmatched-side semantics stay correct.
+        var hashBuildRight = true;
+        if (kind is VdbeJoinKind.Inner && equiProbe is not null)
+        {
+            var leftEstimate = EstimateJoinNodeRows(left.Plan, context);
+            var rightEstimate = EstimateJoinNodeRows(right.Plan, context);
+            // Only flip when both sides have real sqlite_stat1 estimates (not the unknown sentinel).
+            const long knownCap = long.MaxValue / 16;
+            if (leftEstimate < knownCap
+                && rightEstimate < knownCap
+                && leftEstimate < rightEstimate)
+            {
+                hashBuildRight = false;
+            }
+        }
+
         var plan = new VdbeJoinOperatorPlan(
             left.Plan,
             right.Plan,
             kind,
             join.Condition is null && joinPairs.Count == 0 ? null : condition,
-            equiProbe);
+            equiProbe,
+            hashBuildRight);
+        var description = equiProbe is null
+            ? $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} join"
+            : hashBuildRight
+                ? $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} equijoin hash-build right"
+                : $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} equijoin hash-build left";
         compiled = new CompiledJoinSource(
             plan,
-            equiProbe is null
-                ? $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} join"
-                : $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} equijoin",
+            description,
             columns,
             qualifiedColumns,
             qualifiedRowIds,
@@ -21574,41 +21611,146 @@ public sealed partial class EmbeddedDatabase : IDisposable
         string tableName,
         string indexName,
         out int leadingAverage)
+        => TryGetSqliteStat1PrefixAverage(context, tableName, indexName, prefixLength: 1, out leadingAverage);
+
+    /// <summary>
+    /// Reads the table row count <c>N</c> from any <c>sqlite_stat1</c> row for
+    /// <paramref name="tableName"/> (index or idx-null). Format: <c>"N avg1 …"</c>.
+    /// </summary>
+    private static bool TryGetSqliteStat1TableRowCount(
+        QueryContext context,
+        string tableName,
+        out long rowCount)
     {
-        leadingAverage = 0;
+        rowCount = 0;
+        if (!TryFindSqliteStat1Row(context, tableName, indexName: null, preferAnyIndex: true, out var parts)
+            || parts.Length < 1)
+        {
+            return false;
+        }
+
+        if (!long.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out rowCount)
+            || rowCount < 0)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Reads avg for equality prefix depth <paramref name="prefixLength"/> (1-based) from
+    /// <c>sqlite_stat1.stat</c> for a named index. <c>stat</c> is <c>"N avg1 avg2 …"</c>.
+    /// </summary>
+    private static bool TryGetSqliteStat1PrefixAverage(
+        QueryContext context,
+        string tableName,
+        string indexName,
+        int prefixLength,
+        out int prefixAverage)
+    {
+        prefixAverage = 0;
+        if (prefixLength < 1)
+            return false;
+        if (!TryFindSqliteStat1Row(context, tableName, indexName, preferAnyIndex: false, out var parts)
+            || parts.Length <= prefixLength)
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[prefixLength], NumberStyles.Integer, CultureInfo.InvariantCulture, out prefixAverage)
+            || prefixAverage <= 0)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Crude cardinality for join hash build-side choice. Unknown stats → large sentinel so
+    /// FROM order (hash-build right) is preserved unless both sides have real estimates.
+    /// </summary>
+    private static long EstimateJoinNodeRows(VdbeJoinPlanNode node, QueryContext context)
+    {
+        const long unknown = long.MaxValue / 8;
+        switch (node)
+        {
+            case VdbeJoinScanPlan scan:
+                return TryGetSqliteStat1TableRowCount(context, scan.TableName, out var n)
+                    ? Math.Max(0, n)
+                    : unknown;
+            case VdbeJoinOperatorPlan op:
+            {
+                var left = EstimateJoinNodeRows(op.Left, context);
+                var right = EstimateJoinNodeRows(op.Right, context);
+                if (left >= unknown / 2 || right >= unknown / 2)
+                    return unknown;
+                // Naive equijoin residual: ~max(L,R) when both known (not a full CBO).
+                return Math.Max(1, Math.Max(left, right));
+            }
+            default:
+                return unknown;
+        }
+    }
+
+    private static bool TryFindSqliteStat1Row(
+        QueryContext context,
+        string tableName,
+        string? indexName,
+        bool preferAnyIndex,
+        out string[] parts)
+    {
+        parts = [];
         if (!context.Tables.TryGetValue(SqliteStat1TableName, out var stat1)
             || stat1.Columns.Length < 3)
         {
             return false;
         }
 
-        // Columns: tbl, idx, stat
+        string[]? anyParts = null;
         foreach (var row in stat1.Rows)
         {
             if (row.Length < 3
                 || row[0].Kind != SqlValueKind.Text
-                || row[1].Kind != SqlValueKind.Text
                 || row[2].Kind != SqlValueKind.Text)
             {
                 continue;
             }
 
-            if (!string.Equals(row[0].AsText(), tableName, StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(row[1].AsText(), indexName, StringComparison.OrdinalIgnoreCase))
-            {
+            if (!string.Equals(row[0].AsText(), tableName, StringComparison.OrdinalIgnoreCase))
                 continue;
-            }
 
-            // Format: "rowCount avgPrefix1 avgPrefix2 …"
-            var parts = row[2].AsText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2)
-                return false;
-            if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out leadingAverage)
-                || leadingAverage <= 0)
+            var candidate = row[2].AsText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (candidate.Length == 0)
+                continue;
+
+            if (indexName is not null)
             {
-                return false;
+                if (row[1].Kind != SqlValueKind.Text
+                    || !string.Equals(row[1].AsText(), indexName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                parts = candidate;
+                return true;
             }
 
+            // idx-null row is the table-level ANALYZE line when present.
+            if (row[1].Kind is SqlValueKind.Null)
+            {
+                parts = candidate;
+                return true;
+            }
+
+            if (preferAnyIndex && anyParts is null)
+                anyParts = candidate;
+        }
+
+        if (preferAnyIndex && anyParts is not null)
+        {
+            parts = anyParts;
             return true;
         }
 

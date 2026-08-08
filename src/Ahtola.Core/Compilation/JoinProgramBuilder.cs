@@ -109,45 +109,58 @@ public static class JoinProgramBuilder
         JoinType joinType,
         IReadOnlyList<JoinProjection> projections,
         VdbeRowPredicate? predicate = null,
-        VdbeRowPredicate? postJoinPredicate = null)
-    {
-        ArgumentNullException.ThrowIfNull(leftTableName);
-        ArgumentNullException.ThrowIfNull(rightTableName);
-        ArgumentNullException.ThrowIfNull(projections);
-        if (leftColumnCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(leftColumnCount), "A join needs at least one left column.");
-        if (rightColumnCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(rightColumnCount), "A join needs at least one right column.");
-        if (projections.Count == 0)
-            throw new ArgumentException("A join must project at least one output column.", nameof(projections));
-        if (joinType is not (JoinType.Inner or JoinType.LeftOuter))
-            throw new ArgumentOutOfRangeException(nameof(joinType));
-
-        var width = leftColumnCount + rightColumnCount;
-        foreach (var projection in projections)
+            VdbeRowPredicate? postJoinPredicate = null,
+            bool leftIsOuter = true)
         {
-            if (!projection.IsConstant && projection.ColumnIndex >= width)
+            ArgumentNullException.ThrowIfNull(leftTableName);
+            ArgumentNullException.ThrowIfNull(rightTableName);
+            ArgumentNullException.ThrowIfNull(projections);
+            if (leftColumnCount <= 0)
+                throw new ArgumentOutOfRangeException(nameof(leftColumnCount), "A join needs at least one left column.");
+            if (rightColumnCount <= 0)
+                throw new ArgumentOutOfRangeException(nameof(rightColumnCount), "A join needs at least one right column.");
+            if (projections.Count == 0)
+                throw new ArgumentException("A join must project at least one output column.", nameof(projections));
+            if (joinType is not (JoinType.Inner or JoinType.LeftOuter))
+                throw new ArgumentOutOfRangeException(nameof(joinType));
+            if (!leftIsOuter && joinType != JoinType.Inner)
             {
                 throw new ArgumentException(
-                    $"Projection reads combined column {projection.ColumnIndex} of a {width}-column joined row.",
-                    nameof(projections));
+                    "Only INNER joins may place the SQL right table as the nested-loop outer.",
+                    nameof(leftIsOuter));
             }
-        }
 
-        var isLeftOuter = joinType == JoinType.LeftOuter;
-        var outer = new Cursor(0);
-        var inner = new Cursor(1);
-        var outputBase = width;
-        var flag = new Register(width + projections.Count);
-        var registerCount = width + projections.Count + (isLeftOuter ? 1 : 0);
-        var combinedRange = new RegisterRange(new Register(0), width);
-        var outputRange = new RegisterRange(new Register(outputBase), projections.Count);
+            var width = leftColumnCount + rightColumnCount;
+            foreach (var projection in projections)
+            {
+                if (!projection.IsConstant && projection.ColumnIndex >= width)
+                {
+                    throw new ArgumentException(
+                        $"Projection reads combined column {projection.ColumnIndex} of a {width}-column joined row.",
+                        nameof(projections));
+                }
+            }
 
-        var ins = new List<VdbeInstruction>
-        {
-            new OpenReadCursorInstruction(outer, leftTableName, leftColumnCount),
-            new OpenReadCursorInstruction(inner, rightTableName, rightColumnCount),
-        };
+            var isLeftOuter = joinType == JoinType.LeftOuter;
+            var outer = new Cursor(0);
+            var inner = new Cursor(1);
+            var outputBase = width;
+            var flag = new Register(width + projections.Count);
+            var registerCount = width + projections.Count + (isLeftOuter ? 1 : 0);
+            var combinedRange = new RegisterRange(new Register(0), width);
+            var outputRange = new RegisterRange(new Register(outputBase), projections.Count);
+
+            // Cursor 0 is always the nested-loop outer driver. For INNER joins the planner may put the
+            // smaller estimated table outside while still staging registers as SQL left ++ right.
+            var outerTable = leftIsOuter ? leftTableName : rightTableName;
+            var outerColumns = leftIsOuter ? leftColumnCount : rightColumnCount;
+            var innerTable = leftIsOuter ? rightTableName : leftTableName;
+            var innerColumns = leftIsOuter ? rightColumnCount : leftColumnCount;
+            var ins = new List<VdbeInstruction>
+            {
+                new OpenReadCursorInstruction(outer, outerTable, outerColumns),
+                new OpenReadCursorInstruction(inner, innerTable, innerColumns),
+            };
 
         var rewindOuterIndex = ins.Count;
         ins.Add(new RewindCursorInstruction(outer, new ProgramCounter(0)));
@@ -160,7 +173,13 @@ public static class JoinProgramBuilder
         ins.Add(new RewindCursorInstruction(inner, new ProgramCounter(0)));
 
         var innerLoop = ins.Count;
-        EmitCombinedColumnReads(ins, outer, leftColumnCount, inner, rightColumnCount);
+                EmitCombinedColumnReads(
+                    ins,
+                    outer,
+                    inner,
+                    leftColumnCount,
+                    rightColumnCount,
+                    leftIsOuter);
 
         var filterIndex = -1;
         if (predicate is not null)
@@ -255,20 +274,23 @@ public static class JoinProgramBuilder
         return new VdbeProgram(registerCount, cursorCount: 2, ins);
     }
 
-    // Materializes the current outer/inner pair into the combined staging block: the outer row's
-    // columns occupy r[0..leftColumnCount-1] and the inner row's columns follow.
+    // Materializes the current outer/inner pair into the combined staging block as SQL
+        // left ++ right, regardless of which physical table drives the outer loop.
     private static void EmitCombinedColumnReads(
         List<VdbeInstruction> ins,
         Cursor outer,
-        int leftColumnCount,
-        Cursor inner,
-        int rightColumnCount)
-    {
-        for (var i = 0; i < leftColumnCount; i++)
-            ins.Add(new ColumnInstruction(outer, i, new Register(i)));
-        for (var j = 0; j < rightColumnCount; j++)
-            ins.Add(new ColumnInstruction(inner, j, new Register(leftColumnCount + j)));
-    }
+            Cursor inner,
+            int leftColumnCount,
+            int rightColumnCount,
+            bool leftIsOuter)
+        {
+            var leftCursor = leftIsOuter ? outer : inner;
+            var rightCursor = leftIsOuter ? inner : outer;
+            for (var i = 0; i < leftColumnCount; i++)
+                ins.Add(new ColumnInstruction(leftCursor, i, new Register(i)));
+            for (var j = 0; j < rightColumnCount; j++)
+                ins.Add(new ColumnInstruction(rightCursor, j, new Register(leftColumnCount + j)));
+        }
 
     // Builds the result row into the output block from the combined staging registers: column
     // outputs copy their combined-row register, constant outputs load their folded value.
