@@ -12,8 +12,10 @@ the machine-readable inventory, with stable IDs for status tracking
 time (171 entries)**; the JSON is the live tracking source of truth. Closure
 progress since analysis (waves F1–F2.18) is recorded in
 [section 11](#11-closure-progress-since-analysis), and current counts are:
-**211 entries, 182 closed**; expected-failures file down from **606 → 11**
-lines, all of which require Turso's unported MVCC engine.
+**211 entries, 182+ closed**; expected-failures file down from **606 → 0**
+lines after Phase 1 MVCC surface (`journal_mode=mvcc` + `BEGIN CONCURRENT` +
+in-process `MvStore`). Remaining MVCC depth (row-version cursors, durable
+logical log, checkpoint SM) is tracked in [`mvcc-port-contract.md`](mvcc-port-contract.md).
 
 **Ground truth.** `src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt`
 (606 failure lines at analysis time). Every line was cross-referenced to at least
@@ -671,24 +673,17 @@ checksums all match. The open gaps are **behavioral, not format**:
 
 ## 8. MVCC / transactions layer
 Turso implements a full MVCC layer (`core/mvcc/`: logical clock, version
-cursors, yield points). Ahtola has **no `*Mvcc*.cs`** — by design, it mirrors
-the *observable* transaction semantics (snapshot isolation at begin,
-atomic commit/rollback, savepoints) with managed idioms instead of the MVCC
-machinery itself. The audit therefore separates the 11 intentionally-absent
-structural entries (clock, version store, yield hooks — all s4 `missing`
-under the adaptation model) from the **3 real behavioral gaps**:
-- **`mvcc-statement-level-rollback-on-constraint-violation`** (s2, 20 mapped):
-  SQLite aborts only the offending statement on constraint violation
-  (per `ON CONFLICT` action); Ahtola's statement-rollback scope differs in
-  multi-statement transactions.
-- **Savepoint edge semantics** (`partial`): nested savepoint release/rollback
-  ordering vs. schema changes.
-- **Hot-journal recovery path**: rollback-journal replay after crash is
-  implemented but recovery-time interactions with WAL mode are less covered.
-The snapshot invariants from the MVCC porting contract (isolation for the
-transaction lifetime, `ManagedSnapshotException` failure reasons,
-`ApplySnapshotPragmaHeader` propagation of schema/user version/application id)
-were audited and hold.
+cursors, yield points, logical log, checkpoint SM). **Phase 1 (2026-08-07)**
+lands an in-process managed port under `src/Ahtola.Core/Mvcc/`
+(`MvccClock`, `MvStore`, write-set WW conflicts) with SQL surface
+`PRAGMA journal_mode=mvcc` and `BEGIN CONCURRENT`. See
+[`mvcc-port-contract.md`](mvcc-port-contract.md). Classic path remains default
+(§1.6 of the WAL contract). Not yet ported: row-version chains / dual cursors,
+durable `db-log`, header version 255 persistence, checkpoint SM, GC.
+The earlier behavioral gaps below are closed or reduced:
+- **`mvcc-statement-level-rollback-on-constraint-violation`**: closed (F2.x).
+- **Savepoint / cache_size**: closed.
+- Conformance: **11 → 0** MVCC expected-failure markers.
 
 | ID | Kind | Severity | Effort | Mapped fails | Cited | Summary |
 | --- | --- | --- | --- | ---: | ---: | --- |

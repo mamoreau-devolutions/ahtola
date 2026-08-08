@@ -433,6 +433,66 @@ public class ManagedTransactionModeLockingTests
     }
 
     [Test]
+    public void ConcurrentTransactionSucceedsAfterMvccIsEnabled()
+    {
+        using var db = new ManagedFileDatabase();
+        using var connection = db.Connect();
+
+        connection.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        connection.ExecuteNonQuery("BEGIN CONCURRENT;");
+        connection.ExecuteNonQuery("INSERT INTO t VALUES (1);");
+        connection.ExecuteNonQuery("COMMIT;");
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT v FROM t;";
+        Convert.ToInt64(command.ExecuteScalar()).Should().Be(1L);
+    }
+
+    [Test]
+    public void NestedBeginInsideConcurrentErrors()
+    {
+        using var db = new ManagedFileDatabase();
+        using var connection = db.Connect();
+
+        connection.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        connection.ExecuteNonQuery("BEGIN CONCURRENT;");
+        var error = Capture(() => connection.ExecuteNonQuery("BEGIN IMMEDIATE;"));
+        error.Should().NotBeNull();
+        error!.Message.Should().Contain("cannot start a transaction within a transaction");
+        connection.ExecuteNonQuery("ROLLBACK;");
+    }
+
+    [Test]
+    public void ConcurrentWritersCanCommitDisjointInserts()
+    {
+        using var db = new ManagedFileDatabase();
+        using var a = db.Connect();
+        using var b = db.Connect();
+
+        a.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        // Ensure peer sees durable MVCC mode (shared MvStore registry + header 255).
+        ReadValue(b, "PRAGMA journal_mode;").Should().Be("mvcc");
+
+        a.ExecuteNonQuery("BEGIN CONCURRENT;");
+        b.ExecuteNonQuery("BEGIN CONCURRENT;");
+        a.ExecuteNonQuery("INSERT INTO t VALUES (10);");
+        b.ExecuteNonQuery("INSERT INTO t VALUES (20);");
+        a.ExecuteNonQuery("COMMIT;");
+        b.ExecuteNonQuery("COMMIT;");
+
+        using var command = a.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM t WHERE v IN (10, 20);";
+        Convert.ToInt64(command.ExecuteScalar()).Should().Be(2L);
+    }
+
+    private static string ReadValue(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToString(command.ExecuteScalar()) ?? string.Empty;
+    }
+
+    [Test]
     public void RepeatedTransactionModeKeywordIsRejected()
     {
         using var db = new ManagedFileDatabase();

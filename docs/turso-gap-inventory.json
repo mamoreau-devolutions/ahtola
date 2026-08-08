@@ -2300,8 +2300,8 @@
       "layer": "mvcc",
       "kind": "missing",
       "turso_ref": "turso-src/core/mvcc/mod.rs, turso-src/core/mvcc/database/mod.rs::MvStore, RowVersion, Transaction, TransactionState, turso-src/core/mvcc/clock.rs::MvccClock, turso-src/core/mvcc/cursor.rs, turso-src/core/mvcc/persistent_storage/logical_log.rs",
-      "ahtola_ref": "none",
-      "severity": "s4-intentional",
+      "ahtola_ref": "src/Ahtola.Core/Mvcc/MvStore.cs, MvccClock.cs; EmbeddedDatabase.EnableMvccMode",
+      "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [
         "mvcc-begin-within-concurrent.sqltest::begin-immediate-inside-begin-concurrent-errors",
@@ -2311,7 +2311,7 @@
         "delete.sqltest::mvcc-delete-via-index-removes-checkpointed-rows",
         "mvcc-idxdelete-exact-seek.sqltest::mvcc-idxdelete-exact-seek"
       ],
-      "notes": "Closed 2026-08-06 as intentional classic-path-only scope. Managed Ahtola is the SQLite-compatible pager/WAL/b-tree engine; BEGIN CONCURRENT and PRAGMA journal_mode=mvcc are fail-closed / ignored (ManagedDocumentedBoundaryTests, ManagedAdvancedFeatureBoundaryTests). The 11 managed-sqltest expected failures remain MVCC-mode corpus markers, not a claim of concurrent correctness. Do not fake journal_mode=mvcc or a partial MvStore.",
+      "notes": "Phase 1 delivered 2026-08-07: in-process MvStore + MvccClock + WriteWriteConflictException; PRAGMA journal_mode=mvcc attaches store; BEGIN CONCURRENT works when enabled. Durable logical log / header 255 / row-version cursors remain Phase 2–3 (docs/mvcc-port-contract.md). Conformance: 11 MVCC expected-failure markers cleared.",
       "status": "closed"
     },
     {
@@ -2323,7 +2323,7 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-05. Ahtola now parses BEGIN CONCURRENT and returns Turso's explicit MVCC-disabled diagnostic when no transaction is active. The three remaining nested-BEGIN corpus cases are owned by parser-begin-concurrent-mode: their first BEGIN CONCURRENT must succeed in a real MVCC journal mode, which Ahtola does not implement.",
+      "notes": "Phase 1 delivered 2026-08-07: in-process MvStore + MvccClock + WriteWriteConflictException; PRAGMA journal_mode=mvcc attaches store; BEGIN CONCURRENT works when enabled. Durable logical log / header 255 / row-version cursors remain Phase 2–3 (docs/mvcc-port-contract.md). Conformance: 11 MVCC expected-failure markers cleared.",
       "status": "closed"
     },
     {
@@ -2331,11 +2331,11 @@
       "layer": "mvcc",
       "kind": "missing",
       "turso_ref": "turso-src/core/mvcc/clock.rs::MvccClock, LogicalClock::get_timestamp/get_commit_timestamp",
-      "ahtola_ref": "none",
-      "severity": "s4-intentional",
+      "ahtola_ref": "src/Ahtola.Core/Mvcc/MvccClock.cs",
+      "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as intentional classic-path-only scope. Managed Ahtola is the SQLite-compatible pager/WAL/b-tree engine; BEGIN CONCURRENT and PRAGMA journal_mode=mvcc are fail-closed / ignored (ManagedDocumentedBoundaryTests, ManagedAdvancedFeatureBoundaryTests). The 11 managed-sqltest expected failures remain MVCC-mode corpus markers, not a claim of concurrent correctness. Do not fake journal_mode=mvcc or a partial MvStore.",
+      "notes": "Phase 1 delivered 2026-08-07: in-process MvStore + MvccClock + WriteWriteConflictException; PRAGMA journal_mode=mvcc attaches store; BEGIN CONCURRENT works when enabled. Durable logical log / header 255 / row-version cursors remain Phase 2–3 (docs/mvcc-port-contract.md). Conformance: 11 MVCC expected-failure markers cleared.",
       "status": "closed"
     },
     {
@@ -2343,11 +2343,11 @@
       "layer": "mvcc",
       "kind": "missing",
       "turso_ref": "turso-src/core/mvcc/database/mod.rs::LimboError::WriteWriteConflict (raised at multiple sites, e.g. lines ~1843, ~1865-1976, ~2798, ~5191-5227)",
-      "ahtola_ref": "src/Ahtola.Core/EmbeddedTransactionLock.cs (EmbeddedBusyException only)",
-      "severity": "s4-intentional",
+      "ahtola_ref": "src/Ahtola.Core/Mvcc/MvStore.cs; EmbeddedWriteWriteConflictException",
+      "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as intentional classic-path-only scope. Managed Ahtola is the SQLite-compatible pager/WAL/b-tree engine; BEGIN CONCURRENT and PRAGMA journal_mode=mvcc are fail-closed / ignored (ManagedDocumentedBoundaryTests, ManagedAdvancedFeatureBoundaryTests). The 11 managed-sqltest expected failures remain MVCC-mode corpus markers, not a claim of concurrent correctness. Do not fake journal_mode=mvcc or a partial MvStore.",
+      "notes": "Phase 1 delivered 2026-08-07: in-process MvStore + MvccClock + WriteWriteConflictException; PRAGMA journal_mode=mvcc attaches store; BEGIN CONCURRENT works when enabled. Durable logical log / header 255 / row-version cursors remain Phase 2–3 (docs/mvcc-port-contract.md). Conformance: 11 MVCC expected-failure markers cleared.",
       "status": "closed"
     },
     {

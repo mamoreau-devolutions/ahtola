@@ -108,8 +108,9 @@ Treat Ahtola as SQLite-*compatible*, not a full SQLite replacement:
   can read a DB still owned by native SQLite/Turso (e.g. winget `index.db`) without
   taking ownership.
 - **Not implemented** — virtual tables / FTS / R-Tree, loadable extensions, raw
-  `sqlite3*` handles (`Handle` is null), MVCC, `BEGIN CONCURRENT`, AEGIS
-  encryption ciphers.
+  `sqlite3*` handles (`Handle` is null), AEGIS encryption ciphers. Durable MVCC
+  logical-log recovery and header marker persistence are incomplete; Phase 1
+  supports in-process `PRAGMA journal_mode=mvcc` + `BEGIN CONCURRENT` only.
 - **Native / Sync companions** — not shipped. Connection-string paths that need
   them fail closed. OS P/Invoke in the pager for locks/WAL is intentional engine
   code, not a Rust SDK binding.

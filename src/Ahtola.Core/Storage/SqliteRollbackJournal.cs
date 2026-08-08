@@ -3,10 +3,17 @@ using System.Buffers.Binary;
 namespace Ahtola.Core.Storage;
 
 /// <summary>The durable journal modes implemented by the managed pager.</summary>
+/// <remarks>
+/// <see cref="Mvcc"/> is Turso's main-memory MVCC mode (header version 255). The
+/// physical pager still keeps a WAL for page durability underneath; the MVCC
+/// store lives on <c>EmbeddedDatabase</c> and is selected when this mode is active.
+/// </remarks>
 public enum SqliteJournalMode
 {
     Delete,
     Wal,
+    /// <summary>Turso MVCC mode (<c>PRAGMA journal_mode=mvcc</c>).</summary>
+    Mvcc,
 }
 
 /// <summary>

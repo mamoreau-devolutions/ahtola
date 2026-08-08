@@ -359,10 +359,10 @@ public sealed class SqlitePager : IDisposable
         var effectiveDatabaseHeader = databaseHeader ?? SqliteDatabaseHeader.CreateDefault();
         if (effectiveDatabaseHeader.PageSize != walHeader.PageSize)
             throw new InvalidOperationException("SQLite database and WAL page sizes must match.");
-        if (effectiveDatabaseHeader.WriteVersion != SqliteFileFormatVersion.Wal
-            || effectiveDatabaseHeader.ReadVersion != SqliteFileFormatVersion.Wal)
+        if (!IsWalCompatibleFormat(effectiveDatabaseHeader.WriteVersion)
+            || !IsWalCompatibleFormat(effectiveDatabaseHeader.ReadVersion))
         {
-            throw new InvalidOperationException("A SQLite WAL overlay requires WAL read and write format versions.");
+            throw new InvalidOperationException("A SQLite WAL overlay requires WAL/MVCC read and write format versions.");
         }
 
         var configuredBusyTimeout = busyTimeout ?? TimeSpan.Zero;
@@ -537,13 +537,15 @@ public sealed class SqlitePager : IDisposable
                 {
                     SqliteFileFormatVersion.Legacy => SqliteJournalMode.Delete,
                     SqliteFileFormatVersion.Wal => SqliteJournalMode.Wal,
+                    // Turso MVCC keeps a WAL open for page durability under header version 255.
+                    SqliteFileFormatVersion.Mvcc => SqliteJournalMode.Mvcc,
                     _ => throw new InvalidDataException(
                         $"Managed storage does not support SQLite file format version {header.WriteVersion}."),
                 };
                 SqliteWalFile? wal = null;
                 try
                 {
-                    if (journalMode == SqliteJournalMode.Wal)
+                    if (UsesWalStorage(journalMode))
                     {
                         if (storageFileSystem.FileExists(walPath))
                         {
@@ -576,7 +578,7 @@ public sealed class SqlitePager : IDisposable
                         effectiveLockManager,
                         pageCacheCapacity,
                         foreignReadOnly);
-                    if (journalMode == SqliteJournalMode.Wal && wal is not null)
+                    if (UsesWalStorage(journalMode) && wal is not null)
                     {
                         var recovery = wal.ScanRecovery();
                         try
@@ -767,7 +769,7 @@ public sealed class SqlitePager : IDisposable
         {
             return _walIndex is not null
                 && _wal is not null
-                && _journalMode == SqliteJournalMode.Wal
+                && UsesWalStorage(_journalMode)
                 && !_foreignReadOnly
                 && _lockManager.UsesFileBackedWalLocks;
         }
@@ -1003,7 +1005,7 @@ public sealed class SqlitePager : IDisposable
     /// </summary>
     public void RecoverUncommittedWalTail(TimeSpan? busyTimeout = null)
     {
-        if (JournalMode != SqliteJournalMode.Wal)
+        if (!UsesWalStorage(JournalMode))
             throw new InvalidOperationException("Rollback-journal mode does not have a WAL tail to recover.");
 
         var configuredBusyTimeout = ResolveBusyTimeout(busyTimeout);
@@ -1163,9 +1165,12 @@ public sealed class SqlitePager : IDisposable
             var pageOne = _pageStore.ReadPage(1);
             var currentHeader = SqliteDatabaseHeader.Parse(pageOne);
             var nextCounter = unchecked(currentHeader.ChangeCounter + 1);
-            var formatVersion = journalMode == SqliteJournalMode.Wal
-                ? SqliteFileFormatVersion.Wal
-                : SqliteFileFormatVersion.Legacy;
+            var formatVersion = journalMode switch
+            {
+                SqliteJournalMode.Wal => SqliteFileFormatVersion.Wal,
+                SqliteJournalMode.Mvcc => SqliteFileFormatVersion.Mvcc,
+                _ => SqliteFileFormatVersion.Legacy,
+            };
             var nextHeader = currentHeader with
             {
                 WriteVersion = formatVersion,
@@ -1179,7 +1184,8 @@ public sealed class SqlitePager : IDisposable
             SqliteWalFile? createdWal = null;
             try
             {
-                if (journalMode == SqliteJournalMode.Wal)
+                // WAL and MVCC both need a WAL file; switching between them keeps the existing one.
+                if (UsesWalStorage(journalMode) && _wal is null)
                 {
                     if (_fileSystem.FileExists(_walPath))
                         TryDeleteCreatedArtifact(_fileSystem, _walPath);
@@ -1205,13 +1211,18 @@ public sealed class SqlitePager : IDisposable
                     });
 
                 _journalMode = journalMode;
-                if (journalMode == SqliteJournalMode.Wal)
+                if (UsesWalStorage(journalMode))
                 {
-                    _wal = createdWal;
-                    createdWal = null;
+                    if (createdWal is not null)
+                    {
+                        _wal = createdWal;
+                        createdWal = null;
+                    }
+
                     _recoveryInfo = RequireWal().ScanRecovery();
                     _visibleRecoveryInfo = _recoveryInfo;
-                    AttachAndPublishWalIndex(readOnly: false);
+                    if (_walIndex is null)
+                        AttachAndPublishWalIndex(readOnly: false);
                 }
                 else
                 {
@@ -1297,7 +1308,7 @@ public sealed class SqlitePager : IDisposable
         {
             return _walIndex is not null
                 && _wal is not null
-                && _journalMode == SqliteJournalMode.Wal
+                && UsesWalStorage(_journalMode)
                 && !_foreignReadOnly
                 && _lockManager.UsesFileBackedWalLocks
                 && _walIndexMapping is { IsReadOnly: false };
@@ -1381,7 +1392,8 @@ public sealed class SqlitePager : IDisposable
     private SqliteCheckpointResult CheckpointWithWalIndexProtocol(
         TimeSpan timeout,
         bool resetCommittedWal,
-        bool writerLockAlreadyHeld)
+        bool writerLockAlreadyHeld,
+        bool checkpointLockAlreadyHeld = false)
     {
         const long writeLockOffset = SqliteWalIndexCheckpointInfo.LockOffset;
         const long checkpointLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 1;
@@ -1397,11 +1409,15 @@ public sealed class SqlitePager : IDisposable
 
         try
         {
-            using var checkpointLease = locks.AcquireExclusive(checkpointLockOffset, length: 1, timeout);
+            // Exclusive rewrite holds lock-manager Checkpoint over SHM bytes [120,128).
+            // Re-locking ckpt/write through a second handle deadlocks on Windows.
+            using var checkpointLease = checkpointLockAlreadyHeld
+                ? null
+                : locks.AcquireExclusive(checkpointLockOffset, length: 1, timeout);
             SqliteWalByteRangeLockLease? writerLease = null;
             try
             {
-                if (resetCommittedWal && !writerLockAlreadyHeld)
+                if (resetCommittedWal && !writerLockAlreadyHeld && !checkpointLockAlreadyHeld)
                 {
                     writerLease = locks.AcquireExclusive(
                         writeLockOffset,
@@ -1438,37 +1454,42 @@ public sealed class SqlitePager : IDisposable
                             var region = _walIndex.ReadValidatedHeader(_wal);
                             readMarkLeases = [];
                             var safeFrame = region.Header.MaximumFrame;
+                            // Lock-manager Checkpoint already owns SHM [120,128), including
+                            // every read-mark byte — do not re-lock them on a second handle.
                             var allExclusive = true;
-                            for (var markIndex = 0; markIndex < SqliteWalIndexCheckpointInfo.ReadMarkCount; markIndex++)
+                            if (!checkpointLockAlreadyHeld)
                             {
-                                if (locks.TryAcquireExclusive(
-                                        firstReadMarkLockOffset + markIndex,
-                                        length: 1,
-                                        out var markLease))
+                                for (var markIndex = 0; markIndex < SqliteWalIndexCheckpointInfo.ReadMarkCount; markIndex++)
                                 {
-                                    readMarkLeases.Add(
-                                        markLease
-                                        ?? throw new InvalidOperationException(
-                                            "SQLite read-mark locking reported success without a lease."));
-                                    continue;
-                                }
+                                    if (locks.TryAcquireExclusive(
+                                            firstReadMarkLockOffset + markIndex,
+                                            length: 1,
+                                            out var markLease))
+                                    {
+                                        readMarkLeases.Add(
+                                            markLease
+                                            ?? throw new InvalidOperationException(
+                                                "SQLite read-mark locking reported success without a lease."));
+                                        continue;
+                                    }
 
-                                allExclusive = false;
-                                var readMark = region.CheckpointInfo.GetReadMark(markIndex);
-                                if (markIndex == 0 || readMark == 0)
-                                {
-                                    safeFrame = Math.Min(safeFrame, region.CheckpointInfo.BackfilledFrameCount);
-                                    continue;
-                                }
+                                    allExclusive = false;
+                                    var readMark = region.CheckpointInfo.GetReadMark(markIndex);
+                                    if (markIndex == 0 || readMark == 0)
+                                    {
+                                        safeFrame = Math.Min(safeFrame, region.CheckpointInfo.BackfilledFrameCount);
+                                        continue;
+                                    }
 
-                                // Match SQLite: a held unused mark does not lower mxSafeFrame.
-                                if (readMark == SqliteWalIndexCheckpointInfo.ReadMarkNotUsed
-                                    || readMark > region.Header.MaximumFrame)
-                                {
-                                    continue;
-                                }
+                                    // Match SQLite: a held unused mark does not lower mxSafeFrame.
+                                    if (readMark == SqliteWalIndexCheckpointInfo.ReadMarkNotUsed
+                                        || readMark > region.Header.MaximumFrame)
+                                    {
+                                        continue;
+                                    }
 
-                                safeFrame = Math.Min(safeFrame, readMark);
+                                    safeFrame = Math.Min(safeFrame, readMark);
+                                }
                             }
 
                             if (resetCommittedWal && !allExclusive)
@@ -1818,10 +1839,13 @@ public sealed class SqlitePager : IDisposable
                 {
                     if (UsesWalIndexCheckpointProtocol())
                     {
+                        // BeginExclusiveRewriteTransaction holds lock-manager Checkpoint
+                        // (SHM [120,128)); do not re-acquire those bytes via wal-index locks.
                         _ = CheckpointWithWalIndexProtocol(
                             TimeSpan.Zero,
                             resetCommittedWal: true,
-                            writerLockAlreadyHeld: true);
+                            writerLockAlreadyHeld: true,
+                            checkpointLockAlreadyHeld: true);
                     }
                     else
                     {
@@ -2117,7 +2141,7 @@ public sealed class SqlitePager : IDisposable
     private bool TryDetectWalIndexIdentityChange(out SqliteWalIndexHeaderRegion? region)
     {
         region = null;
-        if (_walIndex is null || _wal is null || _journalMode != SqliteJournalMode.Wal)
+        if (_walIndex is null || _wal is null || !UsesWalStorage(_journalMode))
             return false;
 
         try
@@ -2189,15 +2213,13 @@ public sealed class SqlitePager : IDisposable
                 "SQLite database page size changed while this pager was open; dispose and reopen it.");
         }
 
-        var expectedVersion = _journalMode == SqliteJournalMode.Wal
-            ? SqliteFileFormatVersion.Wal
-            : SqliteFileFormatVersion.Legacy;
+        var expectedVersion = FormatVersionFor(_journalMode);
         if (header.WriteVersion != expectedVersion || header.ReadVersion != expectedVersion)
         {
             throw new InvalidDataException(
                 "SQLite journal mode changed while this pager was open; dispose and reopen it.");
         }
-        if (_journalMode == SqliteJournalMode.Wal)
+        if (UsesWalStorage(_journalMode))
             ValidateWalIncarnation();
     }
 
@@ -2269,7 +2291,7 @@ public sealed class SqlitePager : IDisposable
 
     private void RecoverUncommittedTailUnderWriterLock(SqlitePagerLockLease writerLock)
     {
-        if (_journalMode != SqliteJournalMode.Wal)
+        if (!UsesWalStorage(_journalMode))
             return;
         if (!_lockManager.UsesFileBackedWalLocks || !HasUncommittedOrInvalidTail(_recoveryInfo))
             return;
@@ -2449,13 +2471,27 @@ public sealed class SqlitePager : IDisposable
         _visibleRecoveryInfo = _recoveryInfo;
     }
 
+    private static bool UsesWalStorage(SqliteJournalMode journalMode)
+        => journalMode is SqliteJournalMode.Wal or SqliteJournalMode.Mvcc;
+
+    private static bool IsWalCompatibleFormat(SqliteFileFormatVersion version)
+        => version is SqliteFileFormatVersion.Wal or SqliteFileFormatVersion.Mvcc;
+
+    private static SqliteFileFormatVersion FormatVersionFor(SqliteJournalMode journalMode)
+        => journalMode switch
+        {
+            SqliteJournalMode.Wal => SqliteFileFormatVersion.Wal,
+            SqliteJournalMode.Mvcc => SqliteFileFormatVersion.Mvcc,
+            _ => SqliteFileFormatVersion.Legacy,
+        };
+
     private void InitializeCleanWalView()
     {
         var header = _pageStore.Header;
-        if (header.WriteVersion != SqliteFileFormatVersion.Wal
-            || header.ReadVersion != SqliteFileFormatVersion.Wal)
+        if (!IsWalCompatibleFormat(header.WriteVersion)
+            || !IsWalCompatibleFormat(header.ReadVersion))
         {
-            throw new InvalidDataException("A clean SQLite WAL view requires WAL read and write format versions.");
+            throw new InvalidDataException("A clean SQLite WAL view requires WAL/MVCC read and write format versions.");
         }
         if (header.VersionValidFor != header.ChangeCounter
             || header.DatabaseSizeInPages != _pageStore.PageCount)
@@ -2546,10 +2582,10 @@ public sealed class SqlitePager : IDisposable
         var wal = RequireWal();
         if (_pageStore.PageSize != wal.PageSize)
             throw new InvalidDataException("SQLite database and WAL page sizes do not match.");
-        if (_pageStore.Header.WriteVersion != SqliteFileFormatVersion.Wal
-            || _pageStore.Header.ReadVersion != SqliteFileFormatVersion.Wal)
+        if (!IsWalCompatibleFormat(_pageStore.Header.WriteVersion)
+            || !IsWalCompatibleFormat(_pageStore.Header.ReadVersion))
         {
-            throw new InvalidDataException("A SQLite WAL overlay requires WAL read and write format versions.");
+            throw new InvalidDataException("A SQLite WAL overlay requires WAL/MVCC read and write format versions.");
         }
     }
 
@@ -2658,7 +2694,7 @@ public sealed class SqlitePager : IDisposable
         if (_foreignReadOnly
             || !_lockManager.UsesFileBackedWalLocks
             || _wal is null
-            || _journalMode != SqliteJournalMode.Wal)
+            || !UsesWalStorage(_journalMode))
         {
             return;
         }
@@ -2861,9 +2897,7 @@ public sealed class SqlitePager : IDisposable
         var header = SqliteDatabaseHeader.Parse(pageOne);
         if (header.PageSize != _pageStore.PageSize)
             throw new InvalidDataException("SQLite WAL page 1 changes the database page size.");
-        var expectedVersion = _journalMode == SqliteJournalMode.Wal
-            ? SqliteFileFormatVersion.Wal
-            : SqliteFileFormatVersion.Legacy;
+        var expectedVersion = FormatVersionFor(_journalMode);
         if (header.WriteVersion != expectedVersion || header.ReadVersion != expectedVersion)
         {
             throw new InvalidDataException(

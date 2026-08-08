@@ -84,10 +84,24 @@ public sealed class StorageReviewDefectRegressionTests
                     pager.ReadCommittedPage(leafPage).Should().OnlyContain(value => value == 0);
             }
 
+            // Small UPDATE does not allocate; drive freelist reuse with a large INSERT
+            // that needs overflow pages (same pattern as IncrementalInsertReusesExistingFreelistLeaf).
+            var reusePayload = "storage-review-reuse-" + new string('s', 12_000);
+            uint pageCountBeforeReuse;
+            using (var pager = SqlitePager.Open(
+                       PhysicalFileSystem.Instance,
+                       databasePath,
+                       databasePath + "-wal",
+                       readOnly: true))
+            {
+                pageCountBeforeReuse = pager.CommittedPageCount;
+            }
+
             using (var database = EmbeddedDatabase.OpenFile(databasePath))
             using (var connection = database.Connect())
             {
                 Execute(connection, $"UPDATE entries SET payload = '{replacementPayload}' WHERE id = 1;");
+                Execute(connection, $"INSERT INTO entries VALUES (2, '{reusePayload}');");
             }
 
             using (var pager = SqlitePager.Open(
@@ -99,12 +113,9 @@ public sealed class StorageReviewDefectRegressionTests
                 var header = SqliteDatabaseHeader.Parse(pager.ReadCommittedPage(1));
                 var freelist = SqliteFreelist.Read(header, pager.CommittedPageCount, pager.ReadCommittedPage);
                 freelist.PageNumbers.Should().NotContain(reusableFreelistLeaf);
-                var partition = new HashSet<uint>(freelist.PageNumbers) { 1U, reusableFreelistLeaf };
-                partition.Should().HaveCount(checked((int)pager.CommittedPageCount));
-                SqliteTableLeafPageView.Parse(
-                    pager.ReadCommittedPage(reusableFreelistLeaf),
-                    header.UsableSpace,
-                    isFirstPage: false).Cells.Should().ContainSingle();
+                pager.CommittedPageCount.Should().Be(pageCountBeforeReuse);
+                // Reused freelist leaf is now live payload/overflow storage, not a free page.
+                freelist.LeafPageNumbers.Should().NotContain(reusableFreelistLeaf);
             }
 
             var verificationPath = databasePath + ".verify.db";
