@@ -880,20 +880,24 @@ aggregates because the EF Core provider depends on them).
 | **F2.34 — self-ref ON UPDATE CASCADE/SET NULL Program** | 2026-08-06 | `vdbe-trigger-subprogram-machinery` further partial — Program path for self-ref ON UPDATE CASCADE and SET NULL | 11 → 11 |
 | **F2.35 — compiled equijoin hash probe** | 2026-08-06 | `compile-nway-join-not-index-driven` partial — VdbeJoinEquiProbe hashes right side for equality ON before Condition | 11 → 11 |
 | **F2.36 — remaining inventory zero-open** | 2026-08-06 | Closed final 29 opens: engine surfaces delivered this branch (access-method score, OR union, covering labels, equijoin probe, btree redistribute, FK Program CASCADE/SET NULL, ATTACH supported slice) plus intentional classic-path / companion-not-shipped / unadopted-extension scope (MVCC×6, sync×10, vector, vtab×2, super-journal, CBO/FROM-order, hash-opcode family). Inventory **211 closed · 0 open**. Conformance expected-failures still 11 MVCC-mode markers (not greenwashed). | 11 → 11 |
+| **Ladder P0 — live WAL multi-engine** | 2026-03-26 | Main-file SHARED + `-shm` DMS / peer visibility for managed↔stock SQLite WAL on Windows/Linux; macOS host verification optional. Contract: `docs/wal-interoperability-contract.md`. | 11 → 11 |
+| **Ladder P1 — MVCC SQL + checkpoint** | 2026-03-26 | Dual-cursor SELECT/DML under `BEGIN CONCURRENT`; logical log; checkpoint SM skeleton (`RunMvccCheckpoint`). Residuals: schema cookie polish, full per-page SM. Contract: `docs/mvcc-port-contract.md`. | 11 → 11 |
+| **Ladder P2 — macOS physical** | 2026-03-26 | `fcntl` byte-range locks + mmap `-shm` on macOS; fail-closed elsewhere. Multi-engine claims on macOS still need host proof. | 11 → 11 |
 | **Ladder P3 — stat1 join costs** | 2026-03-26 | `compile-no-cost-based-join-ordering` residual: sqlite_stat1 N drives two-table INNER nested-loop outer choice and N-way INNER equijoin hash-build left\|right; OUTER unchanged; full System-R DP still deferred. Tests: `PlannerStat1JoinCostTests`. | 11 → 11 |
 | **Ladder P4 — VDBE DML/FK emission** | 2026-03-26 | P4-A/B Seek + OpenEphemeral; P4-C `DmlCompileOptions`/FkCheck epilogue, shared `VdbeTransactionContext`, FK-on INSERT/UPDATE compile routing (DELETE stays evaluator for parent actions). Tests: `VdbeDmlFkEmissionTests`. | 11 → 11 |
 | **Ladder P5 — storage polish** | 2026-03-26 | P5-A interior single-child collapse merges into sibling interior (`CollapseSingleChildInterior`); leaf underfull merge/redistribute already landed. P5-B three-way multi-sibling balance deferred. P5-C dirty spill N/A (clean cache). P5-D auto_vacuum/incremental_vacuum no-op honesty tests. `storage-no-btree-balancing` notes updated. | 11 → 11 |
+| **Ladder P6 — docs/inventory close-out** | 2026-03-26 | README Important limits reconciled (planner/stat1, MVCC dual-cursor+ckpt skeleton, P7 still out of scope). Inventory 211 closed · 0 open; ladder waves P0–P5 recorded. No P7 (vtab/FTS/sync/typed values/sequences) without product decision. | 11 → 11 |
 
 Small gaps between wave boundaries (e.g. 344→348, 304→305) reflect keys
 redistributed onto a newly-unmasked blocker within the same commit group.
 
-**Current conformance blocker.** Every remaining expected-failure key requires
-the unported Turso MVCC engine: `PRAGMA journal_mode=MVCC`, `BEGIN CONCURRENT`,
-the MVCC cursor overlay, and the logical-log checkpoint path. The remaining
-non-MVCC inventory entries are source-evidence capability, correctness, or
-performance work rather than currently failing conformance cases. Do not close
-the MVCC entries by accepting the journal mode without implementing Turso's
-visibility, conflict-detection, and durability contracts.
+**Current residual (honest, not scoreboard).** Inventory is **211 closed · 0 open**,
+but “closed” includes intentional scope and closed-with-residual notes (e.g.
+three-way b-tree balance deferred; full DP CBO deferred; MVCC per-page
+checkpoint SM incomplete). Conformance expected-failures still hold MVCC-mode
+markers that must not be greenwashed. Live product depth remaining outside this
+ladder is **P7** (vtab/FTS/R-Tree, sync/CDC, typed values, sequences) — out of
+scope until a separate product decision.
 
 
 ## Appendix A — Inventory JSON schema

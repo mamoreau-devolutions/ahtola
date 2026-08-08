@@ -10,12 +10,12 @@
       "submodule": "turso-src/ (read-only)"
     },
     "ahtola_ref": {
-      "branch": "copilot/turso-gap-analysis",
-      "commit_at_analysis": "56cd79b"
+      "branch": "copilot/ahtola-turso-gap-analysis",
+      "commit_at_analysis": "7b62a3f"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
     "current_conformance_expected_failures": 11,
-    "last_reconciled": "2026-08-06",
+    "last_reconciled": "2026-03-26",
     "entry_count": 211,
     "counts": {
       "by_layer": {

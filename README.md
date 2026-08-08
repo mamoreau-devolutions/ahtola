@@ -91,10 +91,11 @@ Treat Ahtola as SQLite-*compatible*, not a full SQLite replacement:
   heap; nothing spills to disk. Prefer modest databases and explicit transactions
   for writes (managed writes are slower than native SQLite and the gap grows with
   table size).
-- **Planner** — no cost-based optimizer or join reordering. `ANALYZE` creates
-  and persists `sqlite_stat1` statistics, but the planner does not yet consume
-  them; the first usable index by name wins. Prefer `ORDER BY` when order matters
-  (`GROUP BY` is first-encounter order).
+- **Planner** — `ANALYZE` / `sqlite_stat1` feed index scoring and limited join
+  cost gates (selective outer for two-table INNER nested loops; equijoin hash
+  build side). Full System-R DP join reordering and multi-index AND intersection
+  are still deferred; OUTER JOIN order stays correctness-preserving. Prefer
+  `ORDER BY` when order matters (`GROUP BY` is first-encounter order).
 - **File-backed platforms** — Windows, 64-bit Linux, and macOS. In-memory works
   everywhere; other platforms (e.g. 32-bit Linux) throw
   `PlatformNotSupportedException` on physical open. macOS uses POSIX
@@ -110,10 +111,14 @@ Treat Ahtola as SQLite-*compatible*, not a full SQLite replacement:
 - **Foreign read-only** — `Mode=ReadOnly;Foreign Read Only=True;Pooling=False`
   can read a DB still held by native SQLite/Turso (e.g. winget `index.db`) without
   taking main-file locks.
+- **MVCC** — process-local `PRAGMA journal_mode=mvcc` + `BEGIN CONCURRENT` with
+  dual-cursor SELECT/DML routing, logical log, and a checkpoint SM skeleton
+  (`PRAGMA wal_checkpoint` in MVCC mode). Not cross-process; residual schema-
+  cookie polish and full per-page b-tree checkpoint SM remain open — see
+  [docs/mvcc-port-contract.md](docs/mvcc-port-contract.md).
 - **Not implemented** — virtual tables / FTS / R-Tree, loadable extensions, raw
-  `sqlite3*` handles (`Handle` is null), AEGIS encryption ciphers. Durable MVCC
-  logical-log recovery and header marker persistence are incomplete; Phase 1
-  supports in-process `PRAGMA journal_mode=mvcc` + `BEGIN CONCURRENT` only.
+  `sqlite3*` handles (`Handle` is null), AEGIS encryption ciphers, sync engine /
+  CDC, CREATE SEQUENCE, typed-value extensions.
 - **Native / Sync companions** — not shipped. Connection-string paths that need
   them fail closed. OS P/Invoke in the pager for locks/WAL is intentional engine
   code, not a Rust SDK binding.
