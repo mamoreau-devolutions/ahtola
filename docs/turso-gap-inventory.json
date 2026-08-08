@@ -210,7 +210,7 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06. OpenEphemeralInstruction opens a general-purpose in-memory table on a cursor (Turso OpenEphemeral); EphemeralInsertInstruction appends register rows with sequential rowids. Scans use the existing Rewind/Next/Column/RowId path; SeekRowid/NotExists/Found work via the ephemeral source's rowid list. Distinct from OpenWorkTable (recursive-CTE FIFO). OpenPseudo/OpenDup remain unnecessary. Residual: compiler emission for IN-list/DISTINCT/subquery materialization (still uses arrays/delegates until planner adopts these opcodes). Evidence: VdbeEphemeralTableOpcodeTests.",
+      "notes": "Closed 2026-08-06; P4-B compiler emission 2026-04-10. OpenEphemeralInstruction opens a general-purpose in-memory table on a cursor (Turso OpenEphemeral); EphemeralInsertInstruction appends register rows with sequential rowids. Scans use Rewind/Next/Column/RowId; SeekRowid/NotExists/Found/NoConflict via ephemeral source. Multi-row VALUES lower via BuildEphemeralCells (EXPLAIN aligned). WHERE col|rowid IN (lit/param…) emits OpenEphemeral+EphemeralInsert+NoConflict membership (SelectStatementCompiler.TryCompileInListMembership). DISTINCT remains DistinctResultRow (VDBE set, not OpenEphemeral). Residual: NOT IN / NULL-in-list, IN-subquery, OpenPseudo/OpenDup. Evidence: VdbeEphemeralTableOpcodeTests, InListOpenEphemeralEmissionTests, Values multi-row EXPLAIN.",
       "status": "closed"
     },
     {

@@ -20435,8 +20435,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         out _):
                 return DescribeProgram(compiledDelete.Program);
             case ValuesClause values
-                when TryCompileValues(values, out var compiledValues, out _):
-                return DescribeProgram(compiledValues.Program);
+                            when TryPrepareValuesLowering(values, out var preparedValues):
+                            // Same multi-row OpenEphemeral program as execution (not the cursor-less
+                            // LoadConstant-only shape from TryCompileValues alone).
+                            return DescribeProgram(preparedValues.Program);
             case WithSelectStatement with
                 when TryBuildNotMaterializedPassThroughExplainProgram(
                     with,
@@ -20694,6 +20696,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
             SeekRowidRangeInstruction => VdbeExplain.Describe(instruction),
                         SeekKeyInstruction => VdbeExplain.Describe(instruction),
                         IdxRowIdInstruction => VdbeExplain.Describe(instruction),
+                        OpenEphemeralInstruction => VdbeExplain.Describe(instruction),
+                        EphemeralInsertInstruction => VdbeExplain.Describe(instruction),
+                        NoConflictInstruction => VdbeExplain.Describe(instruction),
+                        NotExistsInstruction => VdbeExplain.Describe(instruction),
+                        FoundInstruction => VdbeExplain.Describe(instruction),
             FilterRegistersInstruction filterRegisters => (
                 filterRegisters.Row.Start.Index,
                 filterRegisters.FalseTarget.Offset,

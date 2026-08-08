@@ -184,18 +184,23 @@ internal sealed class SelectStatementCompiler
         if (!TryExpandProjections(statement.Projections, target, out var projections))
             return false;
 
-        // Step 2: rowid-equality seek. When WHERE is `rowid = <int literal>` (bare rowid
-        // or table-qualified, integer literal), emit a SeekRowid point-lookup instead of
-        // a full scan + FilterRowId. Parameters (runtime-typed — a text-bound @p would
-        // diverge: SeekRowid jumps NotFound while the scan coerces via affinity), rowid-
-        // ALIAS equality (`id = N` on INTEGER PRIMARY KEY — IsTargetRowIdReference returns
-        // false for declared columns), and range predicates (`>`, `BETWEEN` — Step 3)
-        // stay on the scan path: still correct, just not seek-optimized. Distinct is gated
-        // out (would need DistinctResultRow + a distinct set); the top-of-method guards
-        // already exclude GroupBy/Having/OrderBy/Limit/Offset.
-        if (!statement.Distinct
-            && TryGetRowIdSeekOperand(statement.Where, target, out var rowIdValue))
-        {
+                // P4-B: WHERE col IN (lit/param…) materializes the RHS into OpenEphemeral and
+                // probes with NoConflict (Turso in_seek OpenEphemeral + membership).
+                if (TryCompileInListMembership(statement, target, projections, distinctEquality, out compiled))
+                    return true;
+
+                // Step 2: rowid-equality seek. When WHERE is `rowid = <int literal>` (bare rowid
+                // or table-qualified, integer literal), emit a SeekRowid point-lookup instead of
+                // a full scan + FilterRowId. Parameters (runtime-typed — a text-bound @p would
+                // diverge: SeekRowid jumps NotFound while the scan coerces via affinity), rowid-
+                // ALIAS equality (`id = N` on INTEGER PRIMARY KEY — IsTargetRowIdReference returns
+                // false for declared columns), and range predicates (`>`, `BETWEEN` — Step 3)
+                // stay on the scan path: still correct, just not seek-optimized. Distinct is gated
+                // out (would need DistinctResultRow + a distinct set); the top-of-method guards
+                // already exclude GroupBy/Having/OrderBy/Limit/Offset.
+                if (!statement.Distinct
+                    && TryGetRowIdSeekOperand(statement.Where, target, out var rowIdValue))
+                {
             var seekCursor = new Cursor(0);
             var seekBody = new List<VdbeInstruction>();
             // OpenRead(0), rhsLoad(1), SeekRowid(2), projections(3..), ResultRow, Close, Halt.
@@ -541,11 +546,142 @@ internal sealed class SelectStatementCompiler
     }
 
     /// <summary>
-        /// SEARCH equality prefix: OpenRead USING INDEX, load bounds, IdxGE/SeekGE, residual
-        /// WHERE Filter, projections, Next. KeyColumns remap seeks onto table-row ordinals when
-        /// the cursor holds full table rows ordered by a non-leading index key.
+        /// WHERE &lt;col|rowid&gt; IN (literal/parameter…) → OpenEphemeral RHS + table scan with
+        /// NoConflict membership (fall-through = member). NOT IN and mixed RHS shapes stay
+        /// on the delegate/Filter path. DISTINCT uses DistinctResultRow after membership.
         /// </summary>
-        private bool TryCompileIndexEqualitySeek(
+        private bool TryCompileInListMembership(
+            SelectStatement statement,
+            ScanTarget target,
+            IReadOnlyList<ProjectionSource> projections,
+            VdbeRowEquality? distinctEquality,
+            out CompiledSelect compiled)
+        {
+            compiled = null!;
+            if (statement.Where is not InExpression inExpr || inExpr.Negated || inExpr.Values.Count == 0)
+                return false;
+
+            var probeIsRowId = false;
+            int? probeColumnIndex = null;
+            switch (inExpr.Value)
+            {
+                case ColumnExpression column when IsTargetRowIdReference(column, target):
+                    probeIsRowId = true;
+                    break;
+                case ColumnExpression column when target.ResolveColumnIndex(column.Name) is { } colIdx:
+                    probeColumnIndex = colIdx;
+                    break;
+                default:
+                    return false;
+            }
+
+            foreach (var value in inExpr.Values)
+            {
+                if (value is not (LiteralExpression or ParameterExpression))
+                    return false;
+            }
+
+            if (statement.Distinct && distinctEquality is null)
+                return false;
+
+            var tableCursor = new Cursor(0);
+            var ephCursor = new Cursor(1);
+            var probeRegister = new Register(projections.Count);
+            var registerFloor = projections.Count + 1;
+            var insertRange = new RegisterRange(probeRegister, 1);
+
+            // One shared instruction list + emitter so RHS and projection parameters share slots
+            // and programCounterBase 0 tracks absolute PCs for any expression-internal jumps.
+            var instructions = new List<VdbeInstruction>();
+            var emitter = CreateEmitter(target, tableCursor, registerFloor, instructions, programCounterBase: 0);
+
+            instructions.Add(new OpenEphemeralInstruction(ephCursor, ColumnCount: 1));
+            foreach (var value in inExpr.Values)
+            {
+                if (!emitter.TryEmit(value, probeRegister))
+                    return false;
+                instructions.Add(new EphemeralInsertInstruction(ephCursor, insertRange));
+            }
+
+            instructions.Add(
+                new OpenReadCursorInstruction(
+                    tableCursor,
+                    FormatOpenReadTable(target),
+                    target.Columns.Length));
+
+            var rewindIndex = instructions.Count;
+            instructions.Add(new HaltInstruction()); // patched to Rewind
+
+            var loopStart = instructions.Count;
+            if (probeIsRowId)
+                instructions.Add(new RowIdInstruction(tableCursor, probeRegister));
+            else
+                instructions.Add(new ColumnInstruction(tableCursor, probeColumnIndex!.Value, probeRegister));
+
+            var noConflictIndex = instructions.Count;
+            instructions.Add(new HaltInstruction()); // patched to NoConflict
+
+            for (var index = 0; index < projections.Count; index++)
+            {
+                var projection = projections[index];
+                if (projection.ColumnIndex is { } columnIndex)
+                    instructions.Add(new ColumnInstruction(tableCursor, columnIndex, new Register(index)));
+                else if (!emitter.TryEmit(projection.Expression!, new Register(index)))
+                    return false;
+            }
+
+            var output = new RegisterRange(new Register(0), projections.Count);
+            if (statement.Distinct)
+            {
+                instructions.Add(
+                    new DistinctResultRowInstruction(
+                        output,
+                        distinctEquality!,
+                        DistinctSetIndex: 0));
+            }
+            else
+            {
+                instructions.Add(new ResultRowInstruction(output));
+            }
+
+            var nextIndex = instructions.Count;
+            instructions.Add(new NextInstruction(tableCursor, new ProgramCounter(loopStart)));
+            var closeTableIndex = instructions.Count;
+            instructions.Add(new CloseCursorInstruction(tableCursor));
+            instructions.Add(new CloseCursorInstruction(ephCursor));
+            instructions.Add(new HaltInstruction());
+
+            instructions[rewindIndex] = new RewindCursorInstruction(
+                tableCursor,
+                new ProgramCounter(closeTableIndex));
+            instructions[noConflictIndex] = new NoConflictInstruction(
+                ephCursor,
+                insertRange,
+                new ProgramCounter(nextIndex),
+                $"skip non-member, goto {nextIndex}");
+
+            compiled = new CompiledSelect(
+                new VdbeProgram(
+                    emitter.RegisterCount,
+                    cursorCount: 2,
+                    instructions,
+                    distinctSetCount: statement.Distinct ? 1 : 0,
+                    parameterSlotCount: emitter.ParameterIndices.Count),
+                [
+                    target.CreateCursorSource(),
+                    // Ephemeral cursor is runtime-owned; empty placeholder keeps sources aligned.
+                    new VdbeCursorSource([]),
+                ],
+                emitter.ParameterIndices);
+            return true;
+        }
+
+        /// <summary>
+            /// SEARCH equality prefix: OpenRead USING INDEX, load bounds, IdxGE/SeekGE, residual
+            /// WHERE Filter, projections, Next. KeyColumns remap seeks onto table-row ordinals when
+            /// the cursor holds full table rows ordered by a non-leading index key.
+            /// </summary>
+            private bool TryCompileIndexEqualitySeek(
             SelectStatement statement,
             ScanTarget target,
             IndexSeekPrefix indexSeek,

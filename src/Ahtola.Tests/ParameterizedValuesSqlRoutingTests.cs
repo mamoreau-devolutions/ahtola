@@ -193,7 +193,7 @@ public class ParameterizedValuesSqlRoutingTests
     }
 
     [Test]
-    public void MultiRowParameterizedValuesEmitsResultRowPerRow()
+        public void MultiRowParameterizedValuesEmitsOpenEphemeralScan()
     {
         using var connection = new EmbeddedDatabase().Connect();
 
@@ -207,13 +207,16 @@ public class ParameterizedValuesSqlRoutingTests
 
         produced.Should().Equal(SqlValue.Integer(10), SqlValue.Integer(20), SqlValue.Integer(30));
 
-        // Each row reloads the shared register block and emits its own ResultRow.
+            // Multi-row parameterized VALUES use BuildEphemeralCells (OpenEphemeral + inserts + scan).
         var opcodes = Opcodes(ExplainBound(
             connection, "EXPLAIN VALUES (?), (?), (?)", SqlValue.Null, SqlValue.Null, SqlValue.Null));
-        opcodes.Count(opcode => opcode == "LoadParameter").Should().Be(3);
-        opcodes.Count(opcode => opcode == "ResultRow").Should().Be(3);
-        opcodes.Count(opcode => opcode == "Halt").Should().Be(1);
-    }
+            opcodes.Should().Contain("OpenEphemeral");
+            opcodes.Count(opcode => opcode == "EphemeralInsert").Should().Be(3);
+            opcodes.Count(opcode => opcode == "LoadParameter").Should().Be(3);
+            opcodes.Count(opcode => opcode == "ResultRow").Should().Be(1);
+            opcodes.Should().Contain("Rewind").And.Contain("Next");
+            opcodes.Count(opcode => opcode == "Halt").Should().Be(1);
+        }
 
     [Test]
     public void ComputedCellMixedWithParameterFallsBackToEvaluator()
