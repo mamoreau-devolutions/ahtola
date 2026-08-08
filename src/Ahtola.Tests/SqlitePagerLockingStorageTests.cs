@@ -171,7 +171,7 @@ public class SqlitePagerLockingStorageTests
     [NonParallelizable]
     public void PhysicalPagersForDistinctAttachedDatabasePathsUseIndependentWriterLocks()
     {
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
             Assert.Ignore("Physical managed WAL ownership requires Windows or Linux byte-range locks.");
 
         var workDirectory = CreateWorkDirectory();

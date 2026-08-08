@@ -309,9 +309,64 @@ public sealed class ManagedStagedFreelistAndHotJournalTests
                 io.FreelistPageCount.Should().BeLessThan(freelistBeforeRefill);
             }
 
-    [Test]
-    public void HotJournalRecoveryAcceptsTrailingPaddingAndSentinelRecordCount()
-    {
+                        [Test]
+                        public void DeepTreeRangeDeleteMergesInteriorSiblingsWithoutMaintenanceException()
+                        {
+                            // Build a multi-level interior tree, then delete a dense low-rowid range so
+                            // empty leaves and underfull parents collapse. Single-child non-root interiors
+                            // must merge into sibling interiors (P5-A) rather than throw MaintenanceRequired.
+                            var pages = CreateBlankPages(pageCount: 2);
+                            var io = new SqliteStagedBtreePageIo(
+                                pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
+                                committedPageCount: 2,
+                                pageSize: PageSize,
+                                usableSpace: UsableSpace);
+                            io.WritePage(2, new SqliteTableLeafPageBuilder(PageSize, UsableSpace).Build());
+
+                            var writer = new SqliteIncrementalTableBtree(io);
+                            var record = new byte[48];
+                            record.AsSpan().Fill(0x7E);
+                            const int rowCount = 2500;
+                            for (var rowId = 1L; rowId <= rowCount; rowId++)
+                                writer.Insert(2, rowId, record);
+
+                            io.PageCount.Should().BeGreaterThan(10u, "fixture must create multi-level interiors");
+                            var peakPages = io.PageCount;
+
+                            // Delete the lower ~40% so left branches empty/underfill while right branches
+                            // remain dense enough that the root stays interior with sibling subtrees.
+                            const int deleteThrough = rowCount * 2 / 5;
+                            for (var rowId = 1L; rowId <= deleteThrough; rowId++)
+                                writer.Delete(2, rowId);
+
+                            var cursor = new SqliteTableBtreeCursor(io);
+                            for (var rowId = 1L; rowId <= rowCount; rowId++)
+                            {
+                                if (rowId <= deleteThrough)
+                                {
+                                    cursor.TrySeek(2, rowId, out _).Should().BeFalse($"deleted rowid {rowId}");
+                                    continue;
+                                }
+
+                                cursor.TrySeek(2, rowId, out var found).Should().BeTrue($"surviving rowid {rowId}");
+                                found.Should().Equal(record);
+                            }
+
+                            io.FreelistPageCount.Should().BeGreaterThan(0u);
+                            io.PageCount.Should().BeLessThanOrEqualTo(peakPages);
+
+                            // Refill deleted keys; tree must remain seek-correct without exploding.
+                            for (var rowId = 1L; rowId <= deleteThrough; rowId++)
+                                writer.Insert(2, rowId, record);
+
+                            for (var rowId = 1L; rowId <= rowCount; rowId++)
+                                cursor.TrySeek(2, rowId, out _).Should().BeTrue($"rowid {rowId} after refill");
+                            io.PageCount.Should().BeLessThan(peakPages * 3);
+                        }
+
+                    [Test]
+                    public void HotJournalRecoveryAcceptsTrailingPaddingAndSentinelRecordCount()
+                    {
         var fileSystem = new InMemoryFileSystem();
         const string dbPath = "hot-journal.db";
         const string journalPath = "hot-journal.db-journal";

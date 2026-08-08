@@ -95,43 +95,182 @@ public sealed class ManagedOwnershipHandoffPoolingTests
         }
     }
 
-        [Test]
-        public void LiveManagedWalAllowsConcurrentOrdinarySqliteReaders()
+    [Test]
+    public void LiveManagedWalAllowsConcurrentOrdinarySqliteReaders()
+    {
+        var path = CreateDatabasePath();
+        try
         {
-            var path = CreateDatabasePath();
+            SeedWithOrdinarySqliteWal(path);
+            var walLenBefore = File.Exists(path + "-wal") ? new FileInfo(path + "-wal").Length : -1L;
+            var shmLenBefore = File.Exists(path + "-shm") ? new FileInfo(path + "-shm").Length : -1L;
+
+            using (var managed = OpenManaged(path, pooling: false))
+            {
+                managed.ExecuteScalarLong("SELECT COUNT(*) FROM t;").Should().Be(1);
+                var walLen = File.Exists(path + "-wal") ? new FileInfo(path + "-wal").Length : -1L;
+                var shmLen = File.Exists(path + "-shm") ? new FileInfo(path + "-shm").Length : -1L;
+
+                var failure = TryOpenWithOrdinarySqlite(path);
+                if (failure is not null)
+                {
+                    // Second chance: read-only stock open (still multi-engine WAL).
+                    failure = TryOpenWithOrdinarySqlite(path, readOnly: true) ?? failure;
+                }
+
+                failure.Should().BeNull(
+                    "shared -shm reader locks must let ordinary SQLite open a managed-held WAL database"
+                    + $"; walBefore={walLenBefore} shmBefore={shmLenBefore} wal={walLen} shm={shmLen}"
+                    + (failure is null ? string.Empty : $"; ordinary SQLite failed: {failure}"));
+
+                ReadCountWithOrdinarySqlite(path).Should().Be(1);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            DeleteDatabase(path);
+        }
+    }
+
+    [Test]
+    public void LiveManagedWalAllowsOrdinarySqliteWriterWhileManagedReaderIsOpen()
+    {
+        var path = CreateDatabasePath();
+        try
+        {
+            SeedWithOrdinarySqliteWal(path);
+
+            using var managed = OpenManaged(path, pooling: false);
+            managed.ExecuteScalarLong("SELECT COUNT(*) FROM t;").Should().Be(1);
+            var walBefore = DescribeSidecars(path);
+
+            // Stock SQLite must be able to append WAL frames while managed holds a live
+            // -shm mapping (DMS shared). This is the Stage 6 residual beyond reader open.
             try
             {
-                SeedWithOrdinarySqliteWal(path);
-                var walLenBefore = File.Exists(path + "-wal") ? new FileInfo(path + "-wal").Length : -1L;
-                var shmLenBefore = File.Exists(path + "-shm") ? new FileInfo(path + "-shm").Length : -1L;
-
-                using (var managed = OpenManaged(path, pooling: false))
+                using var sqlite = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}");
+                sqlite.Open();
+                using (var write = sqlite.CreateCommand())
                 {
-                    managed.ExecuteScalarLong("SELECT COUNT(*) FROM t;").Should().Be(1);
-                    var walLen = File.Exists(path + "-wal") ? new FileInfo(path + "-wal").Length : -1L;
-                    var shmLen = File.Exists(path + "-shm") ? new FileInfo(path + "-shm").Length : -1L;
+                    write.CommandText = "INSERT INTO t (v) VALUES ('stock-writer');";
+                    write.ExecuteNonQuery();
+                }
 
-                    var failure = TryOpenWithOrdinarySqlite(path);
-                    if (failure is not null)
-                    {
-                        // Second chance: read-only stock open (still multi-engine WAL).
-                        failure = TryOpenWithOrdinarySqlite(path, readOnly: true) ?? failure;
-                    }
-
-                    failure.Should().BeNull(
-                        "shared -shm reader locks must let ordinary SQLite open a managed-held WAL database"
-                        + $"; walBefore={walLenBefore} shmBefore={shmLenBefore} wal={walLen} shm={shmLen}"
-                        + (failure is null ? string.Empty : $"; ordinary SQLite failed: {failure}"));
-
-                    ReadCountWithOrdinarySqlite(path).Should().Be(1);
+                using (var count = sqlite.CreateCommand())
+                {
+                    count.CommandText = "SELECT COUNT(*) FROM t;";
+                    ((long)count.ExecuteScalar()!).Should().Be(2);
                 }
             }
             finally
             {
-                SqliteConnection.ClearAllPools();
-                DeleteDatabase(path);
+                Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            }
+
+            var walAfter = DescribeSidecars(path);
+            // Fresh connection must observe the peer write even if the long-lived
+            // connection is still catching up its snapshot.
+            long secondConnectionCount;
+            using (var managed2 = OpenManaged(path, pooling: false))
+            {
+                secondConnectionCount = managed2.ExecuteScalarLong("SELECT COUNT(*) FROM t;");
+            }
+
+            // Autocommit SELECT on the long-lived connection must refresh the owned
+            // heap catalog from peer WAL growth (not only lock-manager generation).
+            var managedCount = managed.ExecuteScalarLong("SELECT COUNT(*) FROM t;");
+            managedCount.Should().Be(
+                2,
+                $"sidecars before={walBefore}; after={walAfter}; secondConnectionCount={secondConnectionCount}");
+            secondConnectionCount.Should().Be(2, $"sidecars after={walAfter}");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            DeleteDatabase(path);
+        }
+    }
+
+    [Test]
+    public void LiveOrdinarySqliteWalAllowsManagedWriterWhileStockReaderIsOpen()
+    {
+        var path = CreateDatabasePath();
+        try
+        {
+            SeedWithOrdinarySqliteWal(path);
+
+            using var sqlite = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}");
+            sqlite.Open();
+            using (var count = sqlite.CreateCommand())
+            {
+                count.CommandText = "SELECT COUNT(*) FROM t;";
+                ((long)count.ExecuteScalar()!).Should().Be(1);
+            }
+
+            using (var managed = OpenManaged(path, pooling: false))
+            {
+                managed.ExecuteNonQueryText("INSERT INTO t (v) VALUES ('managed-writer');");
+                managed.ExecuteScalarLong("SELECT COUNT(*) FROM t;").Should().Be(2);
+            }
+
+            using (var count = sqlite.CreateCommand())
+            {
+                count.CommandText = "SELECT COUNT(*) FROM t;";
+                ((long)count.ExecuteScalar()!).Should().Be(2);
             }
         }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            DeleteDatabase(path);
+        }
+    }
+
+    [Test]
+    public void LiveManagedWalCheckpointAgreesWithOrdinarySqlite()
+    {
+        var path = CreateDatabasePath();
+        try
+        {
+            SeedWithOrdinarySqliteWal(path);
+
+            using (var managed = OpenManaged(path, pooling: false))
+            {
+                managed.ExecuteNonQueryText("INSERT INTO t (v) VALUES ('managed-before-ckpt');");
+                managed.ExecuteNonQueryText("PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+
+            // Stock SQLite must open the post-checkpoint database and see durable rows.
+            ReadCountWithOrdinarySqlite(path).Should().Be(2);
+
+            using (var sqlite = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+            {
+                sqlite.Open();
+                using var insert = sqlite.CreateCommand();
+                insert.CommandText = "INSERT INTO t (v) VALUES ('stock-after-ckpt');";
+                insert.ExecuteNonQuery();
+                using var ckpt = sqlite.CreateCommand();
+                ckpt.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                ckpt.ExecuteNonQuery();
+            }
+
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+
+            using (var managed = OpenManaged(path, pooling: false))
+            {
+                managed.ExecuteScalarLong("SELECT COUNT(*) FROM t;").Should().Be(3);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            DeleteDatabase(path);
+        }
+    }
 
     [Test]
     public void OwnershipRoundTripsBetweenManagedAndOrdinarySqliteWhenPoolingIsDisabled()
@@ -181,19 +320,19 @@ public sealed class ManagedOwnershipHandoffPoolingTests
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
     }
 
-        private static void SeedWithOrdinarySqliteWal(string path)
-        {
-            using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}");
-            connection.Open();
-            using var command = connection.CreateCommand();
-            command.CommandText =
-                "PRAGMA journal_mode=WAL;"
-                + "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);"
-                + "INSERT INTO t (v) VALUES ('seed');";
-            command.ExecuteNonQuery();
-            connection.Close();
-            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        }
+    private static void SeedWithOrdinarySqliteWal(string path)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "PRAGMA journal_mode=WAL;"
+            + "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);"
+            + "INSERT INTO t (v) VALUES ('seed');";
+        command.ExecuteNonQuery();
+        connection.Close();
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+    }
 
     /// <summary>
     /// Returns the failure message when ordinary SQLite cannot open the database,
@@ -203,33 +342,40 @@ public sealed class ManagedOwnershipHandoffPoolingTests
     {
         try
         {
-                ReadCountWithOrdinarySqlite(path, readOnly);
+            ReadCountWithOrdinarySqlite(path, readOnly);
             return null;
         }
         catch (Microsoft.Data.Sqlite.SqliteException exception)
         {
-                return $"{exception.Message} (SqliteErrorCode={exception.SqliteErrorCode}, Extended={exception.SqliteExtendedErrorCode})";
+            return $"{exception.Message} (SqliteErrorCode={exception.SqliteErrorCode}, Extended={exception.SqliteExtendedErrorCode})";
         }
     }
 
-        private static long ReadCountWithOrdinarySqlite(string path, bool readOnly = false)
+    private static long ReadCountWithOrdinarySqlite(string path, bool readOnly = false)
     {
         try
         {
-                var cs = readOnly
-                    ? $"Data Source={path};Mode=ReadOnly"
-                    : $"Data Source={path}";
-                using var connection = new Microsoft.Data.Sqlite.SqliteConnection(cs);
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = "SELECT COUNT(*) FROM t;";
-                return (long)command.ExecuteScalar()!;
-            }
-            finally
-            {
-                Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-            }
+            var cs = readOnly
+                ? $"Data Source={path};Mode=ReadOnly"
+                : $"Data Source={path}";
+            using var connection = new Microsoft.Data.Sqlite.SqliteConnection(cs);
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM t;";
+            return (long)command.ExecuteScalar()!;
         }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
+    }
+
+    private static string DescribeSidecars(string path)
+    {
+        static string One(string p)
+            => File.Exists(p) ? new FileInfo(p).Length.ToString() : "missing";
+        return $"wal={One(path + "-wal")} shm={One(path + "-shm")} main={One(path)}";
+    }
 
     private static string CreateDatabasePath()
     {

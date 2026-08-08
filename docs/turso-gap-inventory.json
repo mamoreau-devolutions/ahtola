@@ -10,12 +10,12 @@
       "submodule": "turso-src/ (read-only)"
     },
     "ahtola_ref": {
-      "branch": "copilot/turso-gap-analysis",
-      "commit_at_analysis": "56cd79b"
+      "branch": "copilot/ahtola-turso-gap-analysis",
+      "commit_at_analysis": "7b62a3f"
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
     "current_conformance_expected_failures": 11,
-    "last_reconciled": "2026-08-06",
+    "last_reconciled": "2026-03-26",
     "entry_count": 211,
     "counts": {
       "by_layer": {
@@ -162,7 +162,7 @@
         "gencol.sqltest::fk-gencol-unique-idx-update-cascade",
         "total-changes.sqltest::total-changes-includes-fk-cascade-rows"
       ],
-      "notes": "Closed 2026-08-06. FkCounterInstruction / FkIfZeroInstruction / FkCheckInstruction implement Turso FkCounter, FkIfZero, FkCheck with statement-level immediate and deferred counters on ResumableStatement. FkCheck raises SQLITE_CONSTRAINT_FOREIGNKEY (787) via EmbeddedSqlException.SqliteErrorCode. Existing write-target FK affinity and self-cascade Program lowering remain. Residual: compiler emission of these opcodes for all FK action paths (still mostly delegate-based), and connection-scoped deferred counter shared across statements in a multi-statement transaction (current deferred counter is statement-runtime; Reset clears it when not in a VdbeTransaction). Evidence: VdbeFkCounterOpcodeTests.",
+      "notes": "Closed 2026-08-06 opcodes; P4-C 2026-04-09 compiler/shared-tx. FkCounter/FkIfZero/FkCheck runtime on ResumableStatement. DmlStatementCompiler emits FkCheck(immediate)+FkCheck(deferred) epilogue after Commit when ForeignKeysEnabled and the table participates in FKs (child or parent). ResumableStatement accepts optional shared VdbeTransactionContext so deferred counters accumulate across statements and survive Reset/Dispose of individual statements (connection-scoped multi-statement VDBE). CanCompileDml no longer blocks ForeignKeysEnabled for INSERT/UPDATE (CommitInserts/CommitUpdates already ValidateForeignKeys*); plain DELETE stays evaluator-owned when FKs are on via CanCompilePlainDelete (compiled delete Commit lacks parent-action validation). SQL multi-statement deferred FK remains via EmbeddedDatabase PendingDeferredViolations/ValidateDeferredForeignKeys. Residual: Turso-style FkCounter bumps from parent/child probe programs during DML (still mostly write-target/delegate validation + cascade Program paths), not a missing check opcode. Evidence: VdbeFkCounterOpcodeTests, VdbeDmlFkEmissionTests, ManagedForeignKeyFullSemantics.",
       "status": "closed"
     },
     {
@@ -210,7 +210,7 @@
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06. OpenEphemeralInstruction opens a general-purpose in-memory table on a cursor (Turso OpenEphemeral); EphemeralInsertInstruction appends register rows with sequential rowids. Scans use the existing Rewind/Next/Column/RowId path; SeekRowid/NotExists/Found work via the ephemeral source's rowid list. Distinct from OpenWorkTable (recursive-CTE FIFO). OpenPseudo/OpenDup remain unnecessary. Residual: compiler emission for IN-list/DISTINCT/subquery materialization (still uses arrays/delegates until planner adopts these opcodes). Evidence: VdbeEphemeralTableOpcodeTests.",
+      "notes": "Closed 2026-08-06; P4-B compiler emission 2026-04-10. OpenEphemeralInstruction opens a general-purpose in-memory table on a cursor (Turso OpenEphemeral); EphemeralInsertInstruction appends register rows with sequential rowids. Scans use Rewind/Next/Column/RowId; SeekRowid/NotExists/Found/NoConflict via ephemeral source. Multi-row VALUES lower via BuildEphemeralCells (EXPLAIN aligned). WHERE col|rowid IN (lit/param…) emits OpenEphemeral+EphemeralInsert+NoConflict membership (SelectStatementCompiler.TryCompileInListMembership). DISTINCT remains DistinctResultRow (VDBE set, not OpenEphemeral). Residual: NOT IN / NULL-in-list, IN-subquery, OpenPseudo/OpenDup. Evidence: VdbeEphemeralTableOpcodeTests, InListOpenEphemeralEmissionTests, Values multi-row EXPLAIN.",
       "status": "closed"
     },
     {
@@ -334,7 +334,7 @@
       "conformance_links": [
         "update.sqltest::update-set-expression-missing-identifier"
       ],
-      "notes": "Closed 2026-08-06. InsertInstruction/UpdateInstruction carry VdbeInsertFlags matching Turso InsertFlags bits: UpdateRowidChange, RequireSeek, EphemeralTableInsert, SkipLastRowid, SkipStatementChangeCount, SkipAllChangeCounts. ResumableStatement enforces RequireSeek (cursor must be positioned) and honors SkipStatementChangeCount/SkipAllChangeCounts for RowsAffected. EXPLAIN renders flags. Existing call sites default to None (backward compatible). Residual: compiler emission of flags for UPSERT/rowid-change UPDATE paths, and SkipLastRowid plumbing through Commit/last_insert_rowid — those are compiler wiring, not missing opcode semantics. Evidence: VdbeInsertFlagSemanticsTests.",
+      "notes": "Closed 2026-08-06 opcodes; P4-C 2026-04-09 DML emission. InsertInstruction/UpdateInstruction carry VdbeInsertFlags (UpdateRowidChange, RequireSeek, EphemeralTableInsert, SkipLastRowid, SkipStatementChangeCount, SkipAllChangeCounts). DmlStatementCompiler defaults UPDATE/DELETE mutations to RequireSeek; SQL TryCompileUpdate/Delete pass RequireSeek explicitly. EXPLAIN uses VdbeExplain for Insert/Update flags. Residual: UPSERT PreferUpdate / rowid-change UpdateRowidChange and SkipLastRowid on multi-row INSERT intermediates — optional wiring. Evidence: VdbeInsertFlagSemanticsTests, VdbeDmlFkEmissionTests.",
       "status": "closed"
     },
     {
@@ -526,7 +526,7 @@
       "severity": "s3-perf",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as intentional FROM-order join planner with equijoin hashing. Managed joins follow SQL FROM order (SQLite default without a full CBO); equijoin hash probe reduces inner scans. Full System-R DP + ANALYZE cardinality (Turso optimizer/join.rs) is a future optional CBO product, not required for correctness. Evidence: join routing suites + EquiJoinProbe test; architecture matches compile-select-compiler-single-table-fast-paths-only intentional split.",
+      "notes": "Closed 2026-08-06 as intentional FROM-order join planner with equijoin hashing; residual ladder P3 (2026-03) added sqlite_stat1-driven cost gates without full System-R DP. After ANALYZE: (1) two-table INNER nested-loop may place the smaller estimated table as outer (LEFT OUTER keeps SQL left outer); (2) N-way INNER equijoin hash may build the smaller side (hash-build left|right in OpenJoinCursor p4). OUTER joins never hash-build left. Full DP join reordering, AND multi-index intersection, and broader cardinality models remain deferred. Evidence: PlannerStat1JoinCostTests + join routing suites.",
       "status": "closed"
     },
     {
@@ -2043,7 +2043,7 @@
       "severity": "s1-correctness",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 for the managed table-btree balance surface required for correctness. Growth (split/root deepen/quick-balance) plus shrink (empty-leaf free, underfull merge, two-way redistribute) reclaim and pack table leaves without waiting for VACUUM. Evidence: ManagedStagedFreelistAndHotJournalTests empty-leaf/underfull/redistribute cases. Residual three-way multi-sibling balance and index-tree separator pull-down remain optional packing polish; callers may still full-rewrite rare index shrink cases.",
+      "notes": "Closed 2026-08-06; ladder P5-A 2026-03-26. Growth (split/root deepen/quick-balance) plus shrink (empty-leaf free, underfull leaf merge, two-way redistribute) pack table leaves without VACUUM. P5-A: single-child non-root interior collapse merges the sole child into a sibling interior (CollapseSingleChildInterior) instead of throwing MaintenanceRequired / deferring leaf merge when parentLinks.Count<=2 under height>2. Evidence: ManagedStagedFreelistAndHotJournalTests (DeepTreeRangeDeleteMergesInteriorSiblingsWithoutMaintenanceException + underfull/redistribute). Residual optional: three-way multi-sibling balance (Turso max 3 siblings) and index-tree separator pull-down/shrink — deferred; rare cases still full-rewrite via SqliteBtreeMaintenanceRequiredException.",
       "status": "closed"
     },
     {
@@ -2079,7 +2079,7 @@
       "severity": "s2-capability",
       "effort": "L",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as aligned with Turso v0.7.2's incomplete auto-vacuum surface. Turso's vacuum.rs explicitly rejects AutoVacuumMode::Incremental as unsupported; FULL auto-vacuum ptrmap plumbing exists upstream but is not a managed-port priority. Ahtola accepts PRAGMA auto_vacuum / incremental_vacuum as silent no-ops (SQLite-compatible acceptance without storage effect) per ManagedDocumentedBoundaryTests guidance. Freelist reclaim on ordinary DML + empty-leaf/under-full merge now provide the practical space reuse path without ptrmap. Reopen only if FULL auto_vacuum / ptrmap format support is productized.",
+      "notes": "Closed 2026-08-06 as aligned with Turso v0.7.2's incomplete auto-vacuum surface. Turso's vacuum.rs explicitly rejects AutoVacuumMode::Incremental as unsupported; FULL auto-vacuum ptrmap plumbing exists upstream but is not a managed-port priority. Ahtola accepts PRAGMA auto_vacuum / incremental_vacuum as silent no-ops (SQLite-compatible acceptance without storage effect) per ManagedDocumentedBoundaryTests guidance. Freelist reclaim on ordinary DML + empty-leaf/under-full merge now provide the practical space reuse path without ptrmap. Reopen only if FULL auto_vacuum / ptrmap format support is productized. Ladder P5-D: ManagedDocumentedBoundaryTests.AutoVacuumFamilyIsAcceptedNoOp locks the silent no-op surface.",
       "status": "closed"
     },
     {
@@ -2102,7 +2102,7 @@
         "after-insert-trigger-cache-spill.sqltest::after-insert-trigger-cache-spill-multi-index",
         "savepoint.sqltest::savepoint-rollback-cache-spill-issue-6351"
       ],
-      "notes": "Closed 2026-08-06 as Stage 0 behavioral parity. cache_size/cache_spill pragmas round-trip and all ten previously linked cache-spill cases pass; Ahtola's bounded cache stores only clean committed pages and never buffers dirty pages, so Turso's dirty-page spill mechanism has no observable counterpart to violate.",
+      "notes": "Closed 2026-08-06 as Stage 0 behavioral parity. cache_size/cache_spill pragmas round-trip and all ten previously linked cache-spill cases pass; Ahtola's bounded cache stores only clean committed pages and never buffers dirty pages, so Turso's dirty-page spill mechanism has no observable counterpart to violate. Ladder P5-C: CacheSpillPragmaRoundTripsWithoutError; dirty spill remains N/A.",
       "status": "closed"
     },
     {

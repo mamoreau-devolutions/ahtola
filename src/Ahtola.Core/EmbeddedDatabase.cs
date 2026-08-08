@@ -270,6 +270,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private readonly bool _readOnly;
     private readonly bool _foreignReadOnly;
     private SqlitePagerViewToken _foreignViewToken;
+    private SqlitePagerViewToken _ownedViewToken;
     private FileCatalogVersion _fileCatalogVersion;
     private long _ownedCommittedGeneration;
     private PragmaHeaderMetadata _inMemoryPragmaHeader;
@@ -321,6 +322,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ? fileStore.CaptureCommittedViewToken()
             : default;
         _ownedCommittedGeneration = fileStore.CommittedViewGeneration;
+        // Owned connections also pin a durable view token so peer engines that
+        // commit without going through the process-local lock manager (stock
+        // SQLite / Turso on the same WAL) still invalidate the heap catalog.
+        _ownedViewToken = foreignReadOnly
+            ? default
+            : fileStore.CaptureCommittedViewToken();
         _tables = catalog.Tables;
         _views = catalog.Views;
         _triggers = catalog.Triggers;
@@ -411,7 +418,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
     internal TimeSpan BusyTimeout { get; set; }
 
     /// <summary>Re-reads the committed catalog after a stale-snapshot signal. Throws busy when the version cannot settle.</summary>
-    internal void ReloadFileCatalogAfterStale()
+    /// <param name="forceReload">
+    /// When true, reopen the store even if <see cref="FileCatalogVersion"/> matches.
+    /// Peer engines (stock SQLite) can grow the WAL without a change we already
+    /// folded into the header cookie comparison, so durable view-token mismatches
+    /// must force adoption.
+    /// </param>
+    internal void ReloadFileCatalogAfterStale(bool forceReload = false)
     {
         lock (_gate)
         {
@@ -425,7 +438,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 // degrades to the public busy error instead of hanging.
                 for (var attempt = 0; attempt < 1000; attempt++)
                 {
-                    if (TryReloadFileCatalogIfChanged())
+                    if (TryReloadFileCatalogIfChanged(forceReload))
                         return;
                     Thread.Sleep(1);
                 }
@@ -611,7 +624,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
         bool IgnoreCheckConstraints = false,
         Func<string?, string?, ExecutionResult>? ExecuteTableList = null,
         bool PreserveSubqueryMemoSnapshot = false,
-        ReturningCteScope? ReturningCteScope = null)
+        ReturningCteScope? ReturningCteScope = null,
+        MvStore? ConcurrentMvStore = null,
+        MvccTxId? ConcurrentMvccTxId = null)
     {
         /// <summary>
         /// Row-loop checkpoint. It honors cooperative cancellation exactly as before and
@@ -628,9 +643,32 @@ public sealed partial class EmbeddedDatabase : IDisposable
         /// <summary>
         /// Reports a committed row change to the connection's update hook. Mirrors SQLite:
         /// WITHOUT ROWID tables and internal <c>sqlite_*</c> tables never notify.
+        /// Concurrent MVCC transactions also mirror DELETE/UPDATE into the version store
+        /// here (INSERT stays on the connection allocation path).
         /// </summary>
         internal void ReportRowChange(SqliteChangeOperation operation, string tableName, EmbeddedTable table, long rowId)
         {
+            if (table.HasRowid
+                && ConcurrentMvStore is { } store
+                && ConcurrentMvccTxId is { } txId
+                && !tableName.StartsWith("sqlite_", StringComparison.OrdinalIgnoreCase))
+            {
+                var key = new MvccRowId(store.GetOrCreateTableId(tableName), rowId);
+                switch (operation)
+                {
+                    case SqliteChangeOperation.Delete:
+                        store.DeleteOrTombstoneBase(txId, key);
+                        break;
+                    case SqliteChangeOperation.Update:
+                        {
+                            var index = table.RowIds.IndexOf(rowId);
+                            if (index >= 0 && index < table.Rows.Count)
+                                store.UpdateIncludingBase(txId, key, table.Rows[index]);
+                            break;
+                        }
+                }
+            }
+
             if (Hooks?.RowChanged is not { } rowChanged || !table.HasRowid)
                 return;
             if (tableName.StartsWith("sqlite_", StringComparison.OrdinalIgnoreCase))
@@ -1449,7 +1487,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 StatementState: new StatementExecutionState(outer.LastInsertRowId),
                 CompilationEnabled: false,
                 Hooks: hooks,
-                IgnoreCheckConstraints: outer.IgnoreCheckConstraints);
+                IgnoreCheckConstraints: outer.IgnoreCheckConstraints,
+                ConcurrentMvStore: outer.ConcurrentMvStore,
+                ConcurrentMvccTxId: outer.ConcurrentMvccTxId);
             return statement switch
             {
                 InsertStatement insert => ExecuteDmlWithAutoIncrementState(
@@ -2210,6 +2250,82 @@ public sealed partial class EmbeddedDatabase : IDisposable
         });
     }
 
+    /// <summary>
+    /// Runs the managed MVCC checkpoint skeleton (Turso
+    /// <c>CheckpointStateMachine</c> phases, synchronous):
+    /// materialize store → catalog, persist, optional log truncate, GC.
+    /// </summary>
+    internal MvccCheckpointResult RunMvccCheckpoint(string? mode, TimeSpan busyTimeout = default)
+    {
+        lock (_gate)
+        {
+            var store = _mvStore;
+            if (store is null)
+            {
+                return new MvccCheckpointResult(
+                    Busy: false,
+                    LogFramesBefore: 0,
+                    CheckpointedFrames: 0,
+                    CompletedThrough: MvccCheckpointPhase.Finalize);
+            }
+
+            var phase = MvccCheckpointPhase.Prepare;
+            var log = store.LogicalLog;
+            var logBefore = log?.ApproximatePayloadBytes ?? 0L;
+
+            phase = MvccCheckpointPhase.AcquireLock;
+            var wantTruncate = MvccCheckpoint.ShouldTruncateLog(mode);
+
+            // Active concurrent txs: report busy and skip materialize/truncate
+            // (Turso PASSIVE defers; FULL waits — managed skeleton does not block).
+            if (store.HasActiveTransactions())
+            {
+                return new MvccCheckpointResult(
+                    Busy: true,
+                    LogFramesBefore: logBefore,
+                    CheckpointedFrames: 0,
+                    CompletedThrough: phase);
+            }
+
+            phase = MvccCheckpointPhase.CollectRows;
+            // Snapshot is taken inside MergeConcurrentCatalogFromStoreLocked.
+
+            phase = MvccCheckpointPhase.MaterializeCatalog;
+            var merged = MergeConcurrentCatalogFromStoreLocked(LiveCatalog);
+
+            phase = MvccCheckpointPhase.PersistCatalog;
+            if (_fileStore is null)
+            {
+                PublishCatalog(merged);
+            }
+            else
+            {
+                // PersistFileCatalog takes _fileCatalogWriteLock; release _gate first?
+                // Commit path holds _gate then PersistFileCatalog which locks write lock —
+                // same order as CommitTransaction. Keep _gate held.
+                PersistFileCatalog(merged, pragmaHeader: null, forceFullRewrite: false, busyTimeout);
+            }
+
+            var checkpointed = logBefore;
+            if (wantTruncate && log is not null)
+            {
+                phase = MvccCheckpointPhase.TruncateLogicalLog;
+                log.TruncateAfterCheckpoint();
+                checkpointed = logBefore;
+            }
+
+            phase = MvccCheckpointPhase.GarbageCollect;
+            store.GarbageCollectAfterCheckpoint();
+
+            phase = MvccCheckpointPhase.Finalize;
+            return new MvccCheckpointResult(
+                Busy: false,
+                LogFramesBefore: logBefore,
+                CheckpointedFrames: wantTruncate ? checkpointed : 0,
+                CompletedThrough: phase);
+        }
+    }
+
     private SqliteJournalMode EnableMvccModeLocked(TimeSpan busyTimeout)
     {
         if (_readOnly)
@@ -2552,10 +2668,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private static void ThrowCatalogSnapshotBusy()
         => throw new EmbeddedCatalogSnapshotStaleException();
 
-    private bool TryReloadFileCatalogIfChanged()
+    private bool TryReloadFileCatalogIfChanged(bool forceReload = false)
     {
         var durableVersion = ReadFileCatalogVersion(_fileSystem!, _databasePath);
-        if (durableVersion == _fileCatalogVersion)
+        if (!forceReload && durableVersion == _fileCatalogVersion)
             return true;
 
         // Same adoption a pooled connection performs when it is handed out:
@@ -2568,7 +2684,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         try
         {
             var loadedVersion = ReadFileCatalogVersion(_fileSystem!, _databasePath);
-            if (loadedVersion != durableVersion)
+            if (!forceReload && loadedVersion != durableVersion)
             {
                 // Another writer committed mid-reload; leave the current
                 // snapshot untouched and let the caller retry against it.
@@ -2700,22 +2816,51 @@ public sealed partial class EmbeddedDatabase : IDisposable
     /// </summary>
     internal void RefreshOwnedCatalogForStatementIfNeeded()
     {
-        if (_foreignReadOnly || _fileStore is null)
+        if (_foreignReadOnly || _fileStore is null || _fileSystem is null)
             return;
 
         // Cheap race-free gate: the shared storage generation only moves when some
-        // connection commits or checkpoints on this file, and PublishCatalog pins
-        // our own commits, so an unchanged generation means nothing external
-        // happened. Read-only statement phases and our own writes skip entirely.
+        // *managed* connection commits or checkpoints on this file, and PublishCatalog
+        // pins our own commits. Peer engines (stock SQLite) never publish that
+        // generation, so also compare a durable view token (WAL length/salts/frames
+        // + main change-counter) before treating the heap catalog as current.
         if (_fileStore.CommittedViewGeneration == _ownedCommittedGeneration)
-            return;
+        {
+            var durableToken = _fileStore.CaptureCommittedViewToken();
+            if (durableToken == _ownedViewToken)
+                return;
+        }
 
-        // Another connection committed (or checkpointed) on this file. Adopt it via
-        // the proven stale-reload path: a fresh foreign pager (process-local locks,
-        // no file-lock contention) that re-checks the durable version and reloads
-        // only when it truly moved, so transient checkpoints cost one no-op check.
-        ReloadFileCatalogAfterStale();
-        _ownedCommittedGeneration = _fileStore.CommittedViewGeneration;
+        // Always force-reopen the store (same adoption as foreign read-only). Header
+        // cookie equality alone can miss peer WAL growth, and the version-gated
+        // TryReload path can no-op when cookies already match a stale heap catalog.
+        lock (_gate)
+        {
+            if (_fileCatalogWriteLock is null)
+                throw new InvalidOperationException("The managed file catalog persistence state is not initialized.");
+
+            lock (_fileCatalogWriteLock)
+            {
+                var replacement = EmbeddedFileStore.Open(
+                    _databasePath,
+                    _fileSystem,
+                    out var catalog,
+                    readOnly: _readOnly);
+                try
+                {
+                    var previous = _fileStore;
+                    _fileStore = replacement;
+                    replacement = null;
+                    _fileCatalogVersion = ReadFileCatalogVersion(_fileSystem, _databasePath);
+                    PublishCatalog(new SchemaCatalog(catalog.Tables, catalog.Views, catalog.Triggers));
+                    previous.Dispose();
+                }
+                finally
+                {
+                    replacement?.Dispose();
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -2798,11 +2943,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
             _inMemoryInitialized = true;
         _version++;
 
-        // Pin the storage generation to this commit/reload so the statement-level
-        // owned-refresh gate skips it: an unchanged generation there means no
-        // *external* connection has committed since we last saw the file.
+        // Pin the storage generation and durable view token to this commit/reload so
+        // the statement-level owned-refresh gate skips it: unchanged values mean no
+        // *external* connection (managed or peer engine) has committed since.
         if (_fileStore is not null)
+        {
             _ownedCommittedGeneration = _fileStore.CommittedViewGeneration;
+            if (!_foreignReadOnly)
+                _ownedViewToken = _fileStore.CaptureCommittedViewToken();
+        }
     }
 
     private static FileCatalogVersion ReadFileCatalogVersion(
@@ -3061,7 +3210,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
         ManagedStatementHooks? hooks = null,
         bool ignoreCheckConstraints = false,
         Func<string?, string?, ExecutionResult>? executeTableList = null,
-        IReadOnlyDictionary<string, EmbeddedTable>? externalTables = null)
+        IReadOnlyDictionary<string, EmbeddedTable>? externalTables = null,
+        MvStore? concurrentMvStore = null,
+        MvccTxId? concurrentMvccTxId = null)
     {
         ThrowIfRecursiveTriggerCallbackReentry();
         if (RequiresRecursiveTriggerStack(
@@ -3083,7 +3234,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 tempTriggers,
                 hooks,
                 ignoreCheckConstraints,
-                executeTableList));
+                executeTableList,
+                externalTables,
+                concurrentMvStore,
+                concurrentMvccTxId));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -3108,7 +3262,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
             TempTriggers: tempTriggers,
             Hooks: hooks,
             IgnoreCheckConstraints: ignoreCheckConstraints,
-            ExecuteTableList: executeTableList);
+            ExecuteTableList: executeTableList,
+            ConcurrentMvStore: concurrentMvStore,
+            ConcurrentMvccTxId: concurrentMvccTxId);
         return statement switch
         {
             CreateTableStatement create => ExecuteCreateTable(create, catalog, cancellationToken),
@@ -12910,7 +13066,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 parameters);
         }
 
-        if (CanCompileDml(context)
+        if (CanCompilePlainDelete(context)
             && TryCompileDelete(statement, parameters, context, out var compiled, out var columns, out var hasReturning))
             return RunCompiledDml(compiled, columns, hasReturning, parameters);
 
@@ -12920,10 +13076,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
     // Compiled DML reports only an aggregate affected-row count; live blob handles need
     // the evaluator's matched rowids to expire only when their own row is mutated. A cancelable
     // execution also stays evaluator-owned because the current VDBE loop has no cancellation opcode.
+    // Foreign keys: INSERT/UPDATE Commit* paths already call ValidateForeignKeys*; plain DELETE still
+    // lacks parent-action validation in its write-target Commit, so it stays evaluator-owned when FKs are on
+    // (self-referential cascades use CanCompileForeignKeyCascadeDelete instead).
     private bool CanCompileDml(QueryContext context)
         => !context.CancellationToken.CanBeCanceled
-            && !context.ForeignKeysEnabled
             && !HasOpenBlobHandles;
+
+    private bool CanCompilePlainDelete(QueryContext context)
+        => CanCompileDml(context) && !context.ForeignKeysEnabled;
 
     private bool CanCompileForeignKeyCascadeDelete(QueryContext context)
         => !context.CancellationToken.CanBeCanceled
@@ -12934,7 +13095,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         => CanCompileDml(context)
             && statement.ConflictAlgorithm is null
             && statement.Upsert is null
-            && (!context.Tables.TryGetValue(statement.TableName, out var table)
+        && (!context.Tables.TryGetValue(statement.TableName, out var table)
                 || !table.HasNonDefaultConflictAlgorithms);
 
     private bool CanRouteUpdateThroughCompiler(UpdateStatement statement, QueryContext context)
@@ -14047,6 +14208,19 @@ public sealed partial class EmbeddedDatabase : IDisposable
         select = ResolveNamedWindows(select);
         context = EnterCollationSource(context, select.Source);
 
+        IndexSeekPrefix? indexSeek = null;
+        if (plan.Search
+            && select.Where is not null
+            && !select.Distinct
+            && TryCollectLeadingIndexEqualitySeek(select.Where, plan.Table, plan.Index, out indexSeek))
+        {
+            // indexSeek attached below on ScanTarget
+        }
+        else
+        {
+            indexSeek = null;
+        }
+
         ScanTarget CreateTarget(
             IReadOnlyList<SqlValue[]> targetRows,
             IReadOnlyList<long>? targetRowIds)
@@ -14071,7 +14245,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 plan.Table.ColumnDefinitions,
                 BuildQualifiedColumnDefinitions(
                     qualifier,
-                    plan.Table.ColumnDefinitions));
+                    plan.Table.ColumnDefinitions),
+                indexSeek);
         }
 
         var compileSelect = select;
@@ -15999,6 +16174,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
             };
         }
 
+        // INNER only: when both sides have sqlite_stat1 N and the SQL right side is smaller,
+        // drive the nested loop from the right so the smaller table is outer. LEFT OUTER must
+        // keep SQL left as outer for null-extension. Without stats, preserve FROM order.
+        var leftIsOuter = true;
+        if (joinType == JoinType.Inner
+            && TryGetSqliteStat1TableRowCount(context, leftTarget.TableName, out var leftEst)
+            && TryGetSqliteStat1TableRowCount(context, rightTarget.TableName, out var rightEst)
+            && leftEst > rightEst)
+        {
+            leftIsOuter = false;
+        }
+
         var program = JoinProgramBuilder.Build(
             leftTarget.TableName,
             leftWidth,
@@ -16007,10 +16194,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
             joinType,
             projections,
             predicate,
-            postJoinPredicate);
+            postJoinPredicate,
+            leftIsOuter);
+        // Cursor 0 = nested-loop outer, cursor 1 = inner (may be swapped vs SQL left/right).
         compiled = new CompiledSelect(
             program,
-            [new VdbeCursorSource(leftTarget.Rows), new VdbeCursorSource(rightTarget.Rows)]);
+            leftIsOuter
+                ? [new VdbeCursorSource(leftTarget.Rows), new VdbeCursorSource(rightTarget.Rows)]
+                : [new VdbeCursorSource(rightTarget.Rows), new VdbeCursorSource(leftTarget.Rows)]);
         return true;
     }
 
@@ -16820,17 +17011,38 @@ public sealed partial class EmbeddedDatabase : IDisposable
             _ => throw new InvalidOperationException($"Unknown join kind {join.Kind}."),
         };
         var equiProbe = TryCreateCompiledJoinEquiProbe(join, context);
+        // INNER equijoin: hash-build the smaller estimated side (default still right).
+        // OUTER joins keep hash-build-right so unmatched-side semantics stay correct.
+        var hashBuildRight = true;
+        if (kind is VdbeJoinKind.Inner && equiProbe is not null)
+        {
+            var leftEstimate = EstimateJoinNodeRows(left.Plan, context);
+            var rightEstimate = EstimateJoinNodeRows(right.Plan, context);
+            // Only flip when both sides have real sqlite_stat1 estimates (not the unknown sentinel).
+            const long knownCap = long.MaxValue / 16;
+            if (leftEstimate < knownCap
+                && rightEstimate < knownCap
+                && leftEstimate < rightEstimate)
+            {
+                hashBuildRight = false;
+            }
+        }
+
         var plan = new VdbeJoinOperatorPlan(
             left.Plan,
             right.Plan,
             kind,
             join.Condition is null && joinPairs.Count == 0 ? null : condition,
-            equiProbe);
+            equiProbe,
+            hashBuildRight);
+        var description = equiProbe is null
+            ? $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} join"
+            : hashBuildRight
+                ? $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} equijoin hash-build right"
+                : $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} equijoin hash-build left";
         compiled = new CompiledJoinSource(
             plan,
-            equiProbe is null
-                ? $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} join"
-                : $"{plan.SourceCount}-way {kind.ToString().ToUpperInvariant()} equijoin",
+            description,
             columns,
             qualifiedColumns,
             qualifiedRowIds,
@@ -19206,6 +19418,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
             },
         };
 
+        var dmlOptions = new DmlCompileOptions(
+                    MutationFlags: VdbeInsertFlags.None,
+                    EmitForeignKeyChecks: context.ForeignKeysEnabled
+                        && TableParticipatesInForeignKeys(context, statement.TableName, table));
+
         compiled = hasReturning
             ? DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Insert,
@@ -19216,24 +19433,26 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 writeTarget,
                 new VdbeCursorSource(
                     returningRows!,
-                    table.HasRowid ? returningRowIds : null))
+                    table.HasRowid ? returningRowIds : null),
+                dmlOptions)
             : DmlStatementCompiler.Compile(
                 DmlKind.Insert,
                 statement.TableName,
                 table.Columns.Length,
                 predicate: null,
                 returning: Array.Empty<DmlReturningExpression>(),
-                writeTarget);
+                writeTarget,
+                dmlOptions);
         return true;
     }
 
     private bool TryCompileUpdate(
-        UpdateStatement statement,
-        SqlValue[] parameters,
-        QueryContext context,
-        out CompiledDml compiled,
-        out string[] columns,
-        out bool hasReturning)
+UpdateStatement statement,
+SqlValue[] parameters,
+QueryContext context,
+out CompiledDml compiled,
+out string[] columns,
+out bool hasReturning)
     {
         compiled = null!;
         columns = [];
@@ -19317,6 +19536,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
             },
         };
 
+        var dmlOptions = new DmlCompileOptions(
+                    MutationFlags: VdbeInsertFlags.RequireSeek,
+                    EmitForeignKeyChecks: context.ForeignKeysEnabled
+                        && TableParticipatesInForeignKeys(context, statement.TableName, table));
+
         compiled = hasReturning
             ? DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Update,
@@ -19327,24 +19551,26 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 writeTarget,
                 new VdbeCursorSource(
                     returningRows!,
-                    table.HasRowid ? returningRowIds : null))
+                    table.HasRowid ? returningRowIds : null),
+                dmlOptions)
             : DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Update,
                 statement.TableName,
                 table.Columns.Length,
                 filter,
                 Array.Empty<DmlReturningExpression>(),
-                writeTarget);
+                writeTarget,
+                dmlOptions);
         return true;
     }
 
     private bool TryCompileDelete(
-        DeleteStatement statement,
-        SqlValue[] parameters,
-        QueryContext context,
-        out CompiledDml compiled,
-        out string[] columns,
-        out bool hasReturning)
+DeleteStatement statement,
+SqlValue[] parameters,
+QueryContext context,
+out CompiledDml compiled,
+out string[] columns,
+out bool hasReturning)
     {
         compiled = null!;
         columns = [];
@@ -19430,6 +19656,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
             },
         };
 
+        var dmlOptions = new DmlCompileOptions(
+                    MutationFlags: VdbeInsertFlags.RequireSeek,
+                    EmitForeignKeyChecks: context.ForeignKeysEnabled
+                        && TableParticipatesInForeignKeys(context, statement.TableName, table));
+
         compiled = hasReturning
             ? DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Delete,
@@ -19440,24 +19671,50 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 writeTarget,
                 new VdbeCursorSource(
                     returningRows!,
-                    table.HasRowid ? returningRowIds : null))
+                    table.HasRowid ? returningRowIds : null),
+                dmlOptions)
             : DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Delete,
                 statement.TableName,
                 table.Columns.Length,
                 filter,
                 Array.Empty<DmlReturningExpression>(),
-                writeTarget);
+                writeTarget,
+                dmlOptions);
         return true;
     }
 
-    private bool TryCompileSelfReferentialCascadeUpdate(
-        UpdateStatement statement,
-        SqlValue[] parameters,
+    /// <summary>
+    /// True when the table declares foreign keys or is referenced as a parent, so compiled DML should
+    /// emit the FkCheck epilogue (counters are driven by FkCounter / shared Vdbe transaction state).
+    /// </summary>
+    private static bool TableParticipatesInForeignKeys(
         QueryContext context,
-        out CompiledDml compiled,
-        out string[] columns,
-        out bool hasReturning)
+        string tableName,
+        EmbeddedTable table)
+    {
+        if (table.ForeignKeys.Count > 0)
+            return true;
+
+        foreach (var pair in context.Tables)
+        {
+            foreach (var foreignKey in pair.Value.ForeignKeys)
+            {
+                if (string.Equals(foreignKey.ParentTable, tableName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryCompileSelfReferentialCascadeUpdate(
+UpdateStatement statement,
+SqlValue[] parameters,
+QueryContext context,
+out CompiledDml compiled,
+out string[] columns,
+out bool hasReturning)
     {
         compiled = null!;
         columns = [];
@@ -20218,7 +20475,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         out _):
                 return DescribeProgram(compiledForeignKeyDelete.Program);
             case DeleteStatement delete
-                when CanCompileDml(compilationContext)
+                            when CanCompilePlainDelete(compilationContext)
                     && TryCompileDelete(
                         delete,
                         parameters,
@@ -20228,8 +20485,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         out _):
                 return DescribeProgram(compiledDelete.Program);
             case ValuesClause values
-                when TryCompileValues(values, out var compiledValues, out _):
-                return DescribeProgram(compiledValues.Program);
+                            when TryPrepareValuesLowering(values, out var preparedValues):
+                // Same multi-row OpenEphemeral program as execution (not the cursor-less
+                // LoadConstant-only shape from TryCompileValues alone).
+                return DescribeProgram(preparedValues.Program);
             case WithSelectStatement with
                 when TryBuildNotMaterializedPassThroughExplainProgram(
                     with,
@@ -20334,7 +20593,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 && TryCompileInsert(insert, parameters, compilationContext, out _, out _, out _),
             UpdateStatement update => CanRouteUpdateThroughCompiler(update, compilationContext)
                 && TryCompileUpdate(update, parameters, compilationContext, out _, out _, out _),
-            DeleteStatement delete => CanCompileDml(compilationContext)
+            DeleteStatement delete => CanCompilePlainDelete(compilationContext)
                 && TryCompileDelete(delete, parameters, compilationContext, out _, out _, out _),
             QueryStatement or WithDmlStatement => false,
             _ => throw new EmbeddedSqlException(
@@ -20485,6 +20744,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
             FilterRowIdInstruction => VdbeExplain.Describe(instruction),
             SeekRowidInstruction => VdbeExplain.Describe(instruction),
             SeekRowidRangeInstruction => VdbeExplain.Describe(instruction),
+            SeekKeyInstruction => VdbeExplain.Describe(instruction),
+            IdxRowIdInstruction => VdbeExplain.Describe(instruction),
+            OpenEphemeralInstruction => VdbeExplain.Describe(instruction),
+            EphemeralInsertInstruction => VdbeExplain.Describe(instruction),
+            NoConflictInstruction => VdbeExplain.Describe(instruction),
+            NotExistsInstruction => VdbeExplain.Describe(instruction),
+            FoundInstruction => VdbeExplain.Describe(instruction),
             FilterRegistersInstruction filterRegisters => (
                 filterRegisters.Row.Start.Index,
                 filterRegisters.FalseTarget.Offset,
@@ -20557,18 +20823,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 0,
                 null,
                 $"delete current row of cursor {delete.Cursor.Index}"),
-            InsertInstruction insert => (
-                insert.Cursor.Index,
-                0,
-                0,
-                null,
-                $"insert row into cursor {insert.Cursor.Index}"),
-            UpdateInstruction update => (
-                update.Cursor.Index,
-                0,
-                0,
-                null,
-                $"update current row of cursor {update.Cursor.Index}"),
+            InsertInstruction => VdbeExplain.Describe(instruction),
+            UpdateInstruction => VdbeExplain.Describe(instruction),
+            FkCounterInstruction => VdbeExplain.Describe(instruction),
+            FkIfZeroInstruction => VdbeExplain.Describe(instruction),
+            FkCheckInstruction => VdbeExplain.Describe(instruction),
             CommitInstruction commit => (
                 commit.Cursor.Index,
                 0,
@@ -21418,41 +21677,146 @@ public sealed partial class EmbeddedDatabase : IDisposable
         string tableName,
         string indexName,
         out int leadingAverage)
+        => TryGetSqliteStat1PrefixAverage(context, tableName, indexName, prefixLength: 1, out leadingAverage);
+
+    /// <summary>
+    /// Reads the table row count <c>N</c> from any <c>sqlite_stat1</c> row for
+    /// <paramref name="tableName"/> (index or idx-null). Format: <c>"N avg1 …"</c>.
+    /// </summary>
+    private static bool TryGetSqliteStat1TableRowCount(
+        QueryContext context,
+        string tableName,
+        out long rowCount)
     {
-        leadingAverage = 0;
+        rowCount = 0;
+        if (!TryFindSqliteStat1Row(context, tableName, indexName: null, preferAnyIndex: true, out var parts)
+            || parts.Length < 1)
+        {
+            return false;
+        }
+
+        if (!long.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out rowCount)
+            || rowCount < 0)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Reads avg for equality prefix depth <paramref name="prefixLength"/> (1-based) from
+    /// <c>sqlite_stat1.stat</c> for a named index. <c>stat</c> is <c>"N avg1 avg2 …"</c>.
+    /// </summary>
+    private static bool TryGetSqliteStat1PrefixAverage(
+        QueryContext context,
+        string tableName,
+        string indexName,
+        int prefixLength,
+        out int prefixAverage)
+    {
+        prefixAverage = 0;
+        if (prefixLength < 1)
+            return false;
+        if (!TryFindSqliteStat1Row(context, tableName, indexName, preferAnyIndex: false, out var parts)
+            || parts.Length <= prefixLength)
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[prefixLength], NumberStyles.Integer, CultureInfo.InvariantCulture, out prefixAverage)
+            || prefixAverage <= 0)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Crude cardinality for join hash build-side choice. Unknown stats → large sentinel so
+    /// FROM order (hash-build right) is preserved unless both sides have real estimates.
+    /// </summary>
+    private static long EstimateJoinNodeRows(VdbeJoinPlanNode node, QueryContext context)
+    {
+        const long unknown = long.MaxValue / 8;
+        switch (node)
+        {
+            case VdbeJoinScanPlan scan:
+                return TryGetSqliteStat1TableRowCount(context, scan.TableName, out var n)
+                    ? Math.Max(0, n)
+                    : unknown;
+            case VdbeJoinOperatorPlan op:
+                {
+                    var left = EstimateJoinNodeRows(op.Left, context);
+                    var right = EstimateJoinNodeRows(op.Right, context);
+                    if (left >= unknown / 2 || right >= unknown / 2)
+                        return unknown;
+                    // Naive equijoin residual: ~max(L,R) when both known (not a full CBO).
+                    return Math.Max(1, Math.Max(left, right));
+                }
+            default:
+                return unknown;
+        }
+    }
+
+    private static bool TryFindSqliteStat1Row(
+        QueryContext context,
+        string tableName,
+        string? indexName,
+        bool preferAnyIndex,
+        out string[] parts)
+    {
+        parts = [];
         if (!context.Tables.TryGetValue(SqliteStat1TableName, out var stat1)
             || stat1.Columns.Length < 3)
         {
             return false;
         }
 
-        // Columns: tbl, idx, stat
+        string[]? anyParts = null;
         foreach (var row in stat1.Rows)
         {
             if (row.Length < 3
                 || row[0].Kind != SqlValueKind.Text
-                || row[1].Kind != SqlValueKind.Text
                 || row[2].Kind != SqlValueKind.Text)
             {
                 continue;
             }
 
-            if (!string.Equals(row[0].AsText(), tableName, StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(row[1].AsText(), indexName, StringComparison.OrdinalIgnoreCase))
-            {
+            if (!string.Equals(row[0].AsText(), tableName, StringComparison.OrdinalIgnoreCase))
                 continue;
-            }
 
-            // Format: "rowCount avgPrefix1 avgPrefix2 …"
-            var parts = row[2].AsText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2)
-                return false;
-            if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out leadingAverage)
-                || leadingAverage <= 0)
+            var candidate = row[2].AsText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (candidate.Length == 0)
+                continue;
+
+            if (indexName is not null)
             {
-                return false;
+                if (row[1].Kind != SqlValueKind.Text
+                    || !string.Equals(row[1].AsText(), indexName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                parts = candidate;
+                return true;
             }
 
+            // idx-null row is the table-level ANALYZE line when present.
+            if (row[1].Kind is SqlValueKind.Null)
+            {
+                parts = candidate;
+                return true;
+            }
+
+            if (preferAnyIndex && anyParts is null)
+                anyParts = candidate;
+        }
+
+        if (preferAnyIndex && anyParts is not null)
+        {
+            parts = anyParts;
             return true;
         }
 
@@ -21473,6 +21837,83 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
 
         return count;
+    }
+
+    /// <summary>
+    /// Collects a contiguous leading equality prefix on plain (non-expression) index
+    /// columns whose bounds are literals or parameters — enough to emit SeekGE/IdxGE.
+    /// Skips when a leading term uses a non-BINARY collation (seek order is BINARY).
+    /// </summary>
+    private static bool TryCollectLeadingIndexEqualitySeek(
+        Expression where,
+        EmbeddedTable table,
+        EmbeddedIndex index,
+        out IndexSeekPrefix? prefix)
+    {
+        prefix = null;
+        var keyColumns = new List<int>();
+        var bounds = new List<Expression>();
+        foreach (var term in index.Columns)
+        {
+            if (term.IsExpression || term.ColumnIndex < 0)
+                break;
+
+            var collation = IndexExpressionSemantics.GetCollationName(table, term);
+            if (!string.Equals(collation, "BINARY", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(collation))
+            {
+                break;
+            }
+
+            if (!TryFindIndexEqualityBound(where, table, term, out var bound)
+                || bound is not (LiteralExpression or ParameterExpression))
+            {
+                break;
+            }
+
+            keyColumns.Add(term.ColumnIndex);
+            bounds.Add(bound);
+        }
+
+        if (keyColumns.Count == 0)
+            return false;
+
+        prefix = new IndexSeekPrefix(keyColumns, bounds);
+        return true;
+    }
+
+    private static bool TryFindIndexEqualityBound(
+        Expression expression,
+        EmbeddedTable table,
+        EmbeddedIndexColumn term,
+        out Expression bound)
+    {
+        bound = null!;
+        if (expression is BinaryExpression { Operator: BinaryOperator.And } and)
+        {
+            return TryFindIndexEqualityBound(and.Left, table, term, out bound)
+                || TryFindIndexEqualityBound(and.Right, table, term, out bound);
+        }
+
+        if (expression is not BinaryExpression binary
+            || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.Is))
+        {
+            return false;
+        }
+
+        if (QueryExpressionMatchesIndexTerm(binary.Left, table, term))
+        {
+            bound = binary.Right;
+            return true;
+        }
+
+        if (QueryExpressionMatchesIndexTerm(binary.Right, table, term))
+        {
+            bound = binary.Left;
+            return true;
+        }
+
+        return false;
     }
 
     private static bool WhereUsesIndexEqualityTerm(
@@ -26288,9 +26729,50 @@ public sealed partial class EmbeddedDatabase : IDisposable
         var qualifiedColumnDefinitions = BuildQualifiedColumnDefinitions(
             qualifier,
             table.ColumnDefinitions);
-        var count = table.Rows.Count;
-        if (maximumRows is { } maximum && maximum < count)
-            count = (int)maximum;
+
+        // Concurrent MVCC: merge classic base snapshot with version-store overlays
+        // (Turso dual-cursor). Rowid tables only; WITHOUT ROWID stays catalog-only.
+        if (table.HasRowid
+            && context.ConcurrentMvStore is { } store
+            && context.ConcurrentMvccTxId is { } txId)
+        {
+            var baseIds = new long[table.Rows.Count];
+            for (var i = 0; i < table.Rows.Count; i++)
+                baseIds[i] = i < table.RowIds.Count ? table.RowIds[i] : i + 1;
+
+            var tableId = store.GetOrCreateTableId(source.Name);
+            var merged = MvccDualCursor.MergeVisibleRows(
+                store,
+                txId,
+                tableId,
+                baseIds,
+                table.Rows);
+            var ordered = merged.OrderBy(row => row.RowId).ToList();
+            var count = ordered.Count;
+            if (maximumRows is { } maximum && maximum < count)
+                count = (int)maximum;
+
+            var dualSourceRows = new SourceRow[count];
+            for (var outputIndex = 0; outputIndex < count; outputIndex++)
+            {
+                var (rowId, cells) = ordered[outputIndex];
+                dualSourceRows[outputIndex] = new SourceRow(
+                    table.Columns,
+                    cells,
+                    qualifiedColumns,
+                    outerRow,
+                    RowId: rowId,
+                    RowIdQualifier: qualifier,
+                    ColumnDefinitions: table.ColumnDefinitions,
+                    QualifiedColumnDefinitions: qualifiedColumnDefinitions);
+            }
+
+            return new SourceData(table.Columns, dualSourceRows);
+        }
+
+        var rowCount = table.Rows.Count;
+        if (maximumRows is { } maxRows && maxRows < rowCount)
+            rowCount = (int)maxRows;
 
         var rowOrder = Enumerable.Range(0, table.Rows.Count).ToArray();
         if (table.HasRowid)
@@ -26302,8 +26784,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 (left, right) => table.RowIds[left].CompareTo(table.RowIds[right]));
         }
 
-        var sourceRows = new SourceRow[count];
-        for (var outputIndex = 0; outputIndex < count; outputIndex++)
+        var sourceRows = new SourceRow[rowCount];
+        for (var outputIndex = 0; outputIndex < rowCount; outputIndex++)
         {
             var index = rowOrder[outputIndex];
             var rowid = index < table.RowIds.Count ? table.RowIds[index] : index + 1;
@@ -37313,7 +37795,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     // matching the task's requirement to reject unsupported input rather than guess.
     private static partial class SqliteJson
     {
-    private static readonly UTF8Encoding JsonbUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+        private static readonly UTF8Encoding JsonbUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
         private enum JKind
         {
@@ -40647,6 +41129,7 @@ public sealed class EmbeddedConnection : IDisposable
                             includeImmediate: _deferForeignKeys);
                     }
                     var mutationReserved = ReserveTransactionMutation(routed.Database, routed.Statement);
+                    TryGetConcurrentMvccScope(routed.Database, out var concurrentStore, out var concurrentTxId);
                     try
                     {
                         if (routed.ReadCatalog is not null)
@@ -40665,7 +41148,9 @@ public sealed class EmbeddedConnection : IDisposable
                                 tempTriggers,
                                 CreateStatementHooks(routed.Database, includeCommitGate: false),
                                 ignoreCheckConstraints: _ignoreCheckConstraints,
-                                executeTableList: ExecutePragmaTableList);
+                                executeTableList: ExecutePragmaTableList,
+                                concurrentMvStore: concurrentStore,
+                                concurrentMvccTxId: concurrentTxId);
                         }
                         else if (transactionState is null)
                         {
@@ -40721,7 +41206,9 @@ public sealed class EmbeddedConnection : IDisposable
                                 CreateStatementHooks(routed.Database, includeCommitGate: false),
                                 ignoreCheckConstraints: _ignoreCheckConstraints,
                                 executeTableList: ExecutePragmaTableList,
-                                externalTables: routed.ExternalTables);
+                                externalTables: routed.ExternalTables,
+                                concurrentMvStore: concurrentStore,
+                                concurrentMvccTxId: concurrentTxId);
                             if (EmbeddedDatabase.MayMutate(routed.Statement))
                                 cancellationToken.ThrowIfCancellationRequested();
                             // The catalog overload used for transactional statements does not
@@ -40763,18 +41250,19 @@ public sealed class EmbeddedConnection : IDisposable
                                 };
                             }
 
-                                RecordConcurrentMvccMutation(
-                                    routed.Database,
-                                    routed.Statement,
-                                    statementCatalog,
-                                    result);
-                            }
+                            RecordConcurrentMvccMutation(
+                                routed.Database,
+                                routed.Statement,
+                                statementCatalog,
+                                result);
                         }
+                    }
 
-                        // last_insert_rowid() tracks the most recent successful INSERT on this
-                        // connection; UPDATE/DELETE and zero-row inserts leave it unchanged.
-                        if (result.LastInsertRowId is { } insertedRowId)
-                            _lastInsertRowId = insertedRowId;
+                    // last_insert_rowid() tracks the most recent successful INSERT on this
+                    // connection; UPDATE/DELETE and zero-row inserts leave it unchanged.
+                    if (result.LastInsertRowId is { } insertedRowId)
+                        _lastInsertRowId = insertedRowId;
+
                     if (ReferenceEquals(routed.Database, _tempDatabase))
                         _tempInitialized = true;
 
@@ -43587,8 +44075,9 @@ public sealed class EmbeddedConnection : IDisposable
     }
 
     /// <summary>
-    /// Mirrors concurrent DML into the version store so WW detection and catalog
-    /// merge observe the same write set as Turso's MvStore path.
+    /// Mirrors concurrent INSERT into the version store with a process-wide rowid
+    /// allocation. DELETE/UPDATE are recorded per-row via
+    /// <see cref="EmbeddedDatabase.QueryContext.ReportRowChange"/> under concurrent scope.
     /// </summary>
     private void RecordConcurrentMvccMutation(
         EmbeddedDatabase database,
@@ -43603,50 +44092,51 @@ public sealed class EmbeddedConnection : IDisposable
             return;
         }
 
-        switch (statement)
-        {
-            case InsertStatement insert when result.LastInsertRowId is { } rowId:
-            {
-                if (!catalog.Tables.TryGetValue(insert.TableName, out var table))
-                    return;
-                var index = table.RowIds.IndexOf(rowId);
-                if (index < 0 || index >= table.Rows.Count)
-                    return;
-                var tableId = store.GetOrCreateTableId(insert.TableName);
-                // Concurrent catalogs may both pick the same local rowid; promote to a
-                // store-global id so first-committer-wins does not collapse two inserts.
-                var allocated = store.AllocateRowId(tableId, minimumExclusive: rowId - 1);
-                if (allocated != rowId)
-                {
-                    table.RowIds[index] = allocated;
-                    // INTEGER PRIMARY KEY alias lives in cells; keep it aligned when present.
-                    var aliasIndex = table.RowidAliasColumnIndex;
-                    if (aliasIndex >= 0 && aliasIndex < table.Rows[index].Length)
-                        table.Rows[index][aliasIndex] = SqlValue.Integer(allocated);
-                }
-                else
-                {
-                    store.ObserveRowId(tableId, rowId);
-                }
+        if (statement is not InsertStatement insert || result.LastInsertRowId is not { } rowId)
+            return;
 
-                store.Insert(txId, new MvccRowId(tableId, allocated), table.Rows[index]);
-                break;
-            }
-            case DeleteStatement delete:
-            {
-                // Full row enumeration is not on ExecutionResult; record a table-level
-                // write token so commit still participates in store WW history.
-                var tableId = store.GetOrCreateTableId(delete.TableName);
-                store.RecordWrite(txId, new MvccRowId(tableId, RowId: -1));
-                break;
-            }
-            case UpdateStatement update:
-            {
-                var tableId = store.GetOrCreateTableId(update.TableName);
-                store.RecordWrite(txId, new MvccRowId(tableId, RowId: -1));
-                break;
-            }
+        if (!catalog.Tables.TryGetValue(insert.TableName, out var table))
+            return;
+        var index = table.RowIds.IndexOf(rowId);
+        if (index < 0 || index >= table.Rows.Count)
+            return;
+        var tableId = store.GetOrCreateTableId(insert.TableName);
+        // Concurrent catalogs may both pick the same local rowid; promote to a
+        // store-global id so first-committer-wins does not collapse two inserts.
+        var allocated = store.AllocateRowId(tableId, minimumExclusive: rowId - 1);
+        if (allocated != rowId)
+        {
+            table.RowIds[index] = allocated;
+            // INTEGER PRIMARY KEY alias lives in cells; keep it aligned when present.
+            var aliasIndex = table.RowidAliasColumnIndex;
+            if (aliasIndex >= 0 && aliasIndex < table.Rows[index].Length)
+                table.Rows[index][aliasIndex] = SqlValue.Integer(allocated);
         }
+        else
+        {
+            store.ObserveRowId(tableId, rowId);
+        }
+
+        store.Insert(txId, new MvccRowId(tableId, allocated), table.Rows[index]);
+    }
+
+    private bool TryGetConcurrentMvccScope(
+        EmbeddedDatabase database,
+        out MvStore? store,
+        out MvccTxId? txId)
+    {
+        store = null;
+        txId = null;
+        if (!_transactionIsConcurrent
+            || !_mvccTransactions.TryGetValue(database, out var id)
+            || database.MvStore is not { } mvStore)
+        {
+            return false;
+        }
+
+        store = mvStore;
+        txId = id;
+        return true;
     }
 
     private void CommitTransaction()
@@ -44113,19 +44603,23 @@ public sealed class EmbeddedConnection : IDisposable
 
         ValidatePragmaSchema(statement.Schema);
         var database = ResolvePragmaDatabase(statement.Schema);
-        // After a TRUNCATE/RESTART-style checkpoint, discard MVCC logical-log frames
-        // that have been "materialized" (Phase 2: catalog already holds committed
-        // rows for classic path; full b-tree SM lands later).
-        if (database.IsMvccEnabled
-            && statement.Mode is { } checkpointMode
-            && (checkpointMode.Equals("TRUNCATE", StringComparison.OrdinalIgnoreCase)
-                || checkpointMode.Equals("RESTART", StringComparison.OrdinalIgnoreCase)))
+        if (database.IsMvccEnabled)
         {
-            database.MvStore?.LogicalLog?.TruncateAfterCheckpoint();
+            // Turso CheckpointStateMachine skeleton: materialize → persist →
+            // truncate logical log (TRUNCATE/RESTART/FULL) → GC past reader LWM.
+            var result = database.RunMvccCheckpoint(statement.Mode, BusyTimeout);
+            return new ExecutionResult(
+                columns,
+                [[
+                    SqlValue.Integer(result.Busy ? 1 : 0),
+                    SqlValue.Integer(result.LogFramesBefore),
+                    SqlValue.Integer(result.CheckpointedFrames),
+                ]],
+                0);
         }
 
-        // The managed engine commits inline and keeps no persistent WAL frames,
-        // so every checkpoint completes trivially with nothing left in the log.
+        // Classic path: managed engine commits inline and keeps no persistent WAL
+        // frames, so every checkpoint completes trivially with nothing left in the log.
         return new ExecutionResult(columns, [[SqlValue.Integer(0), SqlValue.Integer(0), SqlValue.Integer(0)]], 0);
     }
 

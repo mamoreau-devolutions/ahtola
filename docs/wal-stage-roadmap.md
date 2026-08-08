@@ -158,16 +158,17 @@ This document is the **ordered engineering plan** to finish full Turso/SQLite WA
 4. Differential stress: SQLite writer ↔ managed reader and reverse; `PRAGMA wal_checkpoint` agreement; Turso open of managed-produced artifacts and reverse.
 5. Update contract status banner from “Stage 0” to “Stage 6 complete”.
 
-**Landed:** main-file lock is SQLite SHARED (one byte) via `SqliteWalByteRangeLock`; path canonicalization follows symlinks; ownership tests flipped to coexistence for DELETE-mode and managed↔managed. WAL write exclusion stays on `-shm`.
+**Landed:** main-file lock is SQLite SHARED (one byte) via `SqliteWalByteRangeLock`; path canonicalization follows symlinks; ownership tests flipped to coexistence for DELETE-mode and managed↔managed. WAL write exclusion stays on `-shm`. Live multi-engine WAL with stock SQLite is proven on Windows: shared `-shm` DMS, stock writer under a live managed reader (no `IOERR`), reverse direction, checkpoint agreement, empty/truncated WAL open, and long-lived managed peer-commit visibility via durable view-token refresh + force catalog reopen (`ManagedOwnershipHandoffPoolingTests`).
 
-**Known remaining gap:** live multi-engine **WAL** open (managed + stock SQLite both in `journal_mode=WAL`) can still surface SQLite `IOERR` on `-shm` while a managed pager holds the mapped index — main-file SHARED alone is not full WAL multi-engine interop.
+**Known remaining polish:** PENDING/RESERVED DELETE-mode writer upgrades; last-connection `-shm` unlink / heap WAL-index fallback; optional Turso binary differential stress; expanded process-isolation harness on Linux CI.
 
 **Exit criteria**
 
 - [x] Stock SQLite and managed open the same live DB without exclusive 512-byte ownership (DELETE-mode / handoff proven).
-- [x] No silent downgrade on unsupported platforms (still fail closed off Windows/Linux).
+- [x] No silent downgrade on unsupported platforms (still fail closed off Windows/Linux/macOS).
 - [x] Characterization suite rewritten for SHARED coexistence.
-- [ ] Live WAL multi-engine `-shm` interop (stock SQLite + managed both WAL) + PENDING/RESERVED DELETE polish + Turso differential stress.
+- [x] Live WAL multi-engine `-shm` interop (stock SQLite + managed both WAL; reader/writer both directions + checkpoint).
+- [ ] PENDING/RESERVED DELETE polish + optional Turso differential stress.
 
 ---
 

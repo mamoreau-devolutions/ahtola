@@ -841,8 +841,8 @@ public sealed class VdbeJoinScanPlan : VdbeJoinPlanNode
 }
 
 /// <summary>
-/// Optional equijoin probe for <see cref="VdbeJoinOperatorPlan"/>: hashes the right side
-/// once and probes per left row. The full <see cref="VdbeJoinCondition"/> still runs so
+/// Optional equijoin probe for <see cref="VdbeJoinOperatorPlan"/>: hashes one side
+/// once and probes from the other. The full <see cref="VdbeJoinCondition"/> still runs so
 /// affinity/collation edge cases stay correct; the probe is only a candidate filter.
 /// </summary>
 public sealed class VdbeJoinEquiProbe
@@ -868,7 +868,8 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
         VdbeJoinPlanNode right,
         VdbeJoinKind kind,
         VdbeJoinCondition? condition,
-        VdbeJoinEquiProbe? equiProbe = null)
+        VdbeJoinEquiProbe? equiProbe = null,
+        bool hashBuildRight = true)
         : base(
             checked((left ?? throw new ArgumentNullException(nameof(left))).ColumnCount
                 + (right ?? throw new ArgumentNullException(nameof(right))).ColumnCount),
@@ -876,12 +877,17 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
     {
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
+        if (!hashBuildRight && kind is not VdbeJoinKind.Inner)
+            throw new ArgumentException("Hash-build-left is only valid for INNER joins.", nameof(hashBuildRight));
+        if (!hashBuildRight && equiProbe is null)
+            throw new ArgumentException("Hash-build-left requires an equijoin probe.", nameof(hashBuildRight));
 
         Left = left;
         Right = right;
         Kind = kind;
         Condition = condition;
         EquiProbe = equiProbe;
+        HashBuildRight = hashBuildRight;
     }
 
     public VdbeJoinPlanNode Left { get; }
@@ -894,15 +900,26 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
 
     public VdbeJoinEquiProbe? EquiProbe { get; }
 
+    /// <summary>
+    /// When true (default), the right input is hashed/materialized and the left streams.
+    /// When false (INNER equijoin only), the left is hashed and the right streams — used when
+    /// cardinality estimates prefer building the smaller left side.
+    /// </summary>
+    public bool HashBuildRight { get; }
+
     internal override IReadOnlyList<VdbeJoinRow> Materialize(int? maximumRows) => Enumerate(maximumRows).ToList();
 
     internal override IEnumerable<VdbeJoinRow> Enumerate(int? maximumRows)
     {
-        // The right side is materialized once (bounded by table size); the left side streams so
-        // the join output is never fully buffered before the first row is consumed. This is the
-        // OOM fix: a cross/outer join of two large tables produces L*R rows, and materializing
-        // both inputs plus the output up front is the blowup. Only the right (inner) side is
-        // re-scanned per left row, so it is the side worth buffering.
+        // Default: materialize right once; stream left (OOM-safe for large outer × small inner).
+        // INNER equijoin may flip to hash-build left when stats say left is smaller.
+        if (!HashBuildRight)
+            return EnumerateHashBuildLeft(maximumRows);
+        return EnumerateHashBuildRight(maximumRows);
+    }
+
+    private IEnumerable<VdbeJoinRow> EnumerateHashBuildRight(int? maximumRows)
+    {
         var rightRows = Right.Enumerate(maximumRows: null).ToList();
         var rightMatched = Kind is VdbeJoinKind.Right or VdbeJoinKind.Full
             ? new bool[rightRows.Count]
@@ -910,7 +927,6 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
         var emitted = 0;
 
         // Optional equijoin hash: bucket right rows by canonical key, probe per left row.
-        // Candidates still pass through Condition for full SQLite equality semantics.
         Dictionary<string, List<int>>? buckets = null;
         if (EquiProbe is not null && rightRows.Count > 0)
         {
@@ -979,6 +995,61 @@ public sealed class VdbeJoinOperatorPlan : VdbeJoinPlanNode
                     continue;
 
                 yield return Combine(nullLeft, rightRows[rightIndex]);
+                if (maximumRows is { } maximum && ++emitted >= maximum)
+                    yield break;
+            }
+        }
+    }
+
+    private IEnumerable<VdbeJoinRow> EnumerateHashBuildLeft(int? maximumRows)
+    {
+        // INNER only: materialize left, stream right, probe left buckets. Output column order
+        // stays left||right via Combine.
+        var leftRows = Left.Enumerate(maximumRows: null).ToList();
+        var emitted = 0;
+        Dictionary<string, List<int>>? buckets = null;
+        if (EquiProbe is not null && leftRows.Count > 0)
+        {
+            buckets = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            for (var leftIndex = 0; leftIndex < leftRows.Count; leftIndex++)
+            {
+                var key = EquiProbe.BuildLeftKey(leftRows[leftIndex]);
+                if (key is null)
+                    continue;
+                if (!buckets.TryGetValue(key, out var bucket))
+                {
+                    bucket = [];
+                    buckets[key] = bucket;
+                }
+
+                bucket.Add(leftIndex);
+            }
+        }
+
+        foreach (var right in Right.Enumerate(maximumRows: null))
+        {
+            IEnumerable<int> candidateIndices;
+            if (buckets is not null && EquiProbe is not null)
+            {
+                var key = EquiProbe.BuildRightKey(right);
+                if (key is not null && buckets.TryGetValue(key, out var bucket))
+                    candidateIndices = bucket;
+                else
+                    candidateIndices = Array.Empty<int>();
+            }
+            else
+            {
+                candidateIndices = Enumerable.Range(0, leftRows.Count);
+            }
+
+            foreach (var leftIndex in candidateIndices)
+            {
+                var left = leftRows[leftIndex];
+                var combined = Combine(left, right);
+                if (Condition is not null && !Condition(left, right, combined))
+                    continue;
+
+                yield return combined;
                 if (maximumRows is { } maximum && ++emitted >= maximum)
                     yield break;
             }
@@ -2136,6 +2207,19 @@ public sealed record FkCheckInstruction(bool Deferred) : VdbeInstruction
 /// exists. <paramref name="IsIndex"/> selects the Idx* opcode names for EXPLAIN parity;
 /// runtime semantics are the same for materialization-backed cursors.
 /// </summary>
+/// <param name="Cursor">Table or index cursor to position.</param>
+/// <param name="Key">Register range holding the seek key values.</param>
+/// <param name="Operator">Comparison operator (GE/GT/LE/LT).</param>
+/// <param name="EqOnly">When true, GE/LE requires an exact key match.</param>
+/// <param name="IsIndex">When true, EXPLAIN reports Idx* opcode names.</param>
+/// <param name="NotFoundTarget">PC jumped to when no qualifying row exists.</param>
+/// <param name="Description">Human-readable EXPLAIN comment.</param>
+/// <param name="KeyColumns">
+/// Optional table-column ordinals for each key register. When null, the key compares
+/// against row columns <c>0..Key.Count-1</c> (index-shaped / leading-key cursors).
+/// When set, length must equal <see cref="Key"/>.Count and each entry is the row
+/// ordinal used for that key part (table-row cursors ordered by a non-leading index).
+/// </param>
 public sealed record SeekKeyInstruction(
     Cursor Cursor,
     RegisterRange Key,
@@ -2143,7 +2227,8 @@ public sealed record SeekKeyInstruction(
     bool EqOnly,
     bool IsIndex,
     ProgramCounter NotFoundTarget,
-    string Description) : VdbeInstruction
+    string Description,
+    IReadOnlyList<int>? KeyColumns = null) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => (IsIndex, Operator) switch
     {
@@ -2895,14 +2980,32 @@ public sealed class VdbeProgram
                             $"VDBE instruction {instructionIndex} SeekKey requires a positive key width.");
                     }
 
-                    if (!Enum.IsDefined(seekKey.Operator))
+                                    if (seekKey.KeyColumns is not null)
                     {
-                        throw new VdbeProgramValidationException(
-                            $"VDBE instruction {instructionIndex} has an undefined SeekKey operator.");
-                    }
+                                        if (seekKey.KeyColumns.Count != seekKey.Key.Count)
+                                        {
+                                            throw new VdbeProgramValidationException(
+                                                $"VDBE instruction {instructionIndex} SeekKey KeyColumns length must match key width.");
+                                        }
 
-                    ValidateJumpTarget(seekKey.NotFoundTarget, instructionIndex);
-                    break;
+                                        for (var i = 0; i < seekKey.KeyColumns.Count; i++)
+                                        {
+                                            if (seekKey.KeyColumns[i] < 0)
+                                            {
+                                                throw new VdbeProgramValidationException(
+                                                    $"VDBE instruction {instructionIndex} SeekKey KeyColumns[{i}] is negative.");
+                                            }
+                                        }
+                                    }
+
+                                    if (!Enum.IsDefined(seekKey.Operator))
+                                    {
+                                        throw new VdbeProgramValidationException(
+                                            $"VDBE instruction {instructionIndex} has an undefined SeekKey operator.");
+                                    }
+
+                                    ValidateJumpTarget(seekKey.NotFoundTarget, instructionIndex);
+                                    break;
                 case IdxRowIdInstruction idxRowId:
                     ValidateOpenCursor(idxRowId.Cursor, openCursors, instructionIndex);
                     ValidateRegister(idxRowId.Destination, instructionIndex);

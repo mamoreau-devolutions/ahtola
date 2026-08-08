@@ -137,8 +137,21 @@ public sealed partial class PhysicalFileSystem :
             return;
         }
 
+        if (OperatingSystem.IsMacOS())
+        {
+            // FileStream.Lock is not implemented on Darwin; use the WAL lock primitive.
+            var locks = new SqliteWalByteRangeLock(destination);
+            using (locks.AcquireExclusive(0, 1, TimeSpan.FromSeconds(30)))
+            {
+                if (destinationReservation.Length != 0)
+                    throw new IOException("output file already exists");
+                File.Move(source, destination, overwrite: true);
+            }
+            return;
+        }
+
         throw new PlatformNotSupportedException(
-            "Atomic replacement of an existing empty destination is supported only on Windows and Linux.");
+            "Atomic replacement of an existing empty destination is supported only on Windows, Linux, and macOS.");
     }
 
     [LibraryImport(

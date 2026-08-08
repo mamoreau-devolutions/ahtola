@@ -426,14 +426,14 @@ public sealed class SqliteWalReadSnapshotCoordinatorTests
     }
 
     private static bool SupportsSnapshotCoordinator
-        => OperatingSystem.IsWindows() || (OperatingSystem.IsLinux() && Environment.Is64BitProcess);
+        => OperatingSystem.IsWindows() || (OperatingSystem.IsLinux() && Environment.Is64BitProcess) || OperatingSystem.IsMacOS();
 
     private static void RequireSnapshotSupport()
     {
         if (!SupportsSnapshotCoordinator)
         {
             Assert.Ignore(
-                "Detached SQLite WAL read snapshots are supported only on Windows and 64-bit Linux.");
+                "Detached SQLite WAL read snapshots are supported only on Windows, 64-bit Linux, and macOS.");
         }
     }
 

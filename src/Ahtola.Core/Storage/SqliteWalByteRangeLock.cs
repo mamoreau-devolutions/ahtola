@@ -66,7 +66,9 @@ public sealed class SqliteWalByteRangeLockBusyException : InvalidOperationExcept
 /// protocol. Each returned lease owns a dedicated file descriptor until disposal,
 /// so its operating-system lock lifetime cannot be shortened by an unrelated
 /// lease. Windows uses <c>LockFileEx</c>; 64-bit Linux uses OFD locks so closing
-/// an unrelated descriptor cannot release a lease.
+/// an unrelated descriptor cannot release a lease; macOS uses POSIX
+/// <c>fcntl(F_SETLK)</c> (process-associated, not OFD — same class of lock SQLite
+/// uses on Darwin).
 /// </remarks>
 public sealed partial class SqliteWalByteRangeLock
 {
@@ -80,6 +82,14 @@ public sealed partial class SqliteWalByteRangeLock
     private const int LinuxAccessDenied = 13;
     private const int LinuxResourceTemporarilyUnavailable = 11;
     private const int LinuxInvalidArgument = 22;
+    // Darwin sys/fcntl.h: F_SETLK=8, F_RDLCK=1, F_UNLCK=2, F_WRLCK=3.
+    private const int MacSetLock = 8;
+    private const short MacReadLock = 1;
+    private const short MacWriteLock = 3;
+    private const short MacUnlock = 2;
+    private const short MacSeekSet = 0;
+    private const int MacAccessDenied = 13;
+    private const int MacResourceTemporarilyUnavailable = 35; // EAGAIN
     private const int WindowsLockViolation = 33;
 
     /// <summary>
@@ -346,7 +356,7 @@ public sealed partial class SqliteWalByteRangeLock
                 LinuxSeekSet,
                 offset,
                 length);
-            if (Native.Fcntl(handle, LinuxOfdSetLock, ref fileLock) == 0)
+            if (Native.FcntlLinux(handle, LinuxOfdSetLock, ref fileLock) == 0)
             {
                 contention = null;
                 return true;
@@ -366,6 +376,29 @@ public sealed partial class SqliteWalByteRangeLock
             }
 
             ThrowNativeIOException("fcntl(F_OFD_SETLK)", error);
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            var fileLock = new MacFileLock(
+                mode == SqliteWalByteRangeLockMode.Shared ? MacReadLock : MacWriteLock,
+                MacSeekSet,
+                offset,
+                length);
+            if (Native.FcntlMac(handle, MacSetLock, ref fileLock) == 0)
+            {
+                contention = null;
+                return true;
+            }
+
+            var error = Marshal.GetLastPInvokeError();
+            if (error is MacAccessDenied or MacResourceTemporarilyUnavailable)
+            {
+                contention = CreateContentionException("fcntl(F_SETLK)", error);
+                return false;
+            }
+
+            ThrowNativeIOException("fcntl(F_SETLK)", error);
         }
 
         EnsurePlatformSupported();
@@ -389,8 +422,16 @@ public sealed partial class SqliteWalByteRangeLock
         if (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
         {
             var fileLock = new LinuxFileLock(LinuxUnlock, LinuxSeekSet, offset, length);
-            if (Native.Fcntl(handle, LinuxOfdSetLock, ref fileLock) != 0)
+            if (Native.FcntlLinux(handle, LinuxOfdSetLock, ref fileLock) != 0)
                 ThrowNativeIOException("fcntl(F_OFD_SETLK unlock)", Marshal.GetLastPInvokeError());
+            return;
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            var fileLock = new MacFileLock(MacUnlock, MacSeekSet, offset, length);
+            if (Native.FcntlMac(handle, MacSetLock, ref fileLock) != 0)
+                ThrowNativeIOException("fcntl(F_SETLK unlock)", Marshal.GetLastPInvokeError());
             return;
         }
 
@@ -404,9 +445,11 @@ public sealed partial class SqliteWalByteRangeLock
             return;
         if (OperatingSystem.IsLinux() && Environment.Is64BitProcess && Marshal.SizeOf<LinuxFileLock>() == 32)
             return;
+        if (OperatingSystem.IsMacOS() && Marshal.SizeOf<MacFileLock>() == 24)
+            return;
 
         throw new PlatformNotSupportedException(
-            "SQLite WAL byte-range locks are supported only on Windows and 64-bit Linux with the expected flock ABI.");
+            "SQLite WAL byte-range locks are supported only on Windows, 64-bit Linux (OFD), and macOS (POSIX F_SETLK).");
     }
 
     private static void ValidateRange(long offset, long length)
@@ -510,6 +553,29 @@ public sealed partial class SqliteWalByteRangeLock
         internal int ProcessId;
     }
 
+    /// <summary>
+    /// Darwin <c>struct flock</c> field order differs from Linux:
+    /// <c>l_start, l_len, l_pid, l_type, l_whence</c>.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential, Size = 24)]
+    private struct MacFileLock
+    {
+        internal MacFileLock(short type, short whence, long start, long length)
+        {
+            Start = start;
+            Length = length;
+            ProcessId = 0;
+            Type = type;
+            Whence = whence;
+        }
+
+        internal long Start;
+        internal long Length;
+        internal int ProcessId;
+        internal short Type;
+        internal short Whence;
+    }
+
     private static partial class Native
     {
         [LibraryImport("kernel32.dll", EntryPoint = "LockFileEx", SetLastError = true)]
@@ -535,10 +601,17 @@ public sealed partial class SqliteWalByteRangeLock
 
         [LibraryImport("libc", EntryPoint = "fcntl", SetLastError = true)]
         [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-        internal static partial int Fcntl(
+        internal static partial int FcntlLinux(
             SafeFileHandle fileDescriptor,
             int command,
             ref LinuxFileLock fileLock);
+
+        [LibraryImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial int FcntlMac(
+            SafeFileHandle fileDescriptor,
+            int command,
+            ref MacFileLock fileLock);
     }
 
 }
@@ -627,14 +700,24 @@ internal readonly partial record struct SqliteWalSharedMemoryCarrierIdentity(ulo
 
         if (OperatingSystem.IsLinux() && Environment.Is64BitProcess)
         {
-            if (Native.Fstat(handle, out var information) != 0)
+            if (Native.FstatLinux(handle, out var information) != 0)
                 ThrowNativeIOException("fstat", Marshal.GetLastPInvokeError());
 
             return new SqliteWalSharedMemoryCarrierIdentity(information.Device, information.Inode);
         }
 
+        if (OperatingSystem.IsMacOS())
+        {
+            if (Native.FstatMac(handle, out var information) != 0)
+                ThrowNativeIOException("fstat", Marshal.GetLastPInvokeError());
+
+            return new SqliteWalSharedMemoryCarrierIdentity(
+                unchecked((ulong)(uint)information.Device),
+                information.Inode);
+        }
+
         throw new PlatformNotSupportedException(
-            "SQLite WAL shared-memory carrier identity is supported only on Windows and 64-bit Linux.");
+            "SQLite WAL shared-memory carrier identity is supported only on Windows, 64-bit Linux, and macOS.");
     }
 
     private static void ThrowNativeIOException(string operation, int error)
@@ -685,6 +768,20 @@ internal readonly partial record struct SqliteWalSharedMemoryCarrierIdentity(ulo
         private long _reserved3;
     }
 
+    /// <summary>
+    /// Darwin 64-bit-inode <c>struct stat</c> layout for carrier identity only.
+    /// <c>st_dev</c> @0, <c>st_ino</c> @8 after mode/nlink.
+    /// </summary>
+    [StructLayout(LayoutKind.Explicit, Size = 144)]
+    private struct MacFileStatus
+    {
+        [FieldOffset(0)]
+        internal int Device;
+
+        [FieldOffset(8)]
+        internal ulong Inode;
+    }
+
     private static partial class Native
     {
         [LibraryImport("kernel32.dll", SetLastError = true)]
@@ -695,8 +792,14 @@ internal readonly partial record struct SqliteWalSharedMemoryCarrierIdentity(ulo
 
         [LibraryImport("libc", EntryPoint = "fstat", SetLastError = true)]
         [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-        internal static partial int Fstat(
+        internal static partial int FstatLinux(
             SafeFileHandle fileDescriptor,
             out LinuxFileStatus information);
+
+        [LibraryImport("libc", EntryPoint = "fstat", SetLastError = true)]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        internal static partial int FstatMac(
+            SafeFileHandle fileDescriptor,
+            out MacFileStatus information);
     }
 }

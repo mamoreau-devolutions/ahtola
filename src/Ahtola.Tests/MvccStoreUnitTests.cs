@@ -137,4 +137,55 @@ public sealed class MvccStoreUnitTests
         var visible = store.ScanVisible(reader.Id);
         visible.Select(row => row.RowId.RowId).OrderBy(id => id).Should().Equal(1L, 2L);
     }
+
+    [Test]
+    public void DeleteOrTombstoneBaseInvalidatesClassicBaseRow()
+    {
+        var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var key = new MvccRowId(table, 5);
+        var tx = store.BeginTransaction();
+
+        store.DeleteOrTombstoneBase(tx.Id, key);
+        store.IsBaseRowInvalidated(tx.Id, key).Should().BeTrue();
+        store.TryRead(tx.Id, key, out _).Should().BeFalse();
+
+        store.Commit(tx.Id);
+        store.SnapshotCommittedDeletes().Should().Contain(key);
+
+        var later = store.BeginTransaction();
+        store.IsBaseRowInvalidated(later.Id, key).Should().BeTrue();
+    }
+
+    [Test]
+    public void ConcurrentBaseTombstonesRaiseWriteWriteConflict()
+    {
+        var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var key = new MvccRowId(table, 9);
+        var a = store.BeginTransaction();
+        var b = store.BeginTransaction();
+
+        store.DeleteOrTombstoneBase(a.Id, key);
+        var act = () => store.DeleteOrTombstoneBase(b.Id, key);
+        act.Should().Throw<EmbeddedWriteWriteConflictException>();
+    }
+
+    [Test]
+    public void UpdateIncludingBaseOverlaysClassicBaseRow()
+    {
+        var store = new MvStore();
+        var table = store.GetOrCreateTableId("t");
+        var key = new MvccRowId(table, 1);
+        var tx = store.BeginTransaction();
+
+        store.UpdateIncludingBase(tx.Id, key, [SqlValue.Text("new")]);
+        store.TryRead(tx.Id, key, out var cells).Should().BeTrue();
+        cells![0].Should().Be(SqlValue.Text("new"));
+        store.IsBaseRowInvalidated(tx.Id, key).Should().BeTrue();
+        store.Commit(tx.Id);
+
+        store.SnapshotLiveCommittedRows().Should().ContainSingle(row =>
+            row.RowId == key && row.Cells[0].Equals(SqlValue.Text("new")));
+    }
 }

@@ -47,6 +47,16 @@ internal sealed class MvccLogicalLog : IDisposable
         get { lock (_gate) return _offset; }
     }
 
+    /// <summary>Bytes past the log header (approximate "frames" size for checkpoint stats).</summary>
+    internal long ApproximatePayloadBytes
+    {
+        get
+        {
+            lock (_gate)
+                return Math.Max(0L, _offset - LogHeaderSize);
+        }
+    }
+
     internal static string LogPathForDatabase(string databasePath)
     {
         // Turso: db_path.with_extension("db-log") → "file.db-log" for "file.db"

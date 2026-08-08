@@ -130,45 +130,51 @@ public sealed class SqliteIncrementalTableBtree
     }
 
                 /// <summary>
-                /// Merges an under-full non-root leaf into a neighboring sibling when both
-                /// sets of cells fit on one page. When merge does not fit and this leaf is
-                /// below half full, redistributes cells evenly with one sibling (two-way).
-                /// Three-way multi-sibling balance and index-tree shrink remain out of scope.
-                /// </summary>
-                private void TryMergeUnderfullLeaf(List<PathEntry> path, List<SqliteTableLeafCell> cells)
-                {
-                    if (path.Count < 2 || cells.Count == 0)
-                        return;
+                                /// Merges an under-full non-root leaf into a neighboring sibling when both
+                                /// sets of cells fit on one page. When merge does not fit and this leaf is
+                                /// below half full, redistributes cells evenly with one sibling (two-way).
+                                /// Empty-leaf reclaim still collapses single-child interiors via
+                                /// <see cref="CollapseSingleChildInterior"/>. Underfull (non-empty) merge is
+                                /// deferred when the parent has only two children under a deep tree so a
+                                /// separator-only delete keeps parent topology byte-stable (full-rewrite /
+                                /// empty-leaf paths handle true shrink). Three-way multi-sibling balance and
+                                /// index-tree shrink remain out of scope.
+                                /// </summary>
+                                private void TryMergeUnderfullLeaf(List<PathEntry> path, List<SqliteTableLeafCell> cells)
+                                {
+                                    if (path.Count < 2 || cells.Count == 0)
+                                        return;
 
-                    var leafPage = path[^1].PageNumber;
-                    var capacity = LeafCapacity(leafPage);
-                    var used = LeafUsedBytes(cells);
-                    // Only attempt a sibling merge when this leaf has meaningful free space
-                    // (below ~3/4 full). Fits-check below still decides whether merge happens.
-                    if (used * 4 > capacity * 3)
-                        return;
+                                    var leafPage = path[^1].PageNumber;
+                                    var capacity = LeafCapacity(leafPage);
+                                    var used = LeafUsedBytes(cells);
+                                    // Only attempt a sibling merge when this leaf has meaningful free space
+                                    // (below ~3/4 full). Fits-check below still decides whether merge happens.
+                                    if (used * 4 > capacity * 3)
+                                        return;
 
-                    // Redistribute only when well under half full so ordinary sparse deletes
-                    // still prefer merge-when-fit and do not thrash packing on every remove.
-                    var allowRedistribute = used * 2 <= capacity;
+                                    // Redistribute only when well under half full so ordinary sparse deletes
+                                    // still prefer merge-when-fit and do not thrash packing on every remove.
+                                    var allowRedistribute = used * 2 <= capacity;
 
-                    var parentEntry = path[^2];
-                    var parentLinks = ReadChildLinks(ParseInterior(parentEntry.PageNumber));
-                    var childIndex = parentEntry.ChildIndex;
-                    if (childIndex < 0 || childIndex >= parentLinks.Count)
-                        return;
+                                    var parentEntry = path[^2];
+                                    var parentLinks = ReadChildLinks(ParseInterior(parentEntry.PageNumber));
+                                    var childIndex = parentEntry.ChildIndex;
+                                    if (childIndex < 0 || childIndex >= parentLinks.Count)
+                                        return;
 
-                    // Merging away a child from a 2-child non-root parent would leave a
-                    // single-child interior; promoting that survivor under a grandparent that
-                    // still has interior siblings breaks tree height (leaf next to interior).
-                    // Defer to the bounded full-leaf rewrite path instead.
-                    if (parentLinks.Count <= 2 && path.Count > 2)
-                        return;
+                                    // Merging away a child from a 2-child non-root parent leaves a single-child
+                                    // interior. Empty-leaf reclaim may collapse that via sibling absorb, but
+                                    // underfull non-empty merge must not: separator-only deletes on deep trees
+                                    // are required to keep parent pages byte-identical (topology tests / WAL
+                                    // frame interruption fixtures). Defer to the next empty-leaf or full rewrite.
+                                    if (parentLinks.Count <= 2 && path.Count > 2)
+                                        return;
 
-                    // Prefer merging into the left sibling (keeps lower page numbers live).
-                    if (childIndex > 0
-                        && ParseHeaderType(parentLinks[childIndex - 1].PageNumber) == SqliteBtreePageType.TableLeaf)
-                    {
+                                    // Prefer merging into the left sibling (keeps lower page numbers live).
+                                    if (childIndex > 0
+                                        && ParseHeaderType(parentLinks[childIndex - 1].PageNumber) == SqliteBtreePageType.TableLeaf)
+                                    {
                         var leftPage = parentLinks[childIndex - 1].PageNumber;
                         var leftCells = ParseLeaf(leftPage).Cells.Select(cell => cell.Cell).ToList();
                         if (LeafCellsFit(leftPage, leftCells, cells))
@@ -307,32 +313,161 @@ public sealed class SqliteIncrementalTableBtree
 
     /// <summary>
     /// Writes <paramref name="links"/> into the interior at <paramref name="level"/>,
-    /// or collapses a single-child interior the same way empty-leaf reclaim does.
-    /// </summary>
-    private void WriteOrCollapseParent(List<PathEntry> path, int level, List<ChildLink> links)
-    {
-        var entry = path[level];
-        if (links.Count == 0)
+        /// or collapses a single-child interior: root absorb, or merge the sole child into a
+        /// sibling interior under the grandparent (preserves uniform tree height).
+        /// </summary>
+        private void WriteOrCollapseParent(List<PathEntry> path, int level, List<ChildLink> links)
         {
-            throw new InvalidDataException(
-                $"SQLite table-interior page {entry.PageNumber} lost every child during leaf merge.");
-        }
-
-        if (links.Count == 1)
-        {
-            var soleChild = links[0].PageNumber;
-            if (level == 0)
+            var entry = path[level];
+            if (links.Count == 0)
             {
-                AbsorbChildIntoPage(entry.PageNumber, soleChild);
+                throw new InvalidDataException(
+                    $"SQLite table-interior page {entry.PageNumber} lost every child during leaf merge.");
+            }
+
+            if (links.Count == 1)
+            {
+                CollapseSingleChildInterior(path, level, links[0].PageNumber);
                 return;
             }
 
-            throw new SqliteBtreeMaintenanceRequiredException(
-                $"SQLite table-interior page {entry.PageNumber} would collapse to a single child under a non-root parent; interior rebalance is required.");
+            WriteSinglePage(entry.PageNumber, BuildInteriorImage(entry.PageNumber, links));
         }
 
-        WriteSinglePage(entry.PageNumber, BuildInteriorImage(entry.PageNumber, links));
-    }
+        /// <summary>
+        /// Collapses an interior that has exactly one remaining child. At the root, the child
+        /// is absorbed into page 1 / root (height shrink). Under a non-root parent, the sole
+        /// child is merged into a neighboring sibling interior so grandparent children stay
+        /// the same height (never promote a leaf beside an interior).
+        /// </summary>
+        private void CollapseSingleChildInterior(List<PathEntry> path, int level, uint soleChildPage)
+        {
+            var entry = path[level];
+            if (level == 0)
+            {
+                AbsorbChildIntoPage(entry.PageNumber, soleChildPage);
+                return;
+            }
+
+            if (level < 1 || entry.ChildIndex < 0)
+            {
+                throw new SqliteBtreeMaintenanceRequiredException(
+                    $"SQLite table-interior page {entry.PageNumber} cannot collapse: missing grandparent path.");
+            }
+
+            var grandEntry = path[level - 1];
+            var grandLinks = ReadChildLinks(ParseInterior(grandEntry.PageNumber));
+            var parentIndex = entry.ChildIndex;
+            if (parentIndex >= grandLinks.Count || grandLinks[parentIndex].PageNumber != entry.PageNumber)
+            {
+                // Path may be stale after prior rewrites; locate by page number.
+                parentIndex = grandLinks.FindIndex(link => link.PageNumber == entry.PageNumber);
+                if (parentIndex < 0)
+                {
+                    throw new SqliteBtreeMaintenanceRequiredException(
+                        $"SQLite table-interior page {entry.PageNumber} is not a child of {grandEntry.PageNumber} during single-child collapse.");
+                }
+            }
+
+            var parentUpperBound = grandLinks[parentIndex].MaximumRowId;
+
+            // Prefer left sibling interior (keeps lower page numbers live).
+            if (parentIndex > 0
+                && ParseHeaderType(grandLinks[parentIndex - 1].PageNumber) == SqliteBtreePageType.TableInterior)
+            {
+                var leftPage = grandLinks[parentIndex - 1].PageNumber;
+                var leftLinks = ReadChildLinks(ParseInterior(leftPage));
+                if (leftLinks.Count > 0)
+                {
+                    leftLinks[^1] = leftLinks[^1] with
+                    {
+                        MaximumRowId = ReadSubtreeMaximumRowId(leftLinks[^1].PageNumber),
+                    };
+                }
+
+                leftLinks.Add(new ChildLink(soleChildPage, long.MaxValue));
+                if (InteriorLinksFit(leftPage, leftLinks))
+                {
+                    WriteSinglePage(leftPage, BuildInteriorImage(leftPage, leftLinks));
+                    grandLinks[parentIndex - 1] = grandLinks[parentIndex - 1] with
+                    {
+                        MaximumRowId = parentUpperBound,
+                    };
+                    grandLinks.RemoveAt(parentIndex);
+                    _io.FreePage(entry.PageNumber);
+                    WriteOrCollapseParent(path, level - 1, grandLinks);
+                    return;
+                }
+            }
+
+            // Right sibling interior.
+            if (parentIndex + 1 < grandLinks.Count
+                && ParseHeaderType(grandLinks[parentIndex + 1].PageNumber) == SqliteBtreePageType.TableInterior)
+            {
+                var rightPage = grandLinks[parentIndex + 1].PageNumber;
+                var rightLinks = ReadChildLinks(ParseInterior(rightPage));
+                var soleMax = ReadSubtreeMaximumRowId(soleChildPage);
+                rightLinks.Insert(0, new ChildLink(soleChildPage, soleMax));
+                if (InteriorLinksFit(rightPage, rightLinks))
+                {
+                    WriteSinglePage(rightPage, BuildInteriorImage(rightPage, rightLinks));
+                    grandLinks.RemoveAt(parentIndex);
+                    _io.FreePage(entry.PageNumber);
+                    WriteOrCollapseParent(path, level - 1, grandLinks);
+                    return;
+                }
+            }
+
+            throw new SqliteBtreeMaintenanceRequiredException(
+                $"SQLite table-interior page {entry.PageNumber} would collapse to a single child under non-root parent {grandEntry.PageNumber}; no sibling interior can absorb the survivor.");
+        }
+
+        private bool InteriorLinksFit(uint pageNumber, List<ChildLink> links)
+        {
+            if (links.Count == 0)
+                return false;
+
+            // Match PartitionInteriorChildren costing: each child charges a pointer + separator
+            // varint + cell-pointer slot (conservative by one separator on the rightmost).
+            var capacity = InteriorCapacity(pageNumber);
+            var used = 0;
+            foreach (var link in links)
+            {
+                used += SqliteTableInteriorCell.ChildPointerLength
+                    + SqliteVarint.GetLength(unchecked((ulong)link.MaximumRowId))
+                    + sizeof(ushort);
+                if (used > capacity)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private long ReadSubtreeMaximumRowId(uint pageNumber)
+        {
+            switch (ParseHeaderType(pageNumber))
+            {
+                case SqliteBtreePageType.TableLeaf:
+                    {
+                        var cells = ParseLeaf(pageNumber).Cells;
+                        if (cells.Count == 0)
+                        {
+                            throw new InvalidDataException(
+                                $"SQLite table-leaf page {pageNumber} is empty while computing subtree maximum rowid.");
+                        }
+
+                        return cells[^1].Cell.RowId;
+                    }
+                case SqliteBtreePageType.TableInterior:
+                    {
+                        var view = ParseInterior(pageNumber);
+                        return ReadSubtreeMaximumRowId(view.Header.RightMostChildPage);
+                    }
+                default:
+                    throw new InvalidDataException(
+                        $"SQLite page {pageNumber} is not a table b-tree page while computing subtree maximum rowid.");
+            }
+        }
 
     private bool LeafCellsFit(uint pageNumber, List<SqliteTableLeafCell> left, List<SqliteTableLeafCell> right)
         => LeafUsedBytes(left) + LeafUsedBytes(right) <= LeafCapacity(pageNumber);
@@ -363,27 +498,20 @@ public sealed class SqliteIncrementalTableBtree
         }
 
         links.RemoveAt(entry.ChildIndex);
-        if (links.Count == 0)
-        {
-            throw new InvalidDataException(
-                $"SQLite table-interior page {entry.PageNumber} lost every child during empty-leaf reclaim.");
-        }
+                if (links.Count == 0)
+                {
+                    throw new InvalidDataException(
+                        $"SQLite table-interior page {entry.PageNumber} lost every child during empty-leaf reclaim.");
+                }
 
-        if (links.Count == 1)
-        {
-            var soleChild = links[0].PageNumber;
-            if (level == 0)
-            {
-                AbsorbChildIntoPage(entry.PageNumber, soleChild);
-                return;
+                if (links.Count == 1)
+                {
+                    CollapseSingleChildInterior(path, level, links[0].PageNumber);
+                    return;
+                }
+
+                WriteSinglePage(entry.PageNumber, BuildInteriorImage(entry.PageNumber, links));
             }
-
-            throw new SqliteBtreeMaintenanceRequiredException(
-                $"SQLite table-interior page {entry.PageNumber} would collapse to a single child under a non-root parent; interior rebalance is required.");
-        }
-
-        WriteSinglePage(entry.PageNumber, BuildInteriorImage(entry.PageNumber, links));
-    }
 
     /// <summary>
     /// Copies <paramref name="childPage"/>'s b-tree payload into

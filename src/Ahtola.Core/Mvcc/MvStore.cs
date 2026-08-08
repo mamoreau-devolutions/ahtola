@@ -357,6 +357,57 @@ internal sealed class MvStore
         }
     }
 
+    /// <summary>
+    /// Delete a store-visible version when present; otherwise plant a tombstone that
+    /// invalidates a classic base-table row for this concurrent transaction (Turso
+    /// dual-cursor delete of btree-only rows).
+    /// </summary>
+    internal void DeleteOrTombstoneBase(MvccTxId txId, MvccRowId rowId)
+    {
+        lock (_gate)
+        {
+            var tx = RequireActive(txId);
+            if (_rows.TryGetValue(rowId, out var chain))
+            {
+                for (var i = chain.Count - 1; i >= 0; i--)
+                {
+                    var version = chain[i];
+                    if (!IsVisibleTo(version, tx))
+                        continue;
+                    if (IsWriteWriteConflict(tx, version))
+                        throw new EmbeddedWriteWriteConflictException();
+
+                    // Already a pure base tombstone from this tx — idempotent.
+                    if (version.IsTombstone && version.End is null
+                        && version.Begin is { IsTimestamp: false, Value: var beginTx }
+                        && beginTx == txId.Value)
+                    {
+                        return;
+                    }
+
+                    version.End = MvccStamp.FromTxId(txId);
+                    tx.RecordLogOp(MvccLogOp.Delete(rowId));
+                    return;
+                }
+
+                ThrowIfConcurrentWriterOnRow(tx, chain);
+            }
+            else
+            {
+                chain = [];
+                _rows[rowId] = chain;
+            }
+
+            chain.Add(new MvccRowVersion(
+                _nextVersionId++,
+                begin: MvccStamp.FromTxId(txId),
+                end: null,
+                cells: [],
+                isTombstone: true));
+            tx.RecordLogOp(MvccLogOp.Delete(rowId));
+        }
+    }
+
     /// <summary>Delete-then-insert update (Turso <c>update</c>).</summary>
     internal bool Update(MvccTxId txId, MvccRowId rowId, SqlValue[] cells)
     {
@@ -364,6 +415,17 @@ internal sealed class MvStore
             return false;
         Insert(txId, rowId, cells);
         return true;
+    }
+
+    /// <summary>
+    /// Update including classic base-only rows: tombstone/end the prior image, then
+    /// insert the new cells under <paramref name="txId"/>.
+    /// </summary>
+    internal void UpdateIncludingBase(MvccTxId txId, MvccRowId rowId, SqlValue[] cells)
+    {
+        ArgumentNullException.ThrowIfNull(cells);
+        DeleteOrTombstoneBase(txId, rowId);
+        Insert(txId, rowId, cells);
     }
 
     /// <summary>Read the version visible to <paramref name="txId"/>, if any.</summary>
@@ -488,8 +550,9 @@ internal sealed class MvStore
     }
 
     /// <summary>
-    /// Row ids whose latest committed state is deleted (has an end timestamp and
-    /// no later live version).
+    /// Row ids whose latest committed state is deleted (ended version, or a live
+    /// committed pure tombstone that marks a base-row delete) with no later live
+    /// non-tombstone version.
     /// </summary>
     internal IReadOnlyCollection<MvccRowId> SnapshotCommittedDeletes()
     {
@@ -511,7 +574,9 @@ internal sealed class MvStore
                         break;
                     }
 
-                    if (version.End is { IsTimestamp: true })
+                    if (version.End is null && version.IsTombstone)
+                        sawDelete = true;
+                    else if (version.End is { IsTimestamp: true })
                         sawDelete = true;
                 }
 
@@ -753,10 +818,113 @@ internal sealed class MvStore
         return false;
     }
 
+    /// <summary>
+    /// Concurrent pure base tombstones/inserts share End=null, so the end-stamp WW
+    /// path never fires. Detect peer Active/Preparing begins (or ends) on the chain.
+    /// </summary>
+    private void ThrowIfConcurrentWriterOnRow(MvccTransaction tx, List<MvccRowVersion> chain)
+    {
+        foreach (var version in chain)
+        {
+            if (version.Begin is { IsTimestamp: false, Value: var beginTx }
+                && beginTx != tx.Id.Value
+                && IsActiveOrPreparingTx(beginTx))
+            {
+                throw new EmbeddedWriteWriteConflictException();
+            }
+
+            if (version.End is { IsTimestamp: false, Value: var endTx }
+                && endTx != tx.Id.Value
+                && IsActiveOrPreparingTx(endTx))
+            {
+                throw new EmbeddedWriteWriteConflictException();
+            }
+        }
+    }
+
+    private bool IsActiveOrPreparingTx(ulong otherTxId)
+        => _transactions.TryGetValue(otherTxId, out var other)
+            && other.State is MvccTransactionState.Active or MvccTransactionState.Preparing;
+
     private void ClearExclusive(MvccTxId id)
     {
         if (_exclusiveTxId == id.Value)
             _exclusiveTxId = null;
+    }
+
+    /// <summary>True when any Active/Preparing concurrent transaction is open.</summary>
+    internal bool HasActiveTransactions()
+    {
+        lock (_gate)
+            return HasActiveTransactionsLocked();
+    }
+
+    /// <summary>Count of version chains currently held (test/diagnostic).</summary>
+    internal int VersionChainCount
+    {
+        get { lock (_gate) return _rows.Count; }
+    }
+
+    /// <summary>
+    /// Post-checkpoint GC after catalog materialization. When no concurrent
+    /// transactions are open, drop the entire version store (rows now live in
+    /// the classic catalog). Otherwise prune ended history past the reader LWM
+    /// (Turso <c>GcTableRows</c> spirit without per-page btree walks).
+    /// </summary>
+    internal void GarbageCollectAfterCheckpoint()
+    {
+        lock (_gate)
+        {
+            if (!HasActiveTransactionsLocked())
+            {
+                _rows.Clear();
+                return;
+            }
+
+            var lwm = ComputeReaderLowWaterMarkLocked();
+            PruneHistoryLocked(lwm);
+
+            // Committed pure tombstones with begin &lt; LWM are catalog-owned once
+            // materialize has applied deletes; drop them so dual-cursor defers to base.
+            foreach (var (rowId, chain) in _rows.ToArray())
+            {
+                chain.RemoveAll(version =>
+                    version.IsTombstone
+                    && version.End is null
+                    && version.Begin is { IsTimestamp: true, Value: var beginTs }
+                    && beginTs < lwm);
+
+                if (chain.Count == 0)
+                    _rows.Remove(rowId);
+            }
+        }
+    }
+
+    private bool HasActiveTransactionsLocked()
+    {
+        foreach (var tx in _transactions.Values)
+        {
+            if (tx.State is MvccTransactionState.Active or MvccTransactionState.Preparing)
+                return true;
+        }
+
+        return false;
+    }
+
+    private ulong ComputeReaderLowWaterMarkLocked()
+    {
+        ulong? lowest = null;
+        foreach (var active in _transactions.Values)
+        {
+            if (active.State is not (MvccTransactionState.Active or MvccTransactionState.Preparing))
+                continue;
+            lowest = lowest is null
+                ? active.BeginTimestamp
+                : Math.Min(lowest.Value, active.BeginTimestamp);
+        }
+
+        // No readers: LWM is a fresh clock tick so all ended history may drop.
+        return lowest ?? _clock.GetTimestamp(static _ => { });
     }
 
     private void PruneHistoryLocked(ulong minBegin)
