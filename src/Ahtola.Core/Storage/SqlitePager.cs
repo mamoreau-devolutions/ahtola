@@ -1253,6 +1253,7 @@ public sealed class SqlitePager : IDisposable
                 _walPageOverlay.Clear();
                 _pageCache.Clear();
                 _committedFrameCount = 0;
+                ObserveCurrentWalStamp();
                 _lockGeneration = checkpointLock.PublishStorageChange();
                 return _journalMode;
             }
@@ -1357,6 +1358,10 @@ public sealed class SqlitePager : IDisposable
             try
             {
                 ValidateWalHasNotChanged();
+                // Retain page 1 before overlay clear so post-checkpoint local reads
+                // (e.g. CaptureCommittedViewToken) publish from commit metadata without
+                // a main-file Read — required after exclusive rewrite SetLength.
+                _walPageOverlay.TryGetValue(1, out var committedPageOne);
                 var installedPageCount = InstallCommittedOverlayIntoMainStore();
                 var retainedCommittedFrameCount = _committedFrameCount;
                 if (resetCommittedWal)
@@ -1385,7 +1390,10 @@ public sealed class SqlitePager : IDisposable
                 }
 
                 _pageCache.Clear();
+                ObserveCurrentWalStamp();
                 _lockGeneration = checkpointLock.PublishStorageChange();
+                if (committedPageOne is not null)
+                    _pageCache.Add(1, _lockGeneration, committedPageOne);
                 _state = SqlitePagerState.Ready;
                 return new SqliteCheckpointResult(
                     _committedPageCount,
@@ -1534,6 +1542,7 @@ public sealed class SqlitePager : IDisposable
 
                                     var installedPageCount = 0;
                                     var backfilled = region.CheckpointInfo.BackfilledFrameCount;
+                                    byte[]? committedPageOne = null;
                                     if (safeFrame > backfilled)
                                     {
                                         // Release unheld marks before copying so new readers can arrive (SQLite PASSIVE).
@@ -1544,6 +1553,7 @@ public sealed class SqlitePager : IDisposable
                                         }
 
                                         RequireWal().Flush();
+                                        _walPageOverlay.TryGetValue(1, out committedPageOne);
                                         installedPageCount = safeFrame == (uint)_committedFrameCount
                                             ? InstallCommittedOverlayIntoMainStore()
                                             : InstallWalFramesIntoMainStore(safeFrame);
@@ -1568,6 +1578,10 @@ public sealed class SqlitePager : IDisposable
 
                                         ValidateWalHasNotChanged();
                                         var confirmation = _walIndex.ReadValidatedHeader(_wal);
+                                        // Capture before overlay clear when install path did not run.
+                                        committedPageOne ??= _walPageOverlay.TryGetValue(1, out var pageOne)
+                                            ? pageOne
+                                            : null;
                                         RequireWal().ResetAfterDurableCheckpoint(CanPublishCheckpointedRecoveryMarker());
                                         _walPageOverlay.Clear();
                                         _committedFrameCount = 0;
@@ -1584,7 +1598,10 @@ public sealed class SqlitePager : IDisposable
                                     }
 
                                     _pageCache.Clear();
+                                    ObserveCurrentWalStamp();
                                     _lockGeneration = unchecked(_lockGeneration + 1);
+                                    if (committedPageOne is not null)
+                                        _pageCache.Add(1, _lockGeneration, committedPageOne);
                                     _state = SqlitePagerState.Ready;
                                     return new SqliteCheckpointResult(
                                         _committedPageCount,
@@ -1848,6 +1865,9 @@ public sealed class SqlitePager : IDisposable
                     priorWalIndexHeader,
                     priorCommittedFrameCount,
                     recovery);
+                // Own append changed -wal length/mtime; pin the stamp so the peer-WAL
+                // detector does not force a redundant rescan on the next local read.
+                ObserveCurrentWalStamp();
                 _lockGeneration = transaction.PublishStorageChange();
                 _activeTransaction = null;
                 _state = SqlitePagerState.Ready;
@@ -2138,8 +2158,7 @@ public sealed class SqlitePager : IDisposable
                                 InitializeCleanWalView();
                                 _lockGeneration = generation;
                                 ClearObservedWalIndexIdentity();
-                                _hasObservedWalStamp = true;
-                                _observedWalStamp = _fileSystem.GetWriteStamp(_walPath);
+                                ObserveCurrentWalStamp();
                                 return;
                             }
 
@@ -2158,8 +2177,7 @@ public sealed class SqlitePager : IDisposable
                 ObserveWalIndexIdentity(walIndexRegion.Header);
             else
                 ObserveWalIndexIdentityFromAttachedIndex();
-                        _hasObservedWalStamp = true;
-                        _observedWalStamp = _fileSystem.GetWriteStamp(_walPath);
+            ObserveCurrentWalStamp();
                     }
                     catch
                     {
@@ -2244,19 +2262,28 @@ public sealed class SqlitePager : IDisposable
         /// <summary>
         /// Detects peer growth/replacement of the on-disk <c>-wal</c> via length/mtime
         /// when the process-local lock generation and wal-index identity stay quiet.
-        /// Does not advance the observed stamp — that happens after a successful rescan.
+        /// Does not advance the observed stamp — that happens after a successful rescan
+        /// or after this pager's own WAL publish (<see cref="ObserveCurrentWalStamp"/>).
         /// </summary>
         private bool TryDetectPeerWalStampChange()
         {
             var stamp = _fileSystem.GetWriteStamp(_walPath);
             if (!_hasObservedWalStamp)
             {
-                _hasObservedWalStamp = true;
-                _observedWalStamp = stamp;
+                ObserveWalStamp(stamp);
                 return false;
             }
 
             return stamp != _observedWalStamp;
+        }
+
+        private void ObserveCurrentWalStamp()
+            => ObserveWalStamp(_fileSystem.GetWriteStamp(_walPath));
+
+        private void ObserveWalStamp(FileWriteStamp? stamp)
+        {
+            _hasObservedWalStamp = true;
+            _observedWalStamp = stamp;
         }
 
     private void ValidateMainFileFormat()
@@ -2491,6 +2518,7 @@ public sealed class SqlitePager : IDisposable
                 _walIndex!.RebuildFromWal(wal, mainPageCount);
                 ObserveWalIndexIdentityFromAttachedIndex();
                 _pageCache.Clear();
+                ObserveCurrentWalStamp();
                 _lockGeneration = publishLock?.PublishStorageChange()
                     ?? unchecked(_lockManager.Generation + 1);
             }

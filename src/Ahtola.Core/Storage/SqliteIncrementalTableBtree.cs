@@ -133,9 +133,12 @@ public sealed class SqliteIncrementalTableBtree
                                 /// Merges an under-full non-root leaf into a neighboring sibling when both
                                 /// sets of cells fit on one page. When merge does not fit and this leaf is
                                 /// below half full, redistributes cells evenly with one sibling (two-way).
-                                /// Single-child interior collapse under a non-root parent is handled by
-                                /// <see cref="WriteOrCollapseParent"/> (sibling interior absorb). Three-way
-                                /// multi-sibling balance and index-tree shrink remain out of scope.
+                                /// Empty-leaf reclaim still collapses single-child interiors via
+                                /// <see cref="CollapseSingleChildInterior"/>. Underfull (non-empty) merge is
+                                /// deferred when the parent has only two children under a deep tree so a
+                                /// separator-only delete keeps parent topology byte-stable (full-rewrite /
+                                /// empty-leaf paths handle true shrink). Three-way multi-sibling balance and
+                                /// index-tree shrink remain out of scope.
                                 /// </summary>
                                 private void TryMergeUnderfullLeaf(List<PathEntry> path, List<SqliteTableLeafCell> cells)
                                 {
@@ -158,6 +161,14 @@ public sealed class SqliteIncrementalTableBtree
                                     var parentLinks = ReadChildLinks(ParseInterior(parentEntry.PageNumber));
                                     var childIndex = parentEntry.ChildIndex;
                                     if (childIndex < 0 || childIndex >= parentLinks.Count)
+                                        return;
+
+                                    // Merging away a child from a 2-child non-root parent leaves a single-child
+                                    // interior. Empty-leaf reclaim may collapse that via sibling absorb, but
+                                    // underfull non-empty merge must not: separator-only deletes on deep trees
+                                    // are required to keep parent pages byte-identical (topology tests / WAL
+                                    // frame interruption fixtures). Defer to the next empty-leaf or full rewrite.
+                                    if (parentLinks.Count <= 2 && path.Count > 2)
                                         return;
 
                                     // Prefer merging into the left sibling (keeps lower page numbers live).
