@@ -11,9 +11,10 @@ Pinned submodule: `turso-src/` @ **v0.7.2** (`046e9cbf6`).
 | --- | --- |
 | `core/mvcc/clock.rs` | `src/Ahtola.Core/Mvcc/MvccClock.cs` |
 | `core/mvcc/database/mod.rs` (`MvStore`) | `src/Ahtola.Core/Mvcc/MvStore.cs` |
-| `core/mvcc/cursor.rs` | *(Phase 1.5+)* |
-| `core/mvcc/persistent_storage/logical_log.rs` | *(Phase 2)* |
-| `core/mvcc/database/checkpoint_state_machine.rs` | *(Phase 2)* |
+| `core/mvcc/cursor.rs` | `src/Ahtola.Core/Mvcc/MvccDualCursor.cs` (SQL routing still open) |
+| `core/mvcc/persistent_storage/logical_log.rs` | `src/Ahtola.Core/Mvcc/MvccLogicalLog.cs` |
+| `core/mvcc/database/checkpoint_state_machine.rs` | *(Phase 2 partial — log truncate; b-tree SM open)* |
+| shared store per DB identity | `src/Ahtola.Core/Mvcc/EmbeddedMvStoreRegistry.cs` |
 | `LimboError::WriteWriteConflict` | `EmbeddedWriteWriteConflictException` |
 
 ## Invariants (must hold)
@@ -40,7 +41,8 @@ Pinned submodule: `turso-src/` @ **v0.7.2** (`046e9cbf6`).
 | **1** | Clock, `MvStore` tx registry + write-set WW conflicts, pragma/BEGIN surface, classic catalog DML under concurrent txs |
 | **1.5** | Row-version chains (`Insert`/`Update`/`Delete`/`TryRead`/`ScanVisible`), visibility + WW on chains, commit stamp rewrite, rollback drop |
 | **2** | Durable logical log (`*.db-log`) with Turso LML2/MVTX framing constants, CRC32C, upsert/delete ops, replay into `MvStore` on enable; checkpoint TRUNCATE clears log |
-| **3 (current)** | Header version **255** persisted via pager `SwitchJournalMode(Mvcc)`; cold open restores `MvStore` from log; `MvccDualCursor` merge primitive + invalidation; full b-tree checkpoint SM and SQL-path dual-cursor routing still open |
+| **3 (current)** | Header version **255** via pager `SwitchJournalMode(Mvcc)`; cold open restores `MvStore`; `MvccDualCursor` merge primitive; **shared `MvStore`/log per path** (`EmbeddedMvStoreRegistry`) so pooled multi-connection concurrent writers share one version store + rowid allocator; concurrent commit reloads durable catalog then merges store snapshots |
+| **Open** | Full b-tree checkpoint SM; SQL SELECT/DML dual-cursor routing; schema generation cookie polish |
 
 ## Testing
 

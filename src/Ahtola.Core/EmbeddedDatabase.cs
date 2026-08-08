@@ -1841,14 +1841,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
             if (_readOnly)
                 throw new EmbeddedSqlException("attempt to write a readonly database");
 
-            if (_version != version)
+            var publishCatalog = catalog;
+            if (concurrent && _mvStore is not null)
             {
-                // Concurrent MVCC writers that lost the catalog race after their
-                // store-level WW check still cannot safely replace the live catalog
-                // until row-level merge is complete — surface a WW conflict, not busy.
-                if (concurrent)
-                    throw new EmbeddedWriteWriteConflictException(
-                        "write-write conflict: concurrent transaction catalog is stale");
+                // Pooled connections each hold a process-local catalog. Reload the
+                // durable image (if any) then fold the shared store's committed rows
+                // so concurrent writers do not clobber each other.
+                if (_fileStore is not null)
+                    TryReloadFileCatalogIfChanged();
+                publishCatalog = MergeConcurrentCatalogFromStoreLocked(catalog);
+            }
+            else if (_version != version)
+            {
                 throw new EmbeddedSqlException("database is locked");
             }
 
@@ -1856,12 +1860,96 @@ public sealed partial class EmbeddedDatabase : IDisposable
             {
                 if (pragmaHeader is { } metadata)
                     _inMemoryPragmaHeader = metadata;
-                PublishCatalog(catalog);
+                PublishCatalog(publishCatalog);
                 return;
             }
 
-            PersistFileCatalog(catalog, pragmaHeader, forceFullRewrite, busyTimeout);
+            PersistFileCatalog(publishCatalog, pragmaHeader, forceFullRewrite, busyTimeout);
         }
+    }
+
+    /// <summary>
+    /// Applies committed version-store rows onto a clone of the live catalog after
+    /// the concurrent tx's store commit succeeded (first-committer already won).
+    /// </summary>
+    private SchemaCatalog MergeConcurrentCatalogFromStoreLocked(SchemaCatalog txCatalog)
+    {
+        var store = _mvStore
+            ?? throw new InvalidOperationException("MVCC store required for concurrent merge.");
+        var merged = LiveCatalog.Clone();
+        var liveRows = store.SnapshotLiveCommittedRows();
+        var deleted = store.SnapshotCommittedDeletes();
+        var touchedTableIds = liveRows.Select(r => r.RowId.TableId)
+            .Concat(deleted.Select(d => d.TableId))
+            .ToHashSet();
+
+        foreach (var tableId in touchedTableIds)
+        {
+            if (!store.TryGetTableName(tableId, out var tableName) || tableName is null)
+                continue;
+
+            if (!merged.Tables.TryGetValue(tableName, out var target))
+            {
+                if (!txCatalog.Tables.TryGetValue(tableName, out var created))
+                    continue;
+                merged.Tables[tableName] = created.Clone();
+                target = merged.Tables[tableName];
+            }
+
+            var liveForTable = liveRows
+                .Where(r => r.RowId.TableId == tableId)
+                .ToDictionary(r => r.RowId.RowId, r => r.Cells);
+            var deletedForTable = deleted
+                .Where(d => d.TableId == tableId)
+                .Select(d => d.RowId)
+                .ToHashSet();
+
+            var nextRows = new List<SqlValue[]>();
+            var nextIds = new List<long>();
+            for (var i = 0; i < target.RowIds.Count; i++)
+            {
+                var rowId = target.RowIds[i];
+                if (deletedForTable.Contains(rowId))
+                    continue;
+                if (liveForTable.TryGetValue(rowId, out var cells))
+                {
+                    nextRows.Add(cells);
+                    nextIds.Add(rowId);
+                    liveForTable.Remove(rowId);
+                    continue;
+                }
+
+                nextRows.Add(target.Rows[i]);
+                nextIds.Add(rowId);
+            }
+
+            foreach (var (rowId, cells) in liveForTable.OrderBy(pair => pair.Key))
+            {
+                nextRows.Add(cells);
+                nextIds.Add(rowId);
+            }
+
+            target.Rows.Clear();
+            target.RowIds.Clear();
+            for (var i = 0; i < nextRows.Count; i++)
+            {
+                target.Rows.Add(nextRows[i]);
+                target.RowIds.Add(nextIds[i]);
+            }
+        }
+
+        foreach (var (name, table) in txCatalog.Tables)
+        {
+            if (!merged.Tables.ContainsKey(name))
+                merged.Tables[name] = table.Clone();
+        }
+
+        foreach (var (name, view) in txCatalog.Views)
+            merged.Views[name] = view;
+        foreach (var (name, trigger) in txCatalog.Triggers)
+            merged.Triggers[name] = trigger;
+
+        return merged;
     }
 
     internal PragmaHeaderMetadata GetPragmaHeaderMetadata()
@@ -2058,19 +2146,59 @@ public sealed partial class EmbeddedDatabase : IDisposable
         {
             if (_mvStore is not null || _fileSystem is null || string.IsNullOrEmpty(_databasePath))
                 return;
-            var logicalLog = MvccLogicalLog.CreateOrOpen(_fileSystem, _databasePath);
+            _mvStore = CreateOrGetSharedMvStore(_fileSystem, _databasePath);
+        }
+    }
+
+    /// <summary>
+    /// If a peer already enabled MVCC for this database identity (shared registry
+    /// or durable header 255), attach the process-local handle to that store.
+    /// </summary>
+    internal void EnsureMvccAttachedIfDurable()
+    {
+        lock (_gate)
+        {
+            if (_mvStore is not null)
+                return;
+            if (_fileSystem is null || string.IsNullOrEmpty(_databasePath))
+                return;
+
+            // Fast path: another connection already registered the shared store.
+            if (EmbeddedMvStoreRegistry.TryGet(_fileSystem, _databasePath, out var shared)
+                && shared is not null)
+            {
+                _mvStore = shared;
+                return;
+            }
+
+            if (_fileStore is null)
+                return;
+
+            // Durable header 255 (cold open / peer enable already flushed pager mode).
+            if (_fileStore.JournalMode != SqliteJournalMode.Mvcc)
+                return;
+
+            _mvStore = CreateOrGetSharedMvStore(_fileSystem, _databasePath);
+        }
+    }
+
+    private static MvStore CreateOrGetSharedMvStore(IFileSystem fileSystem, string databasePath)
+    {
+        return EmbeddedMvStoreRegistry.GetOrCreate(fileSystem, databasePath, () =>
+        {
+            var logicalLog = MvccLogicalLog.CreateOrOpen(fileSystem, databasePath);
             try
             {
                 var store = new MvStore(logicalLog: logicalLog);
                 logicalLog.ReplayInto(store);
-                _mvStore = store;
+                return store;
             }
             catch
             {
                 logicalLog.Dispose();
                 throw;
             }
-        }
+        });
     }
 
     private SqliteJournalMode EnableMvccModeLocked(TimeSpan busyTimeout)
@@ -2103,24 +2231,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
 
         if (_fileStore is not null && _fileSystem is not null && !string.IsNullOrEmpty(_databasePath))
-        {
-            var logicalLog = MvccLogicalLog.CreateOrOpen(_fileSystem, _databasePath);
-            try
-            {
-                var store = new MvStore(logicalLog: logicalLog);
-                logicalLog.ReplayInto(store);
-                _mvStore = store;
-            }
-            catch
-            {
-                logicalLog.Dispose();
-                throw;
-            }
-        }
+            _mvStore = CreateOrGetSharedMvStore(_fileSystem, _databasePath);
         else
-        {
             _mvStore = new MvStore();
-        }
 
         _version++;
         return SqliteJournalMode.Mvcc;
@@ -2147,9 +2260,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 throw new InvalidOperationException("The managed file catalog persistence state is not initialized.");
 
             // Leaving MVCC returns to the requested durable pager mode (header 2 or 1).
-            if (_mvStore is { } leaving)
+            if (_mvStore is not null && _fileSystem is not null && !string.IsNullOrEmpty(_databasePath))
             {
-                leaving.LogicalLog?.Dispose();
+                _mvStore.LogicalLog?.Dispose();
+                EmbeddedMvStoreRegistry.Remove(_fileSystem, _databasePath);
+                _mvStore = null;
+            }
+            else
+            {
                 _mvStore = null;
             }
 
@@ -40632,13 +40750,19 @@ public sealed class EmbeddedConnection : IDisposable
                                     SchemaVersion = unchecked(transactionState.PragmaHeader.SchemaVersion + 1),
                                 };
                             }
-                        }
-                    }
 
-                    // last_insert_rowid() tracks the most recent successful INSERT on this
-                    // connection; UPDATE/DELETE and zero-row inserts leave it unchanged.
-                    if (result.LastInsertRowId is { } insertedRowId)
-                        _lastInsertRowId = insertedRowId;
+                                RecordConcurrentMvccMutation(
+                                    routed.Database,
+                                    routed.Statement,
+                                    statementCatalog,
+                                    result);
+                            }
+                        }
+
+                        // last_insert_rowid() tracks the most recent successful INSERT on this
+                        // connection; UPDATE/DELETE and zero-row inserts leave it unchanged.
+                        if (result.LastInsertRowId is { } insertedRowId)
+                            _lastInsertRowId = insertedRowId;
                     if (ReferenceEquals(routed.Database, _tempDatabase))
                         _tempInitialized = true;
 
@@ -43202,10 +43326,15 @@ public sealed class EmbeddedConnection : IDisposable
 
     private void BeginTransaction(bool openedBySavepoint, TransactionMode mode)
     {
-        if (mode == TransactionMode.Concurrent && !_database.IsMvccEnabled)
+        if (mode == TransactionMode.Concurrent)
         {
-            throw new EmbeddedSqlException(
-                "Concurrent transaction mode is only supported when MVCC is enabled");
+            // Peer connections may have enabled MVCC after this connection opened.
+            _database.EnsureMvccAttachedIfDurable();
+            if (!_database.IsMvccEnabled)
+            {
+                throw new EmbeddedSqlException(
+                    "Concurrent transaction mode is only supported when MVCC is enabled");
+            }
         }
 
         var databases = _attachedDatabases.Values
@@ -43442,6 +43571,69 @@ public sealed class EmbeddedConnection : IDisposable
         {
             _autocommitWriteReservation = null;
             database.TransactionLock.Exit(this);
+        }
+    }
+
+    /// <summary>
+    /// Mirrors concurrent DML into the version store so WW detection and catalog
+    /// merge observe the same write set as Turso's MvStore path.
+    /// </summary>
+    private void RecordConcurrentMvccMutation(
+        EmbeddedDatabase database,
+        ParsedStatement statement,
+        EmbeddedDatabase.SchemaCatalog catalog,
+        ExecutionResult result)
+    {
+        if (!_transactionIsConcurrent
+            || !_mvccTransactions.TryGetValue(database, out var txId)
+            || database.MvStore is not { } store)
+        {
+            return;
+        }
+
+        switch (statement)
+        {
+            case InsertStatement insert when result.LastInsertRowId is { } rowId:
+            {
+                if (!catalog.Tables.TryGetValue(insert.TableName, out var table))
+                    return;
+                var index = table.RowIds.IndexOf(rowId);
+                if (index < 0 || index >= table.Rows.Count)
+                    return;
+                var tableId = store.GetOrCreateTableId(insert.TableName);
+                // Concurrent catalogs may both pick the same local rowid; promote to a
+                // store-global id so first-committer-wins does not collapse two inserts.
+                var allocated = store.AllocateRowId(tableId, minimumExclusive: rowId - 1);
+                if (allocated != rowId)
+                {
+                    table.RowIds[index] = allocated;
+                    // INTEGER PRIMARY KEY alias lives in cells; keep it aligned when present.
+                    var aliasIndex = table.RowidAliasColumnIndex;
+                    if (aliasIndex >= 0 && aliasIndex < table.Rows[index].Length)
+                        table.Rows[index][aliasIndex] = SqlValue.Integer(allocated);
+                }
+                else
+                {
+                    store.ObserveRowId(tableId, rowId);
+                }
+
+                store.Insert(txId, new MvccRowId(tableId, allocated), table.Rows[index]);
+                break;
+            }
+            case DeleteStatement delete:
+            {
+                // Full row enumeration is not on ExecutionResult; record a table-level
+                // write token so commit still participates in store WW history.
+                var tableId = store.GetOrCreateTableId(delete.TableName);
+                store.RecordWrite(txId, new MvccRowId(tableId, RowId: -1));
+                break;
+            }
+            case UpdateStatement update:
+            {
+                var tableId = store.GetOrCreateTableId(update.TableName);
+                store.RecordWrite(txId, new MvccRowId(tableId, RowId: -1));
+                break;
+            }
         }
     }
 
@@ -43730,6 +43922,8 @@ public sealed class EmbeddedConnection : IDisposable
     {
         if (isTempDatabase)
             return "wal";
+        // Peer may have enabled MVCC after this connection opened.
+        database.EnsureMvccAttachedIfDurable();
         if (database.IsMvccEnabled)
             return "mvcc";
         if (!database.IsFileBacked)

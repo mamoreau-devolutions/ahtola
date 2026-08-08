@@ -463,6 +463,36 @@ public class ManagedTransactionModeLockingTests
     }
 
     [Test]
+    public void ConcurrentWritersCanCommitDisjointInserts()
+    {
+        using var db = new ManagedFileDatabase();
+        using var a = db.Connect();
+        using var b = db.Connect();
+
+        a.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        // Ensure peer sees durable MVCC mode (shared MvStore registry + header 255).
+        ReadValue(b, "PRAGMA journal_mode;").Should().Be("mvcc");
+
+        a.ExecuteNonQuery("BEGIN CONCURRENT;");
+        b.ExecuteNonQuery("BEGIN CONCURRENT;");
+        a.ExecuteNonQuery("INSERT INTO t VALUES (10);");
+        b.ExecuteNonQuery("INSERT INTO t VALUES (20);");
+        a.ExecuteNonQuery("COMMIT;");
+        b.ExecuteNonQuery("COMMIT;");
+
+        using var command = a.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM t WHERE v IN (10, 20);";
+        Convert.ToInt64(command.ExecuteScalar()).Should().Be(2L);
+    }
+
+    private static string ReadValue(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToString(command.ExecuteScalar()) ?? string.Empty;
+    }
+
+    [Test]
     public void RepeatedTransactionModeKeywordIsRejected()
     {
         using var db = new ManagedFileDatabase();

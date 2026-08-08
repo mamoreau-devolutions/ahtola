@@ -131,6 +131,7 @@ internal sealed class MvStore
     private readonly Dictionary<MvccRowId, List<MvccRowVersion>> _rows = [];
     private readonly Dictionary<string, long> _tableIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<long, string> _tableNames = [];
+    private readonly Dictionary<long, long> _nextRowIds = [];
     private long _nextTableId = -2;
     private ulong _nextTxId = 1;
     private ulong _nextVersionId = 1;
@@ -215,6 +216,46 @@ internal sealed class MvStore
     {
         lock (_gate)
             return _tableNames.TryGetValue(tableId, out name);
+    }
+
+    /// <summary>
+    /// Process-wide unique rowid allocator for concurrent writers that each hold
+    /// a private classic catalog snapshot (pooled connections).
+    /// </summary>
+    internal long AllocateRowId(long tableId, long minimumExclusive = 0)
+    {
+        lock (_gate)
+        {
+            if (!_nextRowIds.TryGetValue(tableId, out var next))
+            {
+                next = 1;
+                foreach (var rowId in _rows.Keys)
+                {
+                    if (rowId.TableId == tableId && rowId.RowId >= next)
+                        next = rowId.RowId + 1;
+                }
+            }
+
+            if (minimumExclusive >= next)
+                next = minimumExclusive + 1;
+            if (next <= 0)
+                next = 1;
+
+            var allocated = next;
+            _nextRowIds[tableId] = allocated + 1;
+            return allocated;
+        }
+    }
+
+    internal void ObserveRowId(long tableId, long rowId)
+    {
+        if (rowId <= 0)
+            return;
+        lock (_gate)
+        {
+            if (!_nextRowIds.TryGetValue(tableId, out var next) || rowId >= next)
+                _nextRowIds[tableId] = rowId + 1;
+        }
     }
 
     internal MvccTransaction BeginTransaction()
@@ -416,6 +457,69 @@ internal sealed class MvStore
             }
 
             return results;
+        }
+    }
+
+    /// <summary>
+    /// Snapshot of every currently live committed version (end is null, begin is a
+    /// timestamp). Used after a concurrent tx commits to merge into the classic catalog.
+    /// </summary>
+    internal IReadOnlyList<(MvccRowId RowId, SqlValue[] Cells)> SnapshotLiveCommittedRows()
+    {
+        lock (_gate)
+        {
+            var results = new List<(MvccRowId, SqlValue[])>();
+            foreach (var (rowId, chain) in _rows)
+            {
+                for (var i = chain.Count - 1; i >= 0; i--)
+                {
+                    var version = chain[i];
+                    if (version.End is not null || version.IsTombstone)
+                        continue;
+                    if (version.Begin is not { IsTimestamp: true })
+                        continue;
+                    results.Add((rowId, (SqlValue[])version.Cells.Clone()));
+                    break;
+                }
+            }
+
+            return results;
+        }
+    }
+
+    /// <summary>
+    /// Row ids whose latest committed state is deleted (has an end timestamp and
+    /// no later live version).
+    /// </summary>
+    internal IReadOnlyCollection<MvccRowId> SnapshotCommittedDeletes()
+    {
+        lock (_gate)
+        {
+            var deleted = new HashSet<MvccRowId>();
+            foreach (var (rowId, chain) in _rows)
+            {
+                var live = false;
+                var sawDelete = false;
+                for (var i = chain.Count - 1; i >= 0; i--)
+                {
+                    var version = chain[i];
+                    if (version.Begin is not { IsTimestamp: true })
+                        continue;
+                    if (version.End is null && !version.IsTombstone)
+                    {
+                        live = true;
+                        break;
+                    }
+
+                    if (version.End is { IsTimestamp: true })
+                        sawDelete = true;
+                }
+
+                if (!live && sawDelete)
+                    deleted.Add(rowId);
+            }
+
+            return deleted;
         }
     }
 
