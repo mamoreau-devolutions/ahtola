@@ -23,8 +23,8 @@ public enum DmlKind
 /// This is the bare-projection descriptor: it expresses exactly a column, a rowid, or a constant per
 /// output register. Richer RETURNING items — arithmetic over the affected row's columns/rowid and
 /// constants — are expressed with the composable <see cref="DmlReturningExpression"/> tree instead, which
-/// the <see cref="DmlStatementCompiler.Compile(DmlKind, string, int, VdbeRowPredicate, IReadOnlyList{DmlReturningExpression}, VdbeWriteTarget)"/>
-/// overload lowers. Each <see cref="DmlProjectionOp"/> maps one-to-one onto a <see cref="DmlReturningExpression"/>
+/// the <see cref="DmlStatementCompiler"/> expression-based Compile overload lowers. Each
+/// <see cref="DmlProjectionOp"/> maps one-to-one onto a <see cref="DmlReturningExpression"/>
 /// leaf, so the two descriptors share one lowering path.
 /// </remarks>
 public readonly record struct DmlProjectionOp(bool IsColumn, bool IsRowId, int ColumnIndex, SqlValue Constant)
@@ -65,6 +65,20 @@ internal sealed record DmlReturningProgram(
     int OutputCount,
     int RegisterCount,
     IReadOnlyList<int> ParameterIndices);
+
+/// <summary>
+/// Optional compiler knobs for lowered DML programs (insert flags, FK check epilogue).
+/// </summary>
+public readonly record struct DmlCompileOptions(
+    VdbeInsertFlags MutationFlags = VdbeInsertFlags.None,
+    bool EmitForeignKeyChecks = false)
+{
+    public static DmlCompileOptions Default => default;
+
+    /// <summary>UPDATE/DELETE positioned mutations require a prior seek/rewind.</summary>
+    public static DmlCompileOptions ForPositionedMutation(bool emitForeignKeyChecks = false)
+        => new(VdbeInsertFlags.RequireSeek, emitForeignKeyChecks);
+}
 
 /// <summary>
 /// A DML scan filter over either declared row values alone or those values together with the
@@ -146,14 +160,15 @@ public static class DmlStatementCompiler
         int columnCount,
         VdbeRowPredicate? predicate,
         IReadOnlyList<DmlProjectionOp> returningOps,
-        VdbeWriteTarget writeTarget)
+            VdbeWriteTarget writeTarget,
+            DmlCompileOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(returningOps);
         var returning = new DmlReturningExpression[returningOps.Count];
         for (var index = 0; index < returningOps.Count; index++)
             returning[index] = returningOps[index].ToExpression();
 
-        return Compile(kind, tableName, columnCount, predicate, returning, writeTarget);
+        return Compile(kind, tableName, columnCount, predicate, returning, writeTarget, options);
     }
 
     /// <summary>
@@ -174,7 +189,8 @@ public static class DmlStatementCompiler
         int columnCount,
         VdbeRowPredicate? predicate,
         IReadOnlyList<DmlReturningExpression> returning,
-        VdbeWriteTarget writeTarget)
+            VdbeWriteTarget writeTarget,
+            DmlCompileOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(tableName);
         ArgumentNullException.ThrowIfNull(returning);
@@ -188,7 +204,8 @@ public static class DmlStatementCompiler
             columnCount,
             predicate is null ? null : DmlRowFilter.ForRow(predicate),
             returning,
-            writeTarget);
+            writeTarget,
+            options);
     }
 
     internal static CompiledDml CompileWithFilter(
@@ -197,7 +214,8 @@ public static class DmlStatementCompiler
         int columnCount,
         DmlRowFilter? filter,
         IReadOnlyList<DmlReturningExpression> returning,
-        VdbeWriteTarget writeTarget)
+        VdbeWriteTarget writeTarget,
+        DmlCompileOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(tableName);
         ArgumentNullException.ThrowIfNull(returning);
@@ -205,7 +223,8 @@ public static class DmlStatementCompiler
         if (kind == DmlKind.Insert && filter is not null)
             throw new StatementCompilationException("INSERT programs do not filter rows.");
 
-        var program = BuildProgram(kind, tableName, columnCount, filter, returning);
+        options = ApplyDefaultMutationFlags(kind, options);
+        var program = BuildProgram(kind, tableName, columnCount, filter, returning, options);
         return new CompiledDml(program, [writeTarget]);
     }
 
@@ -222,7 +241,8 @@ public static class DmlStatementCompiler
         IReadOnlyList<VdbeInstruction> beforeMutation,
         IReadOnlyList<VdbeInstruction> afterMutation,
         int registerCount,
-        int parameterSlotCount = 0)
+        int parameterSlotCount = 0,
+        DmlCompileOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(tableName);
         ArgumentNullException.ThrowIfNull(beforeMutation);
@@ -230,6 +250,7 @@ public static class DmlStatementCompiler
         if (kind == DmlKind.Insert && filter is not null)
             throw new StatementCompilationException("INSERT programs do not filter rows.");
 
+        options = ApplyDefaultMutationFlags(kind, options);
         return BuildProgram(
             kind,
             tableName,
@@ -239,7 +260,8 @@ public static class DmlStatementCompiler
             beforeMutation,
             afterMutation,
             registerCount,
-            parameterSlotCount);
+            parameterSlotCount,
+            options);
     }
 
     internal static CompiledDml CompileWithFilter(
@@ -249,7 +271,8 @@ public static class DmlStatementCompiler
         DmlRowFilter? filter,
         DmlReturningProgram returning,
         VdbeWriteTarget writeTarget,
-        VdbeCursorSource returningSource)
+        VdbeCursorSource returningSource,
+        DmlCompileOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(tableName);
         ArgumentNullException.ThrowIfNull(returning);
@@ -260,7 +283,8 @@ public static class DmlStatementCompiler
         if (returning.OutputCount <= 0)
             throw new StatementCompilationException("A compiled RETURNING program must produce at least one output.");
 
-        var program = BuildTwoPhaseProgram(kind, tableName, columnCount, filter, returning);
+        options = ApplyDefaultMutationFlags(kind, options);
+        var program = BuildTwoPhaseProgram(kind, tableName, columnCount, filter, returning, options);
         return new CompiledDml(program, [writeTarget])
         {
             RuntimeWriteTargets = [writeTarget, null],
@@ -269,12 +293,26 @@ public static class DmlStatementCompiler
         };
     }
 
+    private static DmlCompileOptions ApplyDefaultMutationFlags(DmlKind kind, DmlCompileOptions options)
+    {
+        // Positioned UPDATE/DELETE always require a prior Rewind/Next (or seek) unless the caller
+        // already supplied explicit mutation flags.
+        if (options.MutationFlags == VdbeInsertFlags.None
+            && kind is DmlKind.Update or DmlKind.Delete)
+        {
+            return options with { MutationFlags = VdbeInsertFlags.RequireSeek };
+        }
+
+        return options;
+    }
+
     private static VdbeProgram BuildProgram(
         DmlKind kind,
         string tableName,
         int columnCount,
         DmlRowFilter? filter,
-        IReadOnlyList<DmlReturningExpression> returning)
+        IReadOnlyList<DmlReturningExpression> returning,
+        DmlCompileOptions options = default)
         => BuildProgram(
             kind,
             tableName,
@@ -284,7 +322,8 @@ public static class DmlStatementCompiler
             Array.Empty<VdbeInstruction>(),
             Array.Empty<VdbeInstruction>(),
             registerCount: 0,
-            parameterSlotCount: 0);
+            parameterSlotCount: 0,
+            options);
 
     private static VdbeProgram BuildProgram(
         DmlKind kind,
@@ -295,7 +334,8 @@ public static class DmlStatementCompiler
         IReadOnlyList<VdbeInstruction> beforeMutation,
         IReadOnlyList<VdbeInstruction> afterMutation,
         int registerCount,
-        int parameterSlotCount)
+            int parameterSlotCount,
+            DmlCompileOptions options = default)
     {
         var cursor = new Cursor(0);
         var hasFilter = filter is not null;
@@ -320,12 +360,13 @@ public static class DmlStatementCompiler
         var mutateAddr = loopStart + filterCount + beforeMutation.Count;
         var nextAddr = mutateAddr + 1 + afterMutation.Count + projectionBlock.Count;
         var commitAddr = nextAddr + 1;
+        var fkEpilogueCount = options.EmitForeignKeyChecks ? 2 : 0;
 
-        var instructions = new List<VdbeInstruction>(commitAddr + 3)
-        {
-            new OpenWriteCursorInstruction(cursor, tableName, columnCount),
-            new RewindCursorInstruction(cursor, new ProgramCounter(commitAddr)),
-        };
+        var instructions = new List<VdbeInstruction>(commitAddr + 3 + fkEpilogueCount)
+            {
+                new OpenWriteCursorInstruction(cursor, tableName, columnCount),
+                new RewindCursorInstruction(cursor, new ProgramCounter(commitAddr)),
+            };
 
         if (filter?.RowPredicate is { } rowPredicate)
         {
@@ -349,19 +390,14 @@ public static class DmlStatementCompiler
         }
 
         instructions.AddRange(beforeMutation);
-        instructions.Add(kind switch
-        {
-            DmlKind.Insert => new InsertInstruction(cursor),
-            DmlKind.Update => new UpdateInstruction(cursor),
-            DmlKind.Delete => new DeleteInstruction(cursor),
-            _ => throw new StatementCompilationException($"Unsupported DML kind {kind}."),
-        });
+        instructions.Add(Mutation(kind, cursor, options.MutationFlags));
 
         instructions.AddRange(afterMutation);
         instructions.AddRange(projectionBlock);
 
         instructions.Add(new NextInstruction(cursor, new ProgramCounter(loopStart)));
         instructions.Add(new CommitInstruction(cursor));
+        AppendForeignKeyChecks(instructions, options);
         instructions.Add(new CloseCursorInstruction(cursor));
         instructions.Add(new HaltInstruction());
 
@@ -377,7 +413,8 @@ public static class DmlStatementCompiler
         string tableName,
         int columnCount,
         DmlRowFilter? filter,
-        DmlReturningProgram returning)
+        DmlReturningProgram returning,
+        DmlCompileOptions options = default)
     {
         var writeCursor = new Cursor(0);
         var returningCursor = new Cursor(1);
@@ -391,15 +428,16 @@ public static class DmlStatementCompiler
         var returningNextAddr = resultRowAddr + 1;
         var returningCloseAddr = returningNextAddr + 1;
         var commitAddr = returningCloseAddr + 1;
+        var fkEpilogueCount = options.EmitForeignKeyChecks ? 2 : 0;
 
-        var instructions = new List<VdbeInstruction>(commitAddr + 3)
-        {
-            new OpenWriteCursorInstruction(writeCursor, tableName, columnCount),
-            new RewindCursorInstruction(writeCursor, new ProgramCounter(returningOpenAddr)),
-        };
+        var instructions = new List<VdbeInstruction>(commitAddr + 3 + fkEpilogueCount)
+            {
+                new OpenWriteCursorInstruction(writeCursor, tableName, columnCount),
+                new RewindCursorInstruction(writeCursor, new ProgramCounter(returningOpenAddr)),
+            };
 
         AddFilter(instructions, writeCursor, filter, mutationNextAddr);
-        instructions.Add(Mutation(kind, writeCursor));
+        instructions.Add(Mutation(kind, writeCursor, options.MutationFlags));
         instructions.Add(new NextInstruction(writeCursor, new ProgramCounter(mutationLoopStart)));
 
         instructions.Add(new OpenReadCursorInstruction(returningCursor, tableName, columnCount));
@@ -410,6 +448,7 @@ public static class DmlStatementCompiler
         instructions.Add(new NextInstruction(returningCursor, new ProgramCounter(returningLoopStart)));
         instructions.Add(new CloseCursorInstruction(returningCursor));
         instructions.Add(new CommitInstruction(writeCursor));
+        AppendForeignKeyChecks(instructions, options);
         instructions.Add(new CloseCursorInstruction(writeCursor));
         instructions.Add(new HaltInstruction());
 
@@ -418,6 +457,17 @@ public static class DmlStatementCompiler
             cursorCount: 2,
             instructions,
             parameterSlotCount: returning.ParameterIndices.Count);
+    }
+
+    private static void AppendForeignKeyChecks(List<VdbeInstruction> instructions, DmlCompileOptions options)
+    {
+        if (!options.EmitForeignKeyChecks)
+            return;
+
+        // Immediate statement counter first, then deferred (no-op inside an open Vdbe
+        // transaction; enforced at CommitTransaction / autocommit FkCheck).
+        instructions.Add(new FkCheckInstruction(Deferred: false));
+        instructions.Add(new FkCheckInstruction(Deferred: true));
     }
 
     private static void AddFilter(
@@ -448,11 +498,11 @@ public static class DmlStatementCompiler
         }
     }
 
-    private static VdbeInstruction Mutation(DmlKind kind, Cursor cursor)
+    private static VdbeInstruction Mutation(DmlKind kind, Cursor cursor, VdbeInsertFlags flags = VdbeInsertFlags.None)
         => kind switch
         {
-            DmlKind.Insert => new InsertInstruction(cursor),
-            DmlKind.Update => new UpdateInstruction(cursor),
+            DmlKind.Insert => new InsertInstruction(cursor, flags),
+            DmlKind.Update => new UpdateInstruction(cursor, flags),
             DmlKind.Delete => new DeleteInstruction(cursor),
             _ => throw new StatementCompilationException($"Unsupported DML kind {kind}."),
         };

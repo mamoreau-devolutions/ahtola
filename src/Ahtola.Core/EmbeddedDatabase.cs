@@ -270,9 +270,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private readonly bool _readOnly;
     private readonly bool _foreignReadOnly;
     private SqlitePagerViewToken _foreignViewToken;
-        private SqlitePagerViewToken _ownedViewToken;
-        private FileCatalogVersion _fileCatalogVersion;
-        private long _ownedCommittedGeneration;
+    private SqlitePagerViewToken _ownedViewToken;
+    private FileCatalogVersion _fileCatalogVersion;
+    private long _ownedCommittedGeneration;
     private PragmaHeaderMetadata _inMemoryPragmaHeader;
     private long _version;
     private int _activeTransactions;
@@ -322,13 +322,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
             ? fileStore.CaptureCommittedViewToken()
             : default;
         _ownedCommittedGeneration = fileStore.CommittedViewGeneration;
-                // Owned connections also pin a durable view token so peer engines that
-                // commit without going through the process-local lock manager (stock
-                // SQLite / Turso on the same WAL) still invalidate the heap catalog.
-                _ownedViewToken = foreignReadOnly
-                    ? default
-                    : fileStore.CaptureCommittedViewToken();
-                _tables = catalog.Tables;
+        // Owned connections also pin a durable view token so peer engines that
+        // commit without going through the process-local lock manager (stock
+        // SQLite / Turso on the same WAL) still invalidate the heap catalog.
+        _ownedViewToken = foreignReadOnly
+            ? default
+            : fileStore.CaptureCommittedViewToken();
+        _tables = catalog.Tables;
         _views = catalog.Views;
         _triggers = catalog.Triggers;
         _transactionLock = EmbeddedTransactionLockRegistry.Get(fileSystem, databasePath);
@@ -418,35 +418,35 @@ public sealed partial class EmbeddedDatabase : IDisposable
     internal TimeSpan BusyTimeout { get; set; }
 
     /// <summary>Re-reads the committed catalog after a stale-snapshot signal. Throws busy when the version cannot settle.</summary>
-        /// <param name="forceReload">
-        /// When true, reopen the store even if <see cref="FileCatalogVersion"/> matches.
-        /// Peer engines (stock SQLite) can grow the WAL without a change we already
-        /// folded into the header cookie comparison, so durable view-token mismatches
-        /// must force adoption.
-        /// </param>
-        internal void ReloadFileCatalogAfterStale(bool forceReload = false)
+    /// <param name="forceReload">
+    /// When true, reopen the store even if <see cref="FileCatalogVersion"/> matches.
+    /// Peer engines (stock SQLite) can grow the WAL without a change we already
+    /// folded into the header cookie comparison, so durable view-token mismatches
+    /// must force adoption.
+    /// </param>
+    internal void ReloadFileCatalogAfterStale(bool forceReload = false)
+    {
+        lock (_gate)
         {
-            lock (_gate)
+            if (_fileStore is null || _fileSystem is null || _fileCatalogWriteLock is null)
+                throw new InvalidOperationException("The managed file catalog persistence state is not initialized.");
+
+            lock (_fileCatalogWriteLock)
             {
-                if (_fileStore is null || _fileSystem is null || _fileCatalogWriteLock is null)
-                    throw new InvalidOperationException("The managed file catalog persistence state is not initialized.");
-
-                lock (_fileCatalogWriteLock)
+                // A commit landing mid-reload fails the race check; spin until the
+                // reload observes a settled version. Bounded so a commit storm
+                // degrades to the public busy error instead of hanging.
+                for (var attempt = 0; attempt < 1000; attempt++)
                 {
-                    // A commit landing mid-reload fails the race check; spin until the
-                    // reload observes a settled version. Bounded so a commit storm
-                    // degrades to the public busy error instead of hanging.
-                    for (var attempt = 0; attempt < 1000; attempt++)
-                    {
-                        if (TryReloadFileCatalogIfChanged(forceReload))
-                            return;
-                        Thread.Sleep(1);
-                    }
-
-                    throw new EmbeddedCatalogSnapshotStaleException();
+                    if (TryReloadFileCatalogIfChanged(forceReload))
+                        return;
+                    Thread.Sleep(1);
                 }
+
+                throw new EmbeddedCatalogSnapshotStaleException();
             }
         }
+    }
 
     /// <summary>
     /// The write reservation shared by every managed connection open on this
@@ -660,12 +660,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         store.DeleteOrTombstoneBase(txId, key);
                         break;
                     case SqliteChangeOperation.Update:
-                    {
-                        var index = table.RowIds.IndexOf(rowId);
-                        if (index >= 0 && index < table.Rows.Count)
-                            store.UpdateIncludingBase(txId, key, table.Rows[index]);
-                        break;
-                    }
+                        {
+                            var index = table.RowIds.IndexOf(rowId);
+                            if (index >= 0 && index < table.Rows.Count)
+                                store.UpdateIncludingBase(txId, key, table.Rows[index]);
+                            break;
+                        }
                 }
             }
 
@@ -2671,7 +2671,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     private bool TryReloadFileCatalogIfChanged(bool forceReload = false)
     {
         var durableVersion = ReadFileCatalogVersion(_fileSystem!, _databasePath);
-            if (!forceReload && durableVersion == _fileCatalogVersion)
+        if (!forceReload && durableVersion == _fileCatalogVersion)
             return true;
 
         // Same adoption a pooled connection performs when it is handed out:
@@ -2684,7 +2684,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         try
         {
             var loadedVersion = ReadFileCatalogVersion(_fileSystem!, _databasePath);
-                if (!forceReload && loadedVersion != durableVersion)
+            if (!forceReload && loadedVersion != durableVersion)
             {
                 // Another writer committed mid-reload; leave the current
                 // snapshot untouched and let the caller retry against it.
@@ -2816,52 +2816,52 @@ public sealed partial class EmbeddedDatabase : IDisposable
     /// </summary>
     internal void RefreshOwnedCatalogForStatementIfNeeded()
     {
-            if (_foreignReadOnly || _fileStore is null || _fileSystem is null)
+        if (_foreignReadOnly || _fileStore is null || _fileSystem is null)
             return;
 
         // Cheap race-free gate: the shared storage generation only moves when some
-            // *managed* connection commits or checkpoints on this file, and PublishCatalog
-            // pins our own commits. Peer engines (stock SQLite) never publish that
-            // generation, so also compare a durable view token (WAL length/salts/frames
-            // + main change-counter) before treating the heap catalog as current.
-            if (_fileStore.CommittedViewGeneration == _ownedCommittedGeneration)
-            {
-                var durableToken = _fileStore.CaptureCommittedViewToken();
-                if (durableToken == _ownedViewToken)
-                    return;
-            }
+        // *managed* connection commits or checkpoints on this file, and PublishCatalog
+        // pins our own commits. Peer engines (stock SQLite) never publish that
+        // generation, so also compare a durable view token (WAL length/salts/frames
+        // + main change-counter) before treating the heap catalog as current.
+        if (_fileStore.CommittedViewGeneration == _ownedCommittedGeneration)
+        {
+            var durableToken = _fileStore.CaptureCommittedViewToken();
+            if (durableToken == _ownedViewToken)
+                return;
+        }
 
-            // Always force-reopen the store (same adoption as foreign read-only). Header
-            // cookie equality alone can miss peer WAL growth, and the version-gated
-            // TryReload path can no-op when cookies already match a stale heap catalog.
-            lock (_gate)
-            {
-                if (_fileCatalogWriteLock is null)
-                    throw new InvalidOperationException("The managed file catalog persistence state is not initialized.");
+        // Always force-reopen the store (same adoption as foreign read-only). Header
+        // cookie equality alone can miss peer WAL growth, and the version-gated
+        // TryReload path can no-op when cookies already match a stale heap catalog.
+        lock (_gate)
+        {
+            if (_fileCatalogWriteLock is null)
+                throw new InvalidOperationException("The managed file catalog persistence state is not initialized.");
 
-                lock (_fileCatalogWriteLock)
+            lock (_fileCatalogWriteLock)
+            {
+                var replacement = EmbeddedFileStore.Open(
+                    _databasePath,
+                    _fileSystem,
+                    out var catalog,
+                    readOnly: _readOnly);
+                try
                 {
-                    var replacement = EmbeddedFileStore.Open(
-                        _databasePath,
-                        _fileSystem,
-                        out var catalog,
-                        readOnly: _readOnly);
-                    try
-                    {
-                        var previous = _fileStore;
-                        _fileStore = replacement;
-                        replacement = null;
-                        _fileCatalogVersion = ReadFileCatalogVersion(_fileSystem, _databasePath);
-                        PublishCatalog(new SchemaCatalog(catalog.Tables, catalog.Views, catalog.Triggers));
-                        previous.Dispose();
-                    }
-                    finally
-                    {
-                        replacement?.Dispose();
-                    }
+                    var previous = _fileStore;
+                    _fileStore = replacement;
+                    replacement = null;
+                    _fileCatalogVersion = ReadFileCatalogVersion(_fileSystem, _databasePath);
+                    PublishCatalog(new SchemaCatalog(catalog.Tables, catalog.Views, catalog.Triggers));
+                    previous.Dispose();
+                }
+                finally
+                {
+                    replacement?.Dispose();
                 }
             }
         }
+    }
 
     /// <summary>
     /// Convoy-rotation refresh for a mutating autocommit write. When another
@@ -2944,15 +2944,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
         _version++;
 
         // Pin the storage generation and durable view token to this commit/reload so
-                // the statement-level owned-refresh gate skips it: unchanged values mean no
-                // *external* connection (managed or peer engine) has committed since.
+        // the statement-level owned-refresh gate skips it: unchanged values mean no
+        // *external* connection (managed or peer engine) has committed since.
         if (_fileStore is not null)
-                {
-                    _ownedCommittedGeneration = _fileStore.CommittedViewGeneration;
-                    if (!_foreignReadOnly)
-                        _ownedViewToken = _fileStore.CaptureCommittedViewToken();
-                }
-            }
+        {
+            _ownedCommittedGeneration = _fileStore.CommittedViewGeneration;
+            if (!_foreignReadOnly)
+                _ownedViewToken = _fileStore.CaptureCommittedViewToken();
+        }
+    }
 
     private static FileCatalogVersion ReadFileCatalogVersion(
         IFileSystem fileSystem,
@@ -13066,7 +13066,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 parameters);
         }
 
-        if (CanCompileDml(context)
+        if (CanCompilePlainDelete(context)
             && TryCompileDelete(statement, parameters, context, out var compiled, out var columns, out var hasReturning))
             return RunCompiledDml(compiled, columns, hasReturning, parameters);
 
@@ -13076,10 +13076,15 @@ public sealed partial class EmbeddedDatabase : IDisposable
     // Compiled DML reports only an aggregate affected-row count; live blob handles need
     // the evaluator's matched rowids to expire only when their own row is mutated. A cancelable
     // execution also stays evaluator-owned because the current VDBE loop has no cancellation opcode.
+    // Foreign keys: INSERT/UPDATE Commit* paths already call ValidateForeignKeys*; plain DELETE still
+    // lacks parent-action validation in its write-target Commit, so it stays evaluator-owned when FKs are on
+    // (self-referential cascades use CanCompileForeignKeyCascadeDelete instead).
     private bool CanCompileDml(QueryContext context)
         => !context.CancellationToken.CanBeCanceled
-            && !context.ForeignKeysEnabled
             && !HasOpenBlobHandles;
+
+    private bool CanCompilePlainDelete(QueryContext context)
+        => CanCompileDml(context) && !context.ForeignKeysEnabled;
 
     private bool CanCompileForeignKeyCascadeDelete(QueryContext context)
         => !context.CancellationToken.CanBeCanceled
@@ -13090,7 +13095,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
         => CanCompileDml(context)
             && statement.ConflictAlgorithm is null
             && statement.Upsert is null
-            && (!context.Tables.TryGetValue(statement.TableName, out var table)
+        && (!context.Tables.TryGetValue(statement.TableName, out var table)
                 || !table.HasNonDefaultConflictAlgorithms);
 
     private bool CanRouteUpdateThroughCompiler(UpdateStatement statement, QueryContext context)
@@ -14203,46 +14208,46 @@ public sealed partial class EmbeddedDatabase : IDisposable
         select = ResolveNamedWindows(select);
         context = EnterCollationSource(context, select.Source);
 
-            IndexSeekPrefix? indexSeek = null;
-            if (plan.Search
-                && select.Where is not null
-                && !select.Distinct
-                && TryCollectLeadingIndexEqualitySeek(select.Where, plan.Table, plan.Index, out indexSeek))
-            {
-                // indexSeek attached below on ScanTarget
-            }
-            else
-            {
-                indexSeek = null;
-            }
+        IndexSeekPrefix? indexSeek = null;
+        if (plan.Search
+            && select.Where is not null
+            && !select.Distinct
+            && TryCollectLeadingIndexEqualitySeek(select.Where, plan.Table, plan.Index, out indexSeek))
+        {
+            // indexSeek attached below on ScanTarget
+        }
+        else
+        {
+            indexSeek = null;
+        }
 
-            ScanTarget CreateTarget(
-                IReadOnlyList<SqlValue[]> targetRows,
-                IReadOnlyList<long>? targetRowIds)
-            {
-                var qualifier = plan.Source.Alias ?? plan.Source.Name;
-                var qualifiedColumns = BuildQualifiedColumns(qualifier, plan.Table.Columns);
-                var covering = IndexCoversSelect(select, plan.Table, plan.Index);
-                var indexName = covering
-                    ? $"{plan.Index.Name} COVERING"
-                    : plan.Index.Name;
-                return new ScanTarget(
-                    plan.Source.Name,
-                    qualifier,
+        ScanTarget CreateTarget(
+            IReadOnlyList<SqlValue[]> targetRows,
+            IReadOnlyList<long>? targetRowIds)
+        {
+            var qualifier = plan.Source.Alias ?? plan.Source.Name;
+            var qualifiedColumns = BuildQualifiedColumns(qualifier, plan.Table.Columns);
+            var covering = IndexCoversSelect(select, plan.Table, plan.Index);
+            var indexName = covering
+                ? $"{plan.Index.Name} COVERING"
+                : plan.Index.Name;
+            return new ScanTarget(
+                plan.Source.Name,
+                qualifier,
+                plan.Table.Columns,
+                targetRows,
+                name => ResolveScanColumnIndex(
+                    name,
                     plan.Table.Columns,
-                    targetRows,
-                    name => ResolveScanColumnIndex(
-                        name,
-                        plan.Table.Columns,
-                        qualifiedColumns),
-                    targetRowIds,
-                    indexName,
-                    plan.Table.ColumnDefinitions,
-                    BuildQualifiedColumnDefinitions(
-                        qualifier,
-                        plan.Table.ColumnDefinitions),
-                    indexSeek);
-            }
+                    qualifiedColumns),
+                targetRowIds,
+                indexName,
+                plan.Table.ColumnDefinitions,
+                BuildQualifiedColumnDefinitions(
+                    qualifier,
+                    plan.Table.ColumnDefinitions),
+                indexSeek);
+        }
 
         var compileSelect = select;
         var aggregateSelect = IsAggregateSelect(select);
@@ -16170,35 +16175,35 @@ public sealed partial class EmbeddedDatabase : IDisposable
         }
 
         // INNER only: when both sides have sqlite_stat1 N and the SQL right side is smaller,
-                // drive the nested loop from the right so the smaller table is outer. LEFT OUTER must
-                // keep SQL left as outer for null-extension. Without stats, preserve FROM order.
-                var leftIsOuter = true;
-                if (joinType == JoinType.Inner
-                    && TryGetSqliteStat1TableRowCount(context, leftTarget.TableName, out var leftEst)
-                    && TryGetSqliteStat1TableRowCount(context, rightTarget.TableName, out var rightEst)
-                    && leftEst > rightEst)
-                {
-                    leftIsOuter = false;
-                }
+        // drive the nested loop from the right so the smaller table is outer. LEFT OUTER must
+        // keep SQL left as outer for null-extension. Without stats, preserve FROM order.
+        var leftIsOuter = true;
+        if (joinType == JoinType.Inner
+            && TryGetSqliteStat1TableRowCount(context, leftTarget.TableName, out var leftEst)
+            && TryGetSqliteStat1TableRowCount(context, rightTarget.TableName, out var rightEst)
+            && leftEst > rightEst)
+        {
+            leftIsOuter = false;
+        }
 
-                var program = JoinProgramBuilder.Build(
-                    leftTarget.TableName,
-                    leftWidth,
-                    rightTarget.TableName,
-                    rightColumns.Length,
-                    joinType,
-                    projections,
-                    predicate,
-                    postJoinPredicate,
-                    leftIsOuter);
-                // Cursor 0 = nested-loop outer, cursor 1 = inner (may be swapped vs SQL left/right).
-                compiled = new CompiledSelect(
-                    program,
-                    leftIsOuter
-                        ? [new VdbeCursorSource(leftTarget.Rows), new VdbeCursorSource(rightTarget.Rows)]
-                        : [new VdbeCursorSource(rightTarget.Rows), new VdbeCursorSource(leftTarget.Rows)]);
-                return true;
-            }
+        var program = JoinProgramBuilder.Build(
+            leftTarget.TableName,
+            leftWidth,
+            rightTarget.TableName,
+            rightColumns.Length,
+            joinType,
+            projections,
+            predicate,
+            postJoinPredicate,
+            leftIsOuter);
+        // Cursor 0 = nested-loop outer, cursor 1 = inner (may be swapped vs SQL left/right).
+        compiled = new CompiledSelect(
+            program,
+            leftIsOuter
+                ? [new VdbeCursorSource(leftTarget.Rows), new VdbeCursorSource(rightTarget.Rows)]
+                : [new VdbeCursorSource(rightTarget.Rows), new VdbeCursorSource(leftTarget.Rows)]);
+        return true;
+    }
 
     // Mirrors the evaluator's join projection: "*" expands to every join output column,
     // "t.*" to that source's raw columns, a bare column reads its combined ordinal, and a
@@ -19413,6 +19418,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
             },
         };
 
+        var dmlOptions = new DmlCompileOptions(
+                    MutationFlags: VdbeInsertFlags.None,
+                    EmitForeignKeyChecks: context.ForeignKeysEnabled
+                        && TableParticipatesInForeignKeys(context, statement.TableName, table));
+
         compiled = hasReturning
             ? DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Insert,
@@ -19423,24 +19433,26 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 writeTarget,
                 new VdbeCursorSource(
                     returningRows!,
-                    table.HasRowid ? returningRowIds : null))
+                    table.HasRowid ? returningRowIds : null),
+                dmlOptions)
             : DmlStatementCompiler.Compile(
                 DmlKind.Insert,
                 statement.TableName,
                 table.Columns.Length,
                 predicate: null,
                 returning: Array.Empty<DmlReturningExpression>(),
-                writeTarget);
+                writeTarget,
+                dmlOptions);
         return true;
     }
 
     private bool TryCompileUpdate(
-        UpdateStatement statement,
-        SqlValue[] parameters,
-        QueryContext context,
-        out CompiledDml compiled,
-        out string[] columns,
-        out bool hasReturning)
+UpdateStatement statement,
+SqlValue[] parameters,
+QueryContext context,
+out CompiledDml compiled,
+out string[] columns,
+out bool hasReturning)
     {
         compiled = null!;
         columns = [];
@@ -19524,6 +19536,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
             },
         };
 
+        var dmlOptions = new DmlCompileOptions(
+                    MutationFlags: VdbeInsertFlags.RequireSeek,
+                    EmitForeignKeyChecks: context.ForeignKeysEnabled
+                        && TableParticipatesInForeignKeys(context, statement.TableName, table));
+
         compiled = hasReturning
             ? DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Update,
@@ -19534,24 +19551,26 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 writeTarget,
                 new VdbeCursorSource(
                     returningRows!,
-                    table.HasRowid ? returningRowIds : null))
+                    table.HasRowid ? returningRowIds : null),
+                dmlOptions)
             : DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Update,
                 statement.TableName,
                 table.Columns.Length,
                 filter,
                 Array.Empty<DmlReturningExpression>(),
-                writeTarget);
+                writeTarget,
+                dmlOptions);
         return true;
     }
 
     private bool TryCompileDelete(
-        DeleteStatement statement,
-        SqlValue[] parameters,
-        QueryContext context,
-        out CompiledDml compiled,
-        out string[] columns,
-        out bool hasReturning)
+DeleteStatement statement,
+SqlValue[] parameters,
+QueryContext context,
+out CompiledDml compiled,
+out string[] columns,
+out bool hasReturning)
     {
         compiled = null!;
         columns = [];
@@ -19637,6 +19656,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
             },
         };
 
+        var dmlOptions = new DmlCompileOptions(
+                    MutationFlags: VdbeInsertFlags.RequireSeek,
+                    EmitForeignKeyChecks: context.ForeignKeysEnabled
+                        && TableParticipatesInForeignKeys(context, statement.TableName, table));
+
         compiled = hasReturning
             ? DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Delete,
@@ -19647,24 +19671,50 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 writeTarget,
                 new VdbeCursorSource(
                     returningRows!,
-                    table.HasRowid ? returningRowIds : null))
+                    table.HasRowid ? returningRowIds : null),
+                dmlOptions)
             : DmlStatementCompiler.CompileWithFilter(
                 DmlKind.Delete,
                 statement.TableName,
                 table.Columns.Length,
                 filter,
                 Array.Empty<DmlReturningExpression>(),
-                writeTarget);
+                writeTarget,
+                dmlOptions);
         return true;
     }
 
-    private bool TryCompileSelfReferentialCascadeUpdate(
-        UpdateStatement statement,
-        SqlValue[] parameters,
+    /// <summary>
+    /// True when the table declares foreign keys or is referenced as a parent, so compiled DML should
+    /// emit the FkCheck epilogue (counters are driven by FkCounter / shared Vdbe transaction state).
+    /// </summary>
+    private static bool TableParticipatesInForeignKeys(
         QueryContext context,
-        out CompiledDml compiled,
-        out string[] columns,
-        out bool hasReturning)
+        string tableName,
+        EmbeddedTable table)
+    {
+        if (table.ForeignKeys.Count > 0)
+            return true;
+
+        foreach (var pair in context.Tables)
+        {
+            foreach (var foreignKey in pair.Value.ForeignKeys)
+            {
+                if (string.Equals(foreignKey.ParentTable, tableName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryCompileSelfReferentialCascadeUpdate(
+UpdateStatement statement,
+SqlValue[] parameters,
+QueryContext context,
+out CompiledDml compiled,
+out string[] columns,
+out bool hasReturning)
     {
         compiled = null!;
         columns = [];
@@ -20425,7 +20475,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                         out _):
                 return DescribeProgram(compiledForeignKeyDelete.Program);
             case DeleteStatement delete
-                when CanCompileDml(compilationContext)
+                            when CanCompilePlainDelete(compilationContext)
                     && TryCompileDelete(
                         delete,
                         parameters,
@@ -20436,9 +20486,9 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 return DescribeProgram(compiledDelete.Program);
             case ValuesClause values
                             when TryPrepareValuesLowering(values, out var preparedValues):
-                            // Same multi-row OpenEphemeral program as execution (not the cursor-less
-                            // LoadConstant-only shape from TryCompileValues alone).
-                            return DescribeProgram(preparedValues.Program);
+                // Same multi-row OpenEphemeral program as execution (not the cursor-less
+                // LoadConstant-only shape from TryCompileValues alone).
+                return DescribeProgram(preparedValues.Program);
             case WithSelectStatement with
                 when TryBuildNotMaterializedPassThroughExplainProgram(
                     with,
@@ -20543,7 +20593,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 && TryCompileInsert(insert, parameters, compilationContext, out _, out _, out _),
             UpdateStatement update => CanRouteUpdateThroughCompiler(update, compilationContext)
                 && TryCompileUpdate(update, parameters, compilationContext, out _, out _, out _),
-            DeleteStatement delete => CanCompileDml(compilationContext)
+            DeleteStatement delete => CanCompilePlainDelete(compilationContext)
                 && TryCompileDelete(delete, parameters, compilationContext, out _, out _, out _),
             QueryStatement or WithDmlStatement => false,
             _ => throw new EmbeddedSqlException(
@@ -20694,13 +20744,13 @@ public sealed partial class EmbeddedDatabase : IDisposable
             FilterRowIdInstruction => VdbeExplain.Describe(instruction),
             SeekRowidInstruction => VdbeExplain.Describe(instruction),
             SeekRowidRangeInstruction => VdbeExplain.Describe(instruction),
-                        SeekKeyInstruction => VdbeExplain.Describe(instruction),
-                        IdxRowIdInstruction => VdbeExplain.Describe(instruction),
-                        OpenEphemeralInstruction => VdbeExplain.Describe(instruction),
-                        EphemeralInsertInstruction => VdbeExplain.Describe(instruction),
-                        NoConflictInstruction => VdbeExplain.Describe(instruction),
-                        NotExistsInstruction => VdbeExplain.Describe(instruction),
-                        FoundInstruction => VdbeExplain.Describe(instruction),
+            SeekKeyInstruction => VdbeExplain.Describe(instruction),
+            IdxRowIdInstruction => VdbeExplain.Describe(instruction),
+            OpenEphemeralInstruction => VdbeExplain.Describe(instruction),
+            EphemeralInsertInstruction => VdbeExplain.Describe(instruction),
+            NoConflictInstruction => VdbeExplain.Describe(instruction),
+            NotExistsInstruction => VdbeExplain.Describe(instruction),
+            FoundInstruction => VdbeExplain.Describe(instruction),
             FilterRegistersInstruction filterRegisters => (
                 filterRegisters.Row.Start.Index,
                 filterRegisters.FalseTarget.Offset,
@@ -20773,18 +20823,11 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 0,
                 null,
                 $"delete current row of cursor {delete.Cursor.Index}"),
-            InsertInstruction insert => (
-                insert.Cursor.Index,
-                0,
-                0,
-                null,
-                $"insert row into cursor {insert.Cursor.Index}"),
-            UpdateInstruction update => (
-                update.Cursor.Index,
-                0,
-                0,
-                null,
-                $"update current row of cursor {update.Cursor.Index}"),
+            InsertInstruction => VdbeExplain.Describe(instruction),
+            UpdateInstruction => VdbeExplain.Describe(instruction),
+            FkCounterInstruction => VdbeExplain.Describe(instruction),
+            FkIfZeroInstruction => VdbeExplain.Describe(instruction),
+            FkCheckInstruction => VdbeExplain.Describe(instruction),
             CommitInstruction commit => (
                 commit.Cursor.Index,
                 0,
@@ -21704,14 +21747,14 @@ public sealed partial class EmbeddedDatabase : IDisposable
                     ? Math.Max(0, n)
                     : unknown;
             case VdbeJoinOperatorPlan op:
-            {
-                var left = EstimateJoinNodeRows(op.Left, context);
-                var right = EstimateJoinNodeRows(op.Right, context);
-                if (left >= unknown / 2 || right >= unknown / 2)
-                    return unknown;
-                // Naive equijoin residual: ~max(L,R) when both known (not a full CBO).
-                return Math.Max(1, Math.Max(left, right));
-            }
+                {
+                    var left = EstimateJoinNodeRows(op.Left, context);
+                    var right = EstimateJoinNodeRows(op.Right, context);
+                    if (left >= unknown / 2 || right >= unknown / 2)
+                        return unknown;
+                    // Naive equijoin residual: ~max(L,R) when both known (not a full CBO).
+                    return Math.Max(1, Math.Max(left, right));
+                }
             default:
                 return unknown;
         }
@@ -21796,82 +21839,82 @@ public sealed partial class EmbeddedDatabase : IDisposable
         return count;
     }
 
-        /// <summary>
-        /// Collects a contiguous leading equality prefix on plain (non-expression) index
-        /// columns whose bounds are literals or parameters — enough to emit SeekGE/IdxGE.
-        /// Skips when a leading term uses a non-BINARY collation (seek order is BINARY).
-        /// </summary>
-        private static bool TryCollectLeadingIndexEqualitySeek(
-            Expression where,
-            EmbeddedTable table,
-            EmbeddedIndex index,
-            out IndexSeekPrefix? prefix)
+    /// <summary>
+    /// Collects a contiguous leading equality prefix on plain (non-expression) index
+    /// columns whose bounds are literals or parameters — enough to emit SeekGE/IdxGE.
+    /// Skips when a leading term uses a non-BINARY collation (seek order is BINARY).
+    /// </summary>
+    private static bool TryCollectLeadingIndexEqualitySeek(
+        Expression where,
+        EmbeddedTable table,
+        EmbeddedIndex index,
+        out IndexSeekPrefix? prefix)
+    {
+        prefix = null;
+        var keyColumns = new List<int>();
+        var bounds = new List<Expression>();
+        foreach (var term in index.Columns)
         {
-            prefix = null;
-            var keyColumns = new List<int>();
-            var bounds = new List<Expression>();
-            foreach (var term in index.Columns)
+            if (term.IsExpression || term.ColumnIndex < 0)
+                break;
+
+            var collation = IndexExpressionSemantics.GetCollationName(table, term);
+            if (!string.Equals(collation, "BINARY", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(collation))
             {
-                if (term.IsExpression || term.ColumnIndex < 0)
-                    break;
-
-                var collation = IndexExpressionSemantics.GetCollationName(table, term);
-                if (!string.Equals(collation, "BINARY", StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrEmpty(collation))
-                {
-                    break;
-                }
-
-                if (!TryFindIndexEqualityBound(where, table, term, out var bound)
-                    || bound is not (LiteralExpression or ParameterExpression))
-                {
-                    break;
-                }
-
-                keyColumns.Add(term.ColumnIndex);
-                bounds.Add(bound);
+                break;
             }
 
-            if (keyColumns.Count == 0)
-                return false;
+            if (!TryFindIndexEqualityBound(where, table, term, out var bound)
+                || bound is not (LiteralExpression or ParameterExpression))
+            {
+                break;
+            }
 
-            prefix = new IndexSeekPrefix(keyColumns, bounds);
+            keyColumns.Add(term.ColumnIndex);
+            bounds.Add(bound);
+        }
+
+        if (keyColumns.Count == 0)
+            return false;
+
+        prefix = new IndexSeekPrefix(keyColumns, bounds);
+        return true;
+    }
+
+    private static bool TryFindIndexEqualityBound(
+        Expression expression,
+        EmbeddedTable table,
+        EmbeddedIndexColumn term,
+        out Expression bound)
+    {
+        bound = null!;
+        if (expression is BinaryExpression { Operator: BinaryOperator.And } and)
+        {
+            return TryFindIndexEqualityBound(and.Left, table, term, out bound)
+                || TryFindIndexEqualityBound(and.Right, table, term, out bound);
+        }
+
+        if (expression is not BinaryExpression binary
+            || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.Is))
+        {
+            return false;
+        }
+
+        if (QueryExpressionMatchesIndexTerm(binary.Left, table, term))
+        {
+            bound = binary.Right;
             return true;
         }
 
-        private static bool TryFindIndexEqualityBound(
-            Expression expression,
-            EmbeddedTable table,
-            EmbeddedIndexColumn term,
-            out Expression bound)
+        if (QueryExpressionMatchesIndexTerm(binary.Right, table, term))
         {
-            bound = null!;
-            if (expression is BinaryExpression { Operator: BinaryOperator.And } and)
-            {
-                return TryFindIndexEqualityBound(and.Left, table, term, out bound)
-                    || TryFindIndexEqualityBound(and.Right, table, term, out bound);
-            }
-
-            if (expression is not BinaryExpression binary
-                || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.Is))
-            {
-                return false;
-            }
-
-            if (QueryExpressionMatchesIndexTerm(binary.Left, table, term))
-            {
-                bound = binary.Right;
-                return true;
-            }
-
-            if (QueryExpressionMatchesIndexTerm(binary.Right, table, term))
-            {
-                bound = binary.Left;
-                return true;
-            }
-
-            return false;
+            bound = binary.Left;
+            return true;
         }
+
+        return false;
+    }
 
     private static bool WhereUsesIndexEqualityTerm(
         Expression? expression,
@@ -37752,7 +37795,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
     // matching the task's requirement to reject unsupported input rather than guess.
     private static partial class SqliteJson
     {
-    private static readonly UTF8Encoding JsonbUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+        private static readonly UTF8Encoding JsonbUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
         private enum JKind
         {

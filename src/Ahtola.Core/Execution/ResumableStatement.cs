@@ -54,7 +54,8 @@ public sealed class ResumableStatement : IDisposable
     private readonly EphemeralTableRuntime?[] _ephemeralTables;
     private readonly IReadOnlyList<VdbeCursorSource?>? _cursorSources;
     private readonly IReadOnlyList<VdbeWriteTarget?>? _writeTargets;
-    private readonly VdbeTransactionContext _transaction = new();
+    private readonly VdbeTransactionContext _transaction;
+    private readonly bool _ownsTransaction;
     private VdbeParameterBinding? _binding;
     private ProgramCounter _instructionPointer;
     private ReadOnlyCollection<SqlValue>? _currentRow;
@@ -67,7 +68,8 @@ public sealed class ResumableStatement : IDisposable
         VdbeProgram program,
         IReadOnlyList<VdbeCursorSource?>? cursorSources = null,
         IReadOnlyList<VdbeWriteTarget?>? writeTargets = null,
-        VdbeParameterBinding? parameterBinding = null)
+        VdbeParameterBinding? parameterBinding = null,
+        VdbeTransactionContext? sharedTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(program);
         if (cursorSources is not null && cursorSources.Count != program.CursorCount)
@@ -106,8 +108,17 @@ public sealed class ResumableStatement : IDisposable
         _cursorSources = cursorSources;
         _writeTargets = writeTargets;
         _binding = parameterBinding;
+        _ownsTransaction = sharedTransaction is null;
+        _transaction = sharedTransaction ?? new VdbeTransactionContext();
         State = ResumableStatementState.Ready;
     }
+
+    /// <summary>
+    /// The transaction/savepoint + deferred-FK counter this statement uses. When constructed with a
+    /// shared context, multiple statements accumulate deferred FK violations until the shared
+    /// context is committed or rolled back.
+    /// </summary>
+    public VdbeTransactionContext Transaction => _transaction;
 
     public VdbeProgram Program { get; }
 
@@ -493,17 +504,17 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case SeekKeyInstruction seekKey:
                     {
-                                        if (TrySeekKey(
-                                                seekKey.Cursor,
-                                                seekKey.Key,
-                                                seekKey.Operator,
-                                                seekKey.EqOnly,
-                                                seekKey.KeyColumns))
-                                            AdvanceInstructionPointer();
-                                        else
-                                            _instructionPointer = seekKey.NotFoundTarget;
-                                        break;
-                                    }
+                        if (TrySeekKey(
+                                seekKey.Cursor,
+                                seekKey.Key,
+                                seekKey.Operator,
+                                seekKey.EqOnly,
+                                seekKey.KeyColumns))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = seekKey.NotFoundTarget;
+                        break;
+                    }
                 case IdxRowIdInstruction idxRowId:
                     {
                         _registers[idxRowId.Destination.Index] = SqlValue.Integer(CurrentCursorRowId(idxRowId.Cursor));
@@ -1368,7 +1379,10 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
         Array.Clear(_ephemeralTables);
-        _transaction.Reset();
+        // Owned transactions reset with the statement. A shared connection-scoped transaction
+        // keeps its frames and deferred FK counter so multi-statement VDBE programs can share them.
+        if (_ownsTransaction)
+            _transaction.Reset();
         _currentRow = null;
         _instructionPointer = default;
         _hasExecutedInstruction = false;
@@ -1449,7 +1463,8 @@ public sealed class ResumableStatement : IDisposable
         _subprogramStatements.Clear();
         Array.Clear(_workTables);
         Array.Clear(_windowBuffers);
-        _transaction.Reset();
+        if (_ownsTransaction)
+            _transaction.Reset();
         _binding = null;
         _currentRow = null;
         State = ResumableStatementState.Disposed;
@@ -1908,96 +1923,96 @@ public sealed class ResumableStatement : IDisposable
         VdbeKeySeekOperator op,
             bool eqOnly,
             IReadOnlyList<int>? keyColumns = null)
+    {
+        _materializedRows[cursor.Index] = null;
+        var keyValues = ReadRegisters(key);
+        if (keyColumns is not null && keyColumns.Count != keyValues.Length)
         {
-            _materializedRows[cursor.Index] = null;
-            var keyValues = ReadRegisters(key);
-            if (keyColumns is not null && keyColumns.Count != keyValues.Length)
+            throw new InvalidOperationException(
+                $"SeekKey key width {keyValues.Length} does not match KeyColumns length {keyColumns.Count}.");
+        }
+
+        var source = RequireCursorSource(cursor);
+        var rows = source.Rows;
+        var found = -1;
+
+        for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            var cmp = CompareKeyPrefix(rows[rowIndex], keyValues, keyColumns);
+            var qualifies = op switch
             {
-                throw new InvalidOperationException(
-                    $"SeekKey key width {keyValues.Length} does not match KeyColumns length {keyColumns.Count}.");
+                VdbeKeySeekOperator.GreaterThanOrEqual => cmp >= 0,
+                VdbeKeySeekOperator.GreaterThan => cmp > 0,
+                VdbeKeySeekOperator.LessThanOrEqual => cmp <= 0,
+                VdbeKeySeekOperator.LessThan => cmp < 0,
+                _ => false,
+            };
+            if (!qualifies)
+                continue;
+
+            if (eqOnly
+                && op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.LessThanOrEqual
+                && cmp != 0)
+            {
+                continue;
             }
 
-            var source = RequireCursorSource(cursor);
-            var rows = source.Rows;
-            var found = -1;
-
-            for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+            // GE/GT: first match; LE/LT: last match.
+            if (op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.GreaterThan)
             {
-                var cmp = CompareKeyPrefix(rows[rowIndex], keyValues, keyColumns);
-                var qualifies = op switch
-                {
-                    VdbeKeySeekOperator.GreaterThanOrEqual => cmp >= 0,
-                    VdbeKeySeekOperator.GreaterThan => cmp > 0,
-                    VdbeKeySeekOperator.LessThanOrEqual => cmp <= 0,
-                    VdbeKeySeekOperator.LessThan => cmp < 0,
-                    _ => false,
-                };
-                if (!qualifies)
-                    continue;
-
-                if (eqOnly
-                    && op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.LessThanOrEqual
-                    && cmp != 0)
-                {
-                    continue;
-            }
-
-                // GE/GT: first match; LE/LT: last match.
-                if (op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.GreaterThan)
-                {
-                    found = rowIndex;
-                    break;
-                }
-
                 found = rowIndex;
+                break;
             }
 
-            if (found < 0)
-                return false;
-
-            _cursorPositions[cursor.Index] = found;
-            return true;
+            found = rowIndex;
         }
 
-        private static bool RowMatchesKeyPrefix(SqlValue[] row, SqlValue[] key)
+        if (found < 0)
+            return false;
+
+        _cursorPositions[cursor.Index] = found;
+        return true;
+    }
+
+    private static bool RowMatchesKeyPrefix(SqlValue[] row, SqlValue[] key)
+    {
+        if (row.Length < key.Length)
+            return false;
+
+        for (var column = 0; column < key.Length; column++)
         {
-            if (row.Length < key.Length)
+            if (!row[column].Equals(key[column]))
                 return false;
-
-            for (var column = 0; column < key.Length; column++)
-            {
-                if (!row[column].Equals(key[column]))
-                    return false;
-            }
-
-            return true;
         }
 
-        /// <summary>
-        /// Lexicographic comparison of selected row columns against key. Nulls sort
-        /// lowest (SQLite default BINARY). Returns negative if row &lt; key, 0 if equal
-        /// for the key width, positive if row &gt; key. When <paramref name="keyColumns"/>
-        /// is null, uses leading columns <c>0..key.Length-1</c>.
-        /// </summary>
-        private static int CompareKeyPrefix(
-            SqlValue[] row,
-            SqlValue[] key,
-            IReadOnlyList<int>? keyColumns = null)
+        return true;
+    }
+
+    /// <summary>
+    /// Lexicographic comparison of selected row columns against key. Nulls sort
+    /// lowest (SQLite default BINARY). Returns negative if row &lt; key, 0 if equal
+    /// for the key width, positive if row &gt; key. When <paramref name="keyColumns"/>
+    /// is null, uses leading columns <c>0..key.Length-1</c>.
+    /// </summary>
+    private static int CompareKeyPrefix(
+        SqlValue[] row,
+        SqlValue[] key,
+        IReadOnlyList<int>? keyColumns = null)
+    {
+        var width = key.Length;
+        for (var column = 0; column < width; column++)
         {
-            var width = key.Length;
-            for (var column = 0; column < width; column++)
-            {
-                var rowOrdinal = keyColumns is null ? column : keyColumns[column];
-                if (rowOrdinal < 0 || rowOrdinal >= row.Length)
-                    return -1;
+            var rowOrdinal = keyColumns is null ? column : keyColumns[column];
+            if (rowOrdinal < 0 || rowOrdinal >= row.Length)
+                return -1;
 
-                var cmp = CompareSqlValues(row[rowOrdinal], key[column]);
-                if (cmp != 0)
-                    return cmp;
-            }
-
-            return 0;
+            var cmp = CompareSqlValues(row[rowOrdinal], key[column]);
+            if (cmp != 0)
+                return cmp;
         }
+
+        return 0;
+    }
 
     private static int CompareSqlValues(SqlValue left, SqlValue right)
     {
