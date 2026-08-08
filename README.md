@@ -98,15 +98,16 @@ Treat Ahtola as SQLite-*compatible*, not a full SQLite replacement:
 - **File-backed platforms** — Windows and 64-bit Linux only today. In-memory
   works everywhere; macOS / 32-bit Linux physical opens throw
   `PlatformNotSupportedException`.
-- **Process-exclusive files (Stage 0)** — one managed process owns a physical DB;
-  Turso, ordinary SQLite, and other processes get busy/ownership failures.
-  Concurrent multi-process WAL with the Turso Rust engine is the contract goal,
-  not current behavior. Handoff requires disposing connections and clearing pools
-  (`Pooling=False` or `SqliteConnection.ClearAllPools()`). See
+- **Multi-engine files (Stage 6)** — physical opens use SQLite main-file SHARED
+  locking (Windows / 64-bit Linux). Managed and stock SQLite can share the same
+  live WAL database (`-shm` DMS + peer WAL visibility on new statements). Pooling
+  may retain managed handles until `Pooling=False` or
+  `SqliteConnection.ClearAllPools()`. PENDING/RESERVED DELETE-mode polish and a
+  Turso binary differential remain optional depth. See
   [docs/wal-interoperability-contract.md](docs/wal-interoperability-contract.md).
 - **Foreign read-only** — `Mode=ReadOnly;Foreign Read Only=True;Pooling=False`
-  can read a DB still owned by native SQLite/Turso (e.g. winget `index.db`) without
-  taking ownership.
+  can read a DB still held by native SQLite/Turso (e.g. winget `index.db`) without
+  taking main-file locks.
 - **Not implemented** — virtual tables / FTS / R-Tree, loadable extensions, raw
   `sqlite3*` handles (`Handle` is null), AEGIS encryption ciphers. Durable MVCC
   logical-log recovery and header marker persistence are incomplete; Phase 1

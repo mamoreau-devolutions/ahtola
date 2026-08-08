@@ -6,12 +6,15 @@ to share a physical database with `tursodb` / the Turso core under the same WAL,
 `-shm`, lock, and handoff rules those engines already use — not invent a
 managed-only WAL dialect.
 
-**Status today: Stages 1–6 core attached.** Physical pagers publish a real
-WAL-index, pin read marks, checkpoint under `WAL_CKPT_LOCK`, use SQLite busy
-backoff, recover with `iChange` bumps, and hold a Stage 6 **main-file SHARED**
-lock (not exclusive 512-byte ownership) so ordinary SQLite/Turso SHARED readers
-can coexist. Remaining polish: PENDING/RESERVED writer upgrades for DELETE-mode
-parity and expanded differential Turso stress. An explicit
+**Status today: Stages 1–6 core attached, including live multi-engine WAL.**
+Physical pagers publish a real WAL-index, pin read marks, checkpoint under
+`WAL_CKPT_LOCK`, use SQLite busy backoff, recover with `iChange` bumps, and hold
+a Stage 6 **main-file SHARED** lock (not exclusive 512-byte ownership). Managed
+and stock SQLite can share one live WAL database: shared `-shm` DMS, peer writers
+without `IOERR`, and long-lived managed connections refresh heap catalogs from
+peer WAL growth on new statements. Remaining polish: PENDING/RESERVED writer
+upgrades for DELETE-mode parity, last-connection `-shm` unlink/heap fallback, and
+expanded Turso binary differential stress. An explicit
 `Foreign Read Only=True` connection may still read without main-file locks
 (§1.9).
 

@@ -802,7 +802,21 @@ public sealed class SqliteWalFile : IDisposable
                 SqliteWalRecoveryStopReason.EndOfFile,
                 (Header.Checksum1, Header.Checksum2));
         }
-        var fullFrameCount = CompleteFrameCount(length);
+
+            // Peer engine materialised a real WAL header into a file we opened as
+            // truncated (zero-length -wal under a live stock SQLite hold). Drop the
+            // synthetic header and parse the on-disk one before scanning frames.
+            if (_truncatedAfterCheckpoint && length >= SqliteWalHeader.Size)
+            {
+                var headerBytes = new byte[SqliteWalHeader.Size];
+                if (_file.Read(0, headerBytes) == headerBytes.Length)
+                {
+                    _header = SqliteWalHeader.Parse(headerBytes);
+                    _truncatedAfterCheckpoint = false;
+                }
+            }
+
+            var fullFrameCount = CompleteFrameCount(length);
         var hasPartialFrame = (length - SqliteWalHeader.Size) % FrameSize != 0;
         var previousChecksum = (Header.Checksum1, Header.Checksum2);
         var lastValidFrameNumber = 0L;

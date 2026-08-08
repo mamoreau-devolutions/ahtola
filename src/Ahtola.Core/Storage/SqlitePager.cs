@@ -89,8 +89,10 @@ public sealed class SqlitePager : IDisposable
     private uint _observedWalIndexMaximumFrame;
     private uint _observedWalIndexSalt1;
     private uint _observedWalIndexSalt2;
+        private bool _hasObservedWalStamp;
+        private FileWriteStamp? _observedWalStamp;
 
-    private SqlitePager(
+        private SqlitePager(
         IFileSystem fileSystem,
         string databasePath,
         string walPath,
@@ -549,20 +551,34 @@ public sealed class SqlitePager : IDisposable
                     {
                         if (storageFileSystem.FileExists(walPath))
                         {
-                            wal = SqliteWalFile.Open(storageFileSystem, walPath, readOnly, encryption);
-                        }
-                        else if (!readOnly)
-                        {
-                            wal = SqliteWalFile.Create(
-                                storageFileSystem,
-                                walPath,
-                                SqliteWalHeader.Create(
-                                    pageStore.PageSize,
-                                    unchecked((uint)Random.Shared.NextInt64()),
-                                    unchecked((uint)Random.Shared.NextInt64())),
-                                encryption);
-                        }
-                    }
+                                                // Stock SQLite often leaves a zero-length -wal while a
+                                                // connection is live (post-checkpoint / reopen). Open it
+                                                // as a truncated WAL so multi-engine attach succeeds; the
+                                                // real on-disk header is adopted when the peer materializes
+                                                // frames (see SqliteWalFile.ScanCore).
+                                                var truncatedHeader = SqliteWalHeader.Create(
+                                                    pageStore.PageSize,
+                                                    unchecked((uint)Random.Shared.NextInt64()),
+                                                    unchecked((uint)Random.Shared.NextInt64()));
+                                                wal = SqliteWalFile.Open(
+                                                    storageFileSystem,
+                                                    walPath,
+                                                    readOnly,
+                                                    encryption,
+                                                    truncatedHeader);
+                                            }
+                                            else if (!readOnly)
+                                            {
+                                                wal = SqliteWalFile.Create(
+                                                    storageFileSystem,
+                                                    walPath,
+                                                    SqliteWalHeader.Create(
+                                                        pageStore.PageSize,
+                                                        unchecked((uint)Random.Shared.NextInt64()),
+                                                        unchecked((uint)Random.Shared.NextInt64())),
+                                                    encryption);
+                                            }
+                                        }
                     else if (!readOnly && storageFileSystem.FileExists(walPath))
                     {
                         TryDeleteCreatedArtifact(storageFileSystem, walPath);
@@ -2074,41 +2090,58 @@ public sealed class SqlitePager : IDisposable
         {
             var generation = _lockManager.Generation;
             var walIndexChanged = TryDetectWalIndexIdentityChange(out var walIndexRegion);
-            if (_lockGeneration == generation && !RequiresSharedStorageRescan && !walIndexChanged)
-                return;
+                // Peer engines (stock SQLite) bump -wal length without publishing the
+                // process-local lock generation. Even with a Stage 6 SHARED lease and
+                // an unchanged wal-index identity snapshot, a durable WAL stamp change
+                // must force rescan so multi-engine commits become visible.
+                var peerWalStampChanged = UsesWalStorage(_journalMode)
+                    && _wal is not null
+                    && TryDetectPeerWalStampChange();
+                if (_lockGeneration == generation
+                    && !RequiresSharedStorageRescan
+                    && !walIndexChanged
+                    && !peerWalStampChanged)
+                    return;
 
-            CommittedViewRescanCount++;
-            if (SqliteRollbackJournal.IsHot(_fileSystem, _journalPath))
-            {
-                throw new InvalidDataException(
-                    "SQLite database has a hot rollback journal; dispose and reopen it writable to recover.");
-            }
-            if (_lockGeneration != generation || walIndexChanged)
-                ValidateMainFileFormat();
+                CommittedViewRescanCount++;
+                            if (SqliteRollbackJournal.IsHot(_fileSystem, _journalPath))
+                            {
+                                throw new InvalidDataException(
+                                    "SQLite database has a hot rollback journal; dispose and reopen it writable to recover.");
+                            }
+                            // Process-local generation bumps (managed peer commits) keep the strict
+                                        // format/incarnation check. Peer-engine wal-index or -wal stamp changes
+                                        // adopt the durable incarnation instead of faulting the live pager.
+                                        if (_lockGeneration != generation)
+                                            ValidateMainFileFormat();
+                                        else if ((walIndexChanged || peerWalStampChanged) && !_foreignReadOnly)
+                                            ReconcilePeerWalIncarnation();
 
-            if (_journalMode == SqliteJournalMode.Delete)
-            {
-                _pageStore.RefreshHeader();
-                _committedPageCount = _pageStore.PageCount;
-                _walPageOverlay.Clear();
-                _pageCache.Clear();
-                _recoveryInfo = CreateEmptyRecoveryInfo();
-                _visibleRecoveryInfo = _recoveryInfo;
-                _lockGeneration = generation;
-                ClearObservedWalIndexIdentity();
-                return;
-            }
-            if (_foreignReadOnly)
-                ReconcileForeignWalIncarnation();
+                            if (_journalMode == SqliteJournalMode.Delete)
+                            {
+                                _pageStore.RefreshHeader();
+                                _committedPageCount = _pageStore.PageCount;
+                                _walPageOverlay.Clear();
+                                _pageCache.Clear();
+                                _recoveryInfo = CreateEmptyRecoveryInfo();
+                                _visibleRecoveryInfo = _recoveryInfo;
+                                _lockGeneration = generation;
+                                ClearObservedWalIndexIdentity();
+                                return;
+                            }
+                            if (_foreignReadOnly)
+                                ReconcileForeignWalIncarnation();
 
-            if (_wal is null)
-            {
-                _pageStore.RefreshHeader();
-                InitializeCleanWalView();
-                _lockGeneration = generation;
-                ClearObservedWalIndexIdentity();
-                return;
-            }
+                            if (_wal is null)
+                            {
+                                _pageStore.RefreshHeader();
+                                InitializeCleanWalView();
+                                _lockGeneration = generation;
+                                ClearObservedWalIndexIdentity();
+                                _hasObservedWalStamp = true;
+                                _observedWalStamp = _fileSystem.GetWriteStamp(_walPath);
+                                return;
+                            }
 
             var recovery = RequireWal().ScanRecovery();
             if (!_foreignReadOnly
@@ -2125,13 +2158,15 @@ public sealed class SqlitePager : IDisposable
                 ObserveWalIndexIdentity(walIndexRegion.Header);
             else
                 ObserveWalIndexIdentityFromAttachedIndex();
-        }
-        catch
-        {
-            TransitionToFaulted();
-            throw;
-        }
-    }
+                        _hasObservedWalStamp = true;
+                        _observedWalStamp = _fileSystem.GetWriteStamp(_walPath);
+                    }
+                    catch
+                    {
+                        TransitionToFaulted();
+                        throw;
+                    }
+                }
 
     /// <summary>
     /// Stage 5: physical WAL-index identity (<c>iChange</c>, <c>mxFrame</c>, salts)
@@ -2202,7 +2237,27 @@ public sealed class SqlitePager : IDisposable
         _observedWalIndexMaximumFrame = 0;
         _observedWalIndexSalt1 = 0;
         _observedWalIndexSalt2 = 0;
-    }
+            _hasObservedWalStamp = false;
+            _observedWalStamp = null;
+        }
+
+        /// <summary>
+        /// Detects peer growth/replacement of the on-disk <c>-wal</c> via length/mtime
+        /// when the process-local lock generation and wal-index identity stay quiet.
+        /// Does not advance the observed stamp — that happens after a successful rescan.
+        /// </summary>
+        private bool TryDetectPeerWalStampChange()
+        {
+            var stamp = _fileSystem.GetWriteStamp(_walPath);
+            if (!_hasObservedWalStamp)
+            {
+                _hasObservedWalStamp = true;
+                _observedWalStamp = stamp;
+                return false;
+            }
+
+            return stamp != _observedWalStamp;
+        }
 
     private void ValidateMainFileFormat()
     {
@@ -2227,22 +2282,36 @@ public sealed class SqlitePager : IDisposable
     {
         if (_wal is null || !_fileSystem.FileExists(_walPath))
         {
-            throw new InvalidDataException(
-                "SQLite WAL storage changed while this pager was open; dispose and reopen it.");
-        }
+                // File-backed multi-engine: a peer may have removed/replaced -wal under
+                // our SHARED hold. Adopt rather than fault so Stage 6 coexistence works.
+                if (_lockManager.UsesFileBackedWalLocks && !_foreignReadOnly)
+                {
+                    ReconcilePeerWalIncarnation();
+                    return;
+                }
 
-        using var currentWal = SqliteWalFile.Open(
-            _fileSystem,
-            _walPath,
-            readOnly: true,
-            GetFileSystemEncryption(_fileSystem));
-        if (currentWal.Header.Salt1 != _wal.Header.Salt1
-            || currentWal.Header.Salt2 != _wal.Header.Salt2)
-        {
-            throw new InvalidDataException(
-                "SQLite WAL storage changed while this pager was open; dispose and reopen it.");
+                throw new InvalidDataException(
+                    "SQLite WAL storage changed while this pager was open; dispose and reopen it.");
+            }
+
+            using var currentWal = SqliteWalFile.Open(
+                _fileSystem,
+                _walPath,
+                readOnly: true,
+                GetFileSystemEncryption(_fileSystem));
+            if (currentWal.Header.Salt1 != _wal.Header.Salt1
+                || currentWal.Header.Salt2 != _wal.Header.Salt2)
+            {
+                if (_lockManager.UsesFileBackedWalLocks)
+                {
+                    ReconcilePeerWalIncarnation();
+                    return;
+                }
+
+                throw new InvalidDataException(
+                    "SQLite WAL storage changed while this pager was open; dispose and reopen it.");
+            }
         }
-    }
 
     /// <summary>
     /// A foreign reader shares no lock state with the database owner, so the owner
@@ -2253,41 +2322,70 @@ public sealed class SqlitePager : IDisposable
     /// connection would.
     /// </summary>
     private void ReconcileForeignWalIncarnation()
-    {
-        if (!_fileSystem.FileExists(_walPath))
+            => ReconcileWalIncarnationCore(allowMissingWal: true);
+
+        /// <summary>
+        /// Owned multi-engine path: a peer (stock SQLite / Turso) grew or recycled the
+        /// on-disk <c>-wal</c> under our live SHARED hold. Adopt the durable header so
+        /// <see cref="SqliteWalFile.ScanCore"/> can publish peer frames without
+        /// faulting the pager.
+        /// </summary>
+        private void ReconcilePeerWalIncarnation()
+            => ReconcileWalIncarnationCore(allowMissingWal: false);
+
+        private void ReconcileWalIncarnationCore(bool allowMissingWal)
         {
+            if (!_fileSystem.FileExists(_walPath))
+            {
+                if (!allowMissingWal)
+                {
+                    throw new InvalidDataException(
+                        "SQLite WAL storage changed while this pager was open; dispose and reopen it.");
+                }
+
+                if (_wal is not null)
+                {
+                    _wal.Dispose();
+                    _wal = null;
+                }
+
+                return;
+            }
+
             if (_wal is not null)
             {
+                // Zero-length / truncated open: peer may have just written the first
+                // real header. Always re-open from disk so synthetic salts are dropped.
+                var length = _fileSystem.GetWriteStamp(_walPath)?.Length ?? 0;
+                if (length >= SqliteWalHeader.Size)
+                {
+                    using var currentWal = SqliteWalFile.Open(
+                        _fileSystem,
+                        _walPath,
+                        readOnly: true,
+                        GetFileSystemEncryption(_fileSystem));
+                    if (currentWal.Header.Salt1 == _wal.Header.Salt1
+                        && currentWal.Header.Salt2 == _wal.Header.Salt2)
+                    {
+                        return;
+                    }
+                }
+
                 _wal.Dispose();
                 _wal = null;
             }
 
-            return;
-        }
-
-        if (_wal is not null)
-        {
-            using var currentWal = SqliteWalFile.Open(
+            var truncatedHeader = SqliteWalHeader.Create(
+                _pageStore.PageSize,
+                unchecked((uint)Random.Shared.NextInt64()),
+                unchecked((uint)Random.Shared.NextInt64()));
+            _wal = SqliteWalFile.Open(
                 _fileSystem,
                 _walPath,
-                readOnly: true,
-                GetFileSystemEncryption(_fileSystem));
-            if (currentWal.Header.Salt1 == _wal.Header.Salt1
-                && currentWal.Header.Salt2 == _wal.Header.Salt2)
-            {
-                return;
-            }
-
-            _wal.Dispose();
-            _wal = null;
+                readOnly: IsReadOnly,
+                GetFileSystemEncryption(_fileSystem),
+                truncatedHeader);
         }
-
-        _wal = SqliteWalFile.Open(
-            _fileSystem,
-            _walPath,
-            readOnly: true,
-            GetFileSystemEncryption(_fileSystem));
-    }
 
     private void RecoverUncommittedTailUnderWriterLock(SqlitePagerLockLease writerLock)
     {
