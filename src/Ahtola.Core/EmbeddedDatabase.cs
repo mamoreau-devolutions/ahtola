@@ -14203,32 +14203,46 @@ public sealed partial class EmbeddedDatabase : IDisposable
         select = ResolveNamedWindows(select);
         context = EnterCollationSource(context, select.Source);
 
-        ScanTarget CreateTarget(
-            IReadOnlyList<SqlValue[]> targetRows,
-            IReadOnlyList<long>? targetRowIds)
-        {
-            var qualifier = plan.Source.Alias ?? plan.Source.Name;
-            var qualifiedColumns = BuildQualifiedColumns(qualifier, plan.Table.Columns);
-            var covering = IndexCoversSelect(select, plan.Table, plan.Index);
-            var indexName = covering
-                ? $"{plan.Index.Name} COVERING"
-                : plan.Index.Name;
-            return new ScanTarget(
-                plan.Source.Name,
-                qualifier,
-                plan.Table.Columns,
-                targetRows,
-                name => ResolveScanColumnIndex(
-                    name,
-                    plan.Table.Columns,
-                    qualifiedColumns),
-                targetRowIds,
-                indexName,
-                plan.Table.ColumnDefinitions,
-                BuildQualifiedColumnDefinitions(
+            IndexSeekPrefix? indexSeek = null;
+            if (plan.Search
+                && select.Where is not null
+                && !select.Distinct
+                && TryCollectLeadingIndexEqualitySeek(select.Where, plan.Table, plan.Index, out indexSeek))
+            {
+                // indexSeek attached below on ScanTarget
+            }
+            else
+            {
+                indexSeek = null;
+            }
+
+            ScanTarget CreateTarget(
+                IReadOnlyList<SqlValue[]> targetRows,
+                IReadOnlyList<long>? targetRowIds)
+            {
+                var qualifier = plan.Source.Alias ?? plan.Source.Name;
+                var qualifiedColumns = BuildQualifiedColumns(qualifier, plan.Table.Columns);
+                var covering = IndexCoversSelect(select, plan.Table, plan.Index);
+                var indexName = covering
+                    ? $"{plan.Index.Name} COVERING"
+                    : plan.Index.Name;
+                return new ScanTarget(
+                    plan.Source.Name,
                     qualifier,
-                    plan.Table.ColumnDefinitions));
-        }
+                    plan.Table.Columns,
+                    targetRows,
+                    name => ResolveScanColumnIndex(
+                        name,
+                        plan.Table.Columns,
+                        qualifiedColumns),
+                    targetRowIds,
+                    indexName,
+                    plan.Table.ColumnDefinitions,
+                    BuildQualifiedColumnDefinitions(
+                        qualifier,
+                        plan.Table.ColumnDefinitions),
+                    indexSeek);
+            }
 
         var compileSelect = select;
         var aggregateSelect = IsAggregateSelect(select);
@@ -20678,6 +20692,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
             FilterRowIdInstruction => VdbeExplain.Describe(instruction),
             SeekRowidInstruction => VdbeExplain.Describe(instruction),
             SeekRowidRangeInstruction => VdbeExplain.Describe(instruction),
+                        SeekKeyInstruction => VdbeExplain.Describe(instruction),
+                        IdxRowIdInstruction => VdbeExplain.Describe(instruction),
             FilterRegistersInstruction filterRegisters => (
                 filterRegisters.Row.Start.Index,
                 filterRegisters.FalseTarget.Offset,
@@ -21772,6 +21788,83 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         return count;
     }
+
+        /// <summary>
+        /// Collects a contiguous leading equality prefix on plain (non-expression) index
+        /// columns whose bounds are literals or parameters — enough to emit SeekGE/IdxGE.
+        /// Skips when a leading term uses a non-BINARY collation (seek order is BINARY).
+        /// </summary>
+        private static bool TryCollectLeadingIndexEqualitySeek(
+            Expression where,
+            EmbeddedTable table,
+            EmbeddedIndex index,
+            out IndexSeekPrefix? prefix)
+        {
+            prefix = null;
+            var keyColumns = new List<int>();
+            var bounds = new List<Expression>();
+            foreach (var term in index.Columns)
+            {
+                if (term.IsExpression || term.ColumnIndex < 0)
+                    break;
+
+                var collation = IndexExpressionSemantics.GetCollationName(table, term);
+                if (!string.Equals(collation, "BINARY", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrEmpty(collation))
+                {
+                    break;
+                }
+
+                if (!TryFindIndexEqualityBound(where, table, term, out var bound)
+                    || bound is not (LiteralExpression or ParameterExpression))
+                {
+                    break;
+                }
+
+                keyColumns.Add(term.ColumnIndex);
+                bounds.Add(bound);
+            }
+
+            if (keyColumns.Count == 0)
+                return false;
+
+            prefix = new IndexSeekPrefix(keyColumns, bounds);
+            return true;
+        }
+
+        private static bool TryFindIndexEqualityBound(
+            Expression expression,
+            EmbeddedTable table,
+            EmbeddedIndexColumn term,
+            out Expression bound)
+        {
+            bound = null!;
+            if (expression is BinaryExpression { Operator: BinaryOperator.And } and)
+            {
+                return TryFindIndexEqualityBound(and.Left, table, term, out bound)
+                    || TryFindIndexEqualityBound(and.Right, table, term, out bound);
+            }
+
+            if (expression is not BinaryExpression binary
+                || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.Is))
+            {
+                return false;
+            }
+
+            if (QueryExpressionMatchesIndexTerm(binary.Left, table, term))
+            {
+                bound = binary.Right;
+                return true;
+            }
+
+            if (QueryExpressionMatchesIndexTerm(binary.Right, table, term))
+            {
+                bound = binary.Left;
+                return true;
+            }
+
+            return false;
+        }
 
     private static bool WhereUsesIndexEqualityTerm(
         Expression? expression,

@@ -2207,6 +2207,19 @@ public sealed record FkCheckInstruction(bool Deferred) : VdbeInstruction
 /// exists. <paramref name="IsIndex"/> selects the Idx* opcode names for EXPLAIN parity;
 /// runtime semantics are the same for materialization-backed cursors.
 /// </summary>
+/// <param name="Cursor">Table or index cursor to position.</param>
+/// <param name="Key">Register range holding the seek key values.</param>
+/// <param name="Operator">Comparison operator (GE/GT/LE/LT).</param>
+/// <param name="EqOnly">When true, GE/LE requires an exact key match.</param>
+/// <param name="IsIndex">When true, EXPLAIN reports Idx* opcode names.</param>
+/// <param name="NotFoundTarget">PC jumped to when no qualifying row exists.</param>
+/// <param name="Description">Human-readable EXPLAIN comment.</param>
+/// <param name="KeyColumns">
+/// Optional table-column ordinals for each key register. When null, the key compares
+/// against row columns <c>0..Key.Count-1</c> (index-shaped / leading-key cursors).
+/// When set, length must equal <see cref="Key"/>.Count and each entry is the row
+/// ordinal used for that key part (table-row cursors ordered by a non-leading index).
+/// </param>
 public sealed record SeekKeyInstruction(
     Cursor Cursor,
     RegisterRange Key,
@@ -2214,7 +2227,8 @@ public sealed record SeekKeyInstruction(
     bool EqOnly,
     bool IsIndex,
     ProgramCounter NotFoundTarget,
-    string Description) : VdbeInstruction
+    string Description,
+    IReadOnlyList<int>? KeyColumns = null) : VdbeInstruction
 {
     public override VdbeOpcode Opcode => (IsIndex, Operator) switch
     {
@@ -2966,14 +2980,32 @@ public sealed class VdbeProgram
                             $"VDBE instruction {instructionIndex} SeekKey requires a positive key width.");
                     }
 
-                    if (!Enum.IsDefined(seekKey.Operator))
+                                    if (seekKey.KeyColumns is not null)
                     {
-                        throw new VdbeProgramValidationException(
-                            $"VDBE instruction {instructionIndex} has an undefined SeekKey operator.");
-                    }
+                                        if (seekKey.KeyColumns.Count != seekKey.Key.Count)
+                                        {
+                                            throw new VdbeProgramValidationException(
+                                                $"VDBE instruction {instructionIndex} SeekKey KeyColumns length must match key width.");
+                                        }
 
-                    ValidateJumpTarget(seekKey.NotFoundTarget, instructionIndex);
-                    break;
+                                        for (var i = 0; i < seekKey.KeyColumns.Count; i++)
+                                        {
+                                            if (seekKey.KeyColumns[i] < 0)
+                                            {
+                                                throw new VdbeProgramValidationException(
+                                                    $"VDBE instruction {instructionIndex} SeekKey KeyColumns[{i}] is negative.");
+                                            }
+                                        }
+                                    }
+
+                                    if (!Enum.IsDefined(seekKey.Operator))
+                                    {
+                                        throw new VdbeProgramValidationException(
+                                            $"VDBE instruction {instructionIndex} has an undefined SeekKey operator.");
+                                    }
+
+                                    ValidateJumpTarget(seekKey.NotFoundTarget, instructionIndex);
+                                    break;
                 case IdxRowIdInstruction idxRowId:
                     ValidateOpenCursor(idxRowId.Cursor, openCursors, instructionIndex);
                     ValidateRegister(idxRowId.Destination, instructionIndex);

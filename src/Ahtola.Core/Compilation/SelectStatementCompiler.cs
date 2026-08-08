@@ -258,17 +258,29 @@ internal sealed class SelectStatementCompiler
             return true;
         }
 
-        // Step 3: rowid-range seek. When WHERE is `rowid >|>=|<|<= <int literal>` (or the
-        // swapped form) or `rowid BETWEEN <int literal> AND <int literal>` (non-negated),
-        // emit a SeekRowidRange that lands on the first row whose rowid satisfies the start
-        // predicate, followed by a FilterRowId enforcing the full WHERE over the matching
-        // range, then the projection loop. Bounds must be integer literals (a text literal
-        // '2' coerces via affinity on the scan path, so seeking on it would diverge; a
-        // late-bound parameter is runtime-typed for the same reason). The same Distinct /
-        // GroupBy / Having / OrderBy / Limit / Offset gates as Step 2 apply.
-        if (!statement.Distinct
-            && TryGetRowIdRangeSeekOperand(statement.Where, target, out var startBound, out var startOp, out var endBound, out var endOp))
-        {
+        // Step 2b: index equality SEARCH prefix. When the planner attached IndexSeek
+                // (leading equality on a usable index), emit Load + SeekGE/IdxGE then residual
+                // WHERE Filter + Next — not Rewind over the whole index-ordered cursor.
+                if (!statement.Distinct
+                    && target.IndexSeek is { Bounds.Count: > 0 } indexSeek
+                    && indexSeek.KeyColumns.Count == indexSeek.Bounds.Count
+                    && statement.Where is not null)
+                {
+                    if (TryCompileIndexEqualitySeek(statement, target, indexSeek, projections, out compiled))
+                        return true;
+                }
+
+                // Step 3: rowid-range seek. When WHERE is `rowid >|>=|<|<= <int literal>` (or the
+                // swapped form) or `rowid BETWEEN <int literal> AND <int literal>` (non-negated),
+                // emit a SeekRowidRange that lands on the first row whose rowid satisfies the start
+                // predicate, followed by a FilterRowId enforcing the full WHERE over the matching
+                // range, then the projection loop. Bounds must be integer literals (a text literal
+                // '2' coerces via affinity on the scan path, so seeking on it would diverge; a
+                // late-bound parameter is runtime-typed for the same reason). The same Distinct /
+                // GroupBy / Having / OrderBy / Limit / Offset gates as Step 2 apply.
+                if (!statement.Distinct
+                    && TryGetRowIdRangeSeekOperand(statement.Where, target, out var startBound, out var startOp, out var endBound, out var endOp))
+                {
             var seekCursor = new Cursor(0);
             var seekBody = new List<VdbeInstruction>();
             // OpenRead(0), LoadConstant(start)(1), [LoadConstant(end)(2)], SeekRowidRange,
@@ -528,24 +540,171 @@ internal sealed class SelectStatementCompiler
         return true;
     }
 
-    private ExpressionEmitter CreateEmitter(
-        ScanTarget? target,
-        Cursor? cursor,
-        int outputCount,
-        List<VdbeInstruction> instructions,
-        int programCounterBase)
-        => new(
-            target,
-            cursor,
-            outputCount,
-            instructions,
-            programCounterBase,
-            allowControlFlow: true,
-            _isConstant,
-            _fold,
-            _compileScalarFunction,
-            _numericAffinity,
-            _moduloAffinity,
+    /// <summary>
+        /// SEARCH equality prefix: OpenRead USING INDEX, load bounds, IdxGE/SeekGE, residual
+        /// WHERE Filter, projections, Next. KeyColumns remap seeks onto table-row ordinals when
+        /// the cursor holds full table rows ordered by a non-leading index key.
+        /// </summary>
+        private bool TryCompileIndexEqualitySeek(
+            SelectStatement statement,
+            ScanTarget target,
+            IndexSeekPrefix indexSeek,
+            IReadOnlyList<ProjectionSource> projections,
+            out CompiledSelect compiled)
+        {
+            compiled = null!;
+            var keyWidth = indexSeek.Bounds.Count;
+            if (keyWidth <= 0 || indexSeek.KeyColumns.Count != keyWidth)
+                return false;
+
+            var cursor = new Cursor(0);
+            var keyStartRegister = projections.Count;
+
+            // Key loads + projection body share one emitter so parameter slots stay coherent.
+            // programCounterBase is only needed for projection-internal jumps; key loads are
+            // relocated to the program head, so use the post-seek Filter address as base.
+            // Layout: OpenRead | keyLoads×W | SeekKey | Filter | body… | ResultRow | Next | Close | Halt
+            var filterAddr = 2 + keyWidth;
+            var body = new List<VdbeInstruction>();
+            var emitter = CreateEmitter(
+                target,
+                cursor,
+                projections.Count + keyWidth,
+                body,
+                programCounterBase: filterAddr + 1);
+
+            var keyLoadInstructions = new List<VdbeInstruction>(keyWidth);
+            for (var i = 0; i < keyWidth; i++)
+            {
+                var before = body.Count;
+                if (!emitter.TryEmit(indexSeek.Bounds[i], new Register(keyStartRegister + i)))
+                    return false;
+                var emitted = body.Count - before;
+                if (emitted <= 0)
+                    return false;
+                for (var j = before; j < body.Count; j++)
+                    keyLoadInstructions.Add(body[j]);
+                body.RemoveRange(before, emitted);
+            }
+
+            var predicate = _compilePredicate(statement.Where!, target);
+            VdbeRowIdPredicate? rowIdPredicate = null;
+            if (predicate is null)
+                rowIdPredicate = _compileRowIdPredicate(statement.Where!, target);
+            if (predicate is null && rowIdPredicate is null)
+                return false;
+
+            for (var index = 0; index < projections.Count; index++)
+            {
+                var projection = projections[index];
+                if (projection.ColumnIndex is { } columnIndex)
+                    body.Add(new ColumnInstruction(cursor, columnIndex, new Register(index)));
+                else if (!emitter.TryEmit(projection.Expression!, new Register(index)))
+                    return false;
+            }
+
+            var isIndex = target.IndexName is not null;
+            var keyColumns = indexSeek.KeyColumns as int[] ?? indexSeek.KeyColumns.ToArray();
+            var keyRange = new RegisterRange(new Register(keyStartRegister), keyWidth);
+
+            var instructions = new List<VdbeInstruction>(8 + keyLoadInstructions.Count + body.Count)
+            {
+                new OpenReadCursorInstruction(
+                    cursor,
+                    FormatOpenReadTable(target),
+                    target.Columns.Length),
+            };
+            instructions.AddRange(keyLoadInstructions);
+
+            var seekIndex = instructions.Count;
+            instructions.Add(new SeekKeyInstruction(
+                cursor,
+                keyRange,
+                VdbeKeySeekOperator.GreaterThanOrEqual,
+                EqOnly: false,
+                IsIndex: isIndex,
+                NotFoundTarget: new ProgramCounter(0),
+                Description: "seek",
+                KeyColumns: keyColumns));
+
+            var filterIndex = instructions.Count;
+            if (predicate is not null)
+            {
+                instructions.Add(new FilterInstruction(
+                    cursor,
+                    predicate,
+                    new ProgramCounter(0),
+                    "skip row when WHERE is false"));
+            }
+            else
+            {
+                instructions.Add(new FilterRowIdInstruction(
+                    cursor,
+                    rowIdPredicate!,
+                    new ProgramCounter(0),
+                    "skip row when WHERE is false"));
+            }
+
+            var loopTarget = filterIndex;
+            instructions.AddRange(body);
+            instructions.Add(new ResultRowInstruction(new RegisterRange(new Register(0), projections.Count)));
+            var nextIndex = instructions.Count;
+            instructions.Add(new NextInstruction(cursor, new ProgramCounter(loopTarget)));
+            var closeIndex = instructions.Count;
+            instructions.Add(new CloseCursorInstruction(cursor));
+            instructions.Add(new HaltInstruction());
+
+            instructions[seekIndex] = ((SeekKeyInstruction)instructions[seekIndex]) with
+            {
+                NotFoundTarget = new ProgramCounter(closeIndex),
+                Description =
+                    $"seek {(isIndex ? "idx" : "key")} c[{cursor.Index}] ge r[{keyStartRegister}] width {keyWidth}, goto {closeIndex} if not found",
+            };
+
+            instructions[filterIndex] = instructions[filterIndex] switch
+            {
+                FilterInstruction f => f with
+                {
+                    FalseTarget = new ProgramCounter(nextIndex),
+                    Description = $"skip row when WHERE is false, goto {nextIndex}",
+                },
+                FilterRowIdInstruction f => f with
+                {
+                    FalseTarget = new ProgramCounter(nextIndex),
+                    Description = $"skip row when WHERE is false, goto {nextIndex}",
+                },
+                _ => instructions[filterIndex],
+            };
+
+            compiled = new CompiledSelect(
+                new VdbeProgram(
+                    Math.Max(emitter.RegisterCount, keyStartRegister + keyWidth),
+                    cursorCount: 1,
+                    instructions,
+                    parameterSlotCount: emitter.ParameterIndices.Count),
+                [target.CreateCursorSource()],
+                emitter.ParameterIndices);
+            return true;
+        }
+
+        private ExpressionEmitter CreateEmitter(
+            ScanTarget? target,
+            Cursor? cursor,
+            int outputCount,
+            List<VdbeInstruction> instructions,
+            int programCounterBase)
+            => new(
+                target,
+                cursor,
+                outputCount,
+                instructions,
+                programCounterBase,
+                allowControlFlow: true,
+                _isConstant,
+                _fold,
+                _compileScalarFunction,
+                _numericAffinity,
+                _moduloAffinity,
             _integerAffinity);
 
     internal static bool TryExpandProjections(

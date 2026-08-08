@@ -493,12 +493,17 @@ public sealed class ResumableStatement : IDisposable
                     }
                 case SeekKeyInstruction seekKey:
                     {
-                        if (TrySeekKey(seekKey.Cursor, seekKey.Key, seekKey.Operator, seekKey.EqOnly))
-                            AdvanceInstructionPointer();
-                        else
-                            _instructionPointer = seekKey.NotFoundTarget;
-                        break;
-                    }
+                                        if (TrySeekKey(
+                                                seekKey.Cursor,
+                                                seekKey.Key,
+                                                seekKey.Operator,
+                                                seekKey.EqOnly,
+                                                seekKey.KeyColumns))
+                                            AdvanceInstructionPointer();
+                                        else
+                                            _instructionPointer = seekKey.NotFoundTarget;
+                                        break;
+                                    }
                 case IdxRowIdInstruction idxRowId:
                     {
                         _registers[idxRowId.Destination.Index] = SqlValue.Integer(CurrentCursorRowId(idxRowId.Cursor));
@@ -1901,86 +1906,98 @@ public sealed class ResumableStatement : IDisposable
         Cursor cursor,
         RegisterRange key,
         VdbeKeySeekOperator op,
-        bool eqOnly)
-    {
-        _materializedRows[cursor.Index] = null;
-        var keyValues = ReadRegisters(key);
-        var source = RequireCursorSource(cursor);
-        var rows = source.Rows;
-        var found = -1;
-
-        for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+            bool eqOnly,
+            IReadOnlyList<int>? keyColumns = null)
         {
-            var cmp = CompareKeyPrefix(rows[rowIndex], keyValues);
-            var qualifies = op switch
+            _materializedRows[cursor.Index] = null;
+            var keyValues = ReadRegisters(key);
+            if (keyColumns is not null && keyColumns.Count != keyValues.Length)
             {
-                VdbeKeySeekOperator.GreaterThanOrEqual => cmp >= 0,
-                VdbeKeySeekOperator.GreaterThan => cmp > 0,
-                VdbeKeySeekOperator.LessThanOrEqual => cmp <= 0,
-                VdbeKeySeekOperator.LessThan => cmp < 0,
-                _ => false,
-            };
-            if (!qualifies)
-                continue;
-
-            if (eqOnly
-                && op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.LessThanOrEqual
-                && cmp != 0)
-            {
-                continue;
+                throw new InvalidOperationException(
+                    $"SeekKey key width {keyValues.Length} does not match KeyColumns length {keyColumns.Count}.");
             }
 
-            // GE/GT: first match; LE/LT: last match.
-            if (op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.GreaterThan)
+            var source = RequireCursorSource(cursor);
+            var rows = source.Rows;
+            var found = -1;
+
+            for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
             {
+                var cmp = CompareKeyPrefix(rows[rowIndex], keyValues, keyColumns);
+                var qualifies = op switch
+                {
+                    VdbeKeySeekOperator.GreaterThanOrEqual => cmp >= 0,
+                    VdbeKeySeekOperator.GreaterThan => cmp > 0,
+                    VdbeKeySeekOperator.LessThanOrEqual => cmp <= 0,
+                    VdbeKeySeekOperator.LessThan => cmp < 0,
+                    _ => false,
+                };
+                if (!qualifies)
+                    continue;
+
+                if (eqOnly
+                    && op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.LessThanOrEqual
+                    && cmp != 0)
+                {
+                    continue;
+            }
+
+                // GE/GT: first match; LE/LT: last match.
+                if (op is VdbeKeySeekOperator.GreaterThanOrEqual or VdbeKeySeekOperator.GreaterThan)
+                {
+                    found = rowIndex;
+                    break;
+                }
+
                 found = rowIndex;
-                break;
             }
 
-            found = rowIndex;
-        }
-
-        if (found < 0)
-            return false;
-
-        _cursorPositions[cursor.Index] = found;
-        return true;
-    }
-
-    private static bool RowMatchesKeyPrefix(SqlValue[] row, SqlValue[] key)
-    {
-        if (row.Length < key.Length)
-            return false;
-
-        for (var column = 0; column < key.Length; column++)
-        {
-            if (!row[column].Equals(key[column]))
+            if (found < 0)
                 return false;
+
+            _cursorPositions[cursor.Index] = found;
+            return true;
         }
 
-        return true;
-    }
-
-    /// <summary>
-    /// Lexicographic comparison of row's leading columns against key. Nulls sort
-    /// lowest (SQLite default BINARY). Returns negative if row &lt; key, 0 if equal
-    /// for the key width, positive if row &gt; key.
-    /// </summary>
-    private static int CompareKeyPrefix(SqlValue[] row, SqlValue[] key)
-    {
-        var width = key.Length;
-        for (var column = 0; column < width; column++)
+        private static bool RowMatchesKeyPrefix(SqlValue[] row, SqlValue[] key)
         {
-            if (column >= row.Length)
-                return -1;
+            if (row.Length < key.Length)
+                return false;
 
-            var cmp = CompareSqlValues(row[column], key[column]);
-            if (cmp != 0)
-                return cmp;
+            for (var column = 0; column < key.Length; column++)
+            {
+                if (!row[column].Equals(key[column]))
+                    return false;
+            }
+
+            return true;
         }
 
-        return 0;
-    }
+        /// <summary>
+        /// Lexicographic comparison of selected row columns against key. Nulls sort
+        /// lowest (SQLite default BINARY). Returns negative if row &lt; key, 0 if equal
+        /// for the key width, positive if row &gt; key. When <paramref name="keyColumns"/>
+        /// is null, uses leading columns <c>0..key.Length-1</c>.
+        /// </summary>
+        private static int CompareKeyPrefix(
+            SqlValue[] row,
+            SqlValue[] key,
+            IReadOnlyList<int>? keyColumns = null)
+        {
+            var width = key.Length;
+            for (var column = 0; column < width; column++)
+            {
+                var rowOrdinal = keyColumns is null ? column : keyColumns[column];
+                if (rowOrdinal < 0 || rowOrdinal >= row.Length)
+                    return -1;
+
+                var cmp = CompareSqlValues(row[rowOrdinal], key[column]);
+                if (cmp != 0)
+                    return cmp;
+            }
+
+            return 0;
+        }
 
     private static int CompareSqlValues(SqlValue left, SqlValue right)
     {

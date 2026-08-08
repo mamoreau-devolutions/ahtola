@@ -19,6 +19,10 @@ namespace Ahtola.Core.Compilation;
 /// <param name="IndexName">The selected logical index, when the rows are in index order.</param>
 /// <param name="ColumnDefinitions">The immutable column metadata aligned with <paramref name="Columns"/>.</param>
 /// <param name="QualifiedColumnDefinitions">Column metadata keyed by qualified SQL name.</param>
+/// <param name="IndexSeek">
+/// Optional equality prefix for SEARCH plans: emit SeekGE/IdxGE on these table-column
+/// ordinals instead of Rewind, then residual WHERE Filter.
+/// </param>
 internal sealed record ScanTarget(
     string TableName,
     string Qualifier,
@@ -28,7 +32,8 @@ internal sealed record ScanTarget(
     IReadOnlyList<long>? RowIds = null,
     string? IndexName = null,
     IReadOnlyList<EmbeddedColumn?>? ColumnDefinitions = null,
-    IReadOnlyDictionary<string, EmbeddedColumn>? QualifiedColumnDefinitions = null)
+    IReadOnlyDictionary<string, EmbeddedColumn>? QualifiedColumnDefinitions = null,
+    IndexSeekPrefix? IndexSeek = null)
 {
     public bool HasRowId => RowIds is not null;
 
@@ -65,3 +70,12 @@ internal sealed record CompiledSelect(
     VdbeProgram Program,
     IReadOnlyList<VdbeCursorSource> CursorSources,
     IReadOnlyList<int>? ParameterIndices = null);
+
+/// <summary>
+/// Equality prefix for a managed index SEARCH: table-column ordinals aligned with
+/// literal/parameter bounds, consumed by <see cref="SelectStatementCompiler"/> to emit
+/// <c>SeekGE</c>/<c>IdxGE</c> before the residual WHERE filter.
+/// </summary>
+internal sealed record IndexSeekPrefix(
+    IReadOnlyList<int> KeyColumns,
+    IReadOnlyList<Expression> Bounds);
