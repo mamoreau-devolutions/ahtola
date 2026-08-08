@@ -1392,7 +1392,8 @@ public sealed class SqlitePager : IDisposable
     private SqliteCheckpointResult CheckpointWithWalIndexProtocol(
         TimeSpan timeout,
         bool resetCommittedWal,
-        bool writerLockAlreadyHeld)
+        bool writerLockAlreadyHeld,
+        bool checkpointLockAlreadyHeld = false)
     {
         const long writeLockOffset = SqliteWalIndexCheckpointInfo.LockOffset;
         const long checkpointLockOffset = SqliteWalIndexCheckpointInfo.LockOffset + 1;
@@ -1408,11 +1409,15 @@ public sealed class SqlitePager : IDisposable
 
         try
         {
-            using var checkpointLease = locks.AcquireExclusive(checkpointLockOffset, length: 1, timeout);
+            // Exclusive rewrite holds lock-manager Checkpoint over SHM bytes [120,128).
+            // Re-locking ckpt/write through a second handle deadlocks on Windows.
+            using var checkpointLease = checkpointLockAlreadyHeld
+                ? null
+                : locks.AcquireExclusive(checkpointLockOffset, length: 1, timeout);
             SqliteWalByteRangeLockLease? writerLease = null;
             try
             {
-                if (resetCommittedWal && !writerLockAlreadyHeld)
+                if (resetCommittedWal && !writerLockAlreadyHeld && !checkpointLockAlreadyHeld)
                 {
                     writerLease = locks.AcquireExclusive(
                         writeLockOffset,
@@ -1449,37 +1454,42 @@ public sealed class SqlitePager : IDisposable
                             var region = _walIndex.ReadValidatedHeader(_wal);
                             readMarkLeases = [];
                             var safeFrame = region.Header.MaximumFrame;
+                            // Lock-manager Checkpoint already owns SHM [120,128), including
+                            // every read-mark byte — do not re-lock them on a second handle.
                             var allExclusive = true;
-                            for (var markIndex = 0; markIndex < SqliteWalIndexCheckpointInfo.ReadMarkCount; markIndex++)
+                            if (!checkpointLockAlreadyHeld)
                             {
-                                if (locks.TryAcquireExclusive(
-                                        firstReadMarkLockOffset + markIndex,
-                                        length: 1,
-                                        out var markLease))
+                                for (var markIndex = 0; markIndex < SqliteWalIndexCheckpointInfo.ReadMarkCount; markIndex++)
                                 {
-                                    readMarkLeases.Add(
-                                        markLease
-                                        ?? throw new InvalidOperationException(
-                                            "SQLite read-mark locking reported success without a lease."));
-                                    continue;
-                                }
+                                    if (locks.TryAcquireExclusive(
+                                            firstReadMarkLockOffset + markIndex,
+                                            length: 1,
+                                            out var markLease))
+                                    {
+                                        readMarkLeases.Add(
+                                            markLease
+                                            ?? throw new InvalidOperationException(
+                                                "SQLite read-mark locking reported success without a lease."));
+                                        continue;
+                                    }
 
-                                allExclusive = false;
-                                var readMark = region.CheckpointInfo.GetReadMark(markIndex);
-                                if (markIndex == 0 || readMark == 0)
-                                {
-                                    safeFrame = Math.Min(safeFrame, region.CheckpointInfo.BackfilledFrameCount);
-                                    continue;
-                                }
+                                    allExclusive = false;
+                                    var readMark = region.CheckpointInfo.GetReadMark(markIndex);
+                                    if (markIndex == 0 || readMark == 0)
+                                    {
+                                        safeFrame = Math.Min(safeFrame, region.CheckpointInfo.BackfilledFrameCount);
+                                        continue;
+                                    }
 
-                                // Match SQLite: a held unused mark does not lower mxSafeFrame.
-                                if (readMark == SqliteWalIndexCheckpointInfo.ReadMarkNotUsed
-                                    || readMark > region.Header.MaximumFrame)
-                                {
-                                    continue;
-                                }
+                                    // Match SQLite: a held unused mark does not lower mxSafeFrame.
+                                    if (readMark == SqliteWalIndexCheckpointInfo.ReadMarkNotUsed
+                                        || readMark > region.Header.MaximumFrame)
+                                    {
+                                        continue;
+                                    }
 
-                                safeFrame = Math.Min(safeFrame, readMark);
+                                    safeFrame = Math.Min(safeFrame, readMark);
+                                }
                             }
 
                             if (resetCommittedWal && !allExclusive)
@@ -1829,10 +1839,13 @@ public sealed class SqlitePager : IDisposable
                 {
                     if (UsesWalIndexCheckpointProtocol())
                     {
+                        // BeginExclusiveRewriteTransaction holds lock-manager Checkpoint
+                        // (SHM [120,128)); do not re-acquire those bytes via wal-index locks.
                         _ = CheckpointWithWalIndexProtocol(
                             TimeSpan.Zero,
                             resetCommittedWal: true,
-                            writerLockAlreadyHeld: true);
+                            writerLockAlreadyHeld: true,
+                            checkpointLockAlreadyHeld: true);
                     }
                     else
                     {

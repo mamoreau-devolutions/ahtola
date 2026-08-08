@@ -2817,13 +2817,16 @@ public sealed partial class EmbeddedDatabase : IDisposable
         catch (InvalidOperationException exception) when (
             !foreignReadOnly
             && fileSystem is not AhtolaEncryptionFileSystem
-            && exception.InnerException is FileNotFoundException)
+            && (exception.InnerException is FileNotFoundException
+                || exception.Message.Contains("WAL lock file is missing", StringComparison.Ordinal)))
         {
             // Stock SQLite removes the -shm lock carrier on the last clean close,
             // and the owned read-only probe refuses to recreate it by contract.
             // The probe only needs a self-contained durable snapshot, which the
             // process-local foreign pager reads without ever touching the carrier.
             // Encrypted pagers cannot open foreign, so they keep the original error.
+            // Missing-carrier throws InvalidOperationException directly (no inner
+            // FileNotFoundException) — match that message too for pooled reopen.
             return ReadFileCatalogVersionCore(fileSystem, path, foreignReadOnly: true);
         }
     }

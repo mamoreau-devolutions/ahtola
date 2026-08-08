@@ -158,6 +158,13 @@ public sealed class SqliteIncrementalTableBtree
                     if (childIndex < 0 || childIndex >= parentLinks.Count)
                         return;
 
+                    // Merging away a child from a 2-child non-root parent would leave a
+                    // single-child interior; promoting that survivor under a grandparent that
+                    // still has interior siblings breaks tree height (leaf next to interior).
+                    // Defer to the bounded full-leaf rewrite path instead.
+                    if (parentLinks.Count <= 2 && path.Count > 2)
+                        return;
+
                     // Prefer merging into the left sibling (keeps lower page numbers live).
                     if (childIndex > 0
                         && ParseHeaderType(parentLinks[childIndex - 1].PageNumber) == SqliteBtreePageType.TableLeaf)
@@ -320,15 +327,8 @@ public sealed class SqliteIncrementalTableBtree
                 return;
             }
 
-            var parentEntry = path[level - 1];
-            var parentLinks = ReadChildLinks(ParseInterior(parentEntry.PageNumber));
-            parentLinks[parentEntry.ChildIndex] = parentLinks[parentEntry.ChildIndex] with
-            {
-                PageNumber = soleChild,
-            };
-            WriteSinglePage(parentEntry.PageNumber, BuildInteriorImage(parentEntry.PageNumber, parentLinks));
-            _io.FreePage(entry.PageNumber);
-            return;
+            throw new SqliteBtreeMaintenanceRequiredException(
+                $"SQLite table-interior page {entry.PageNumber} would collapse to a single child under a non-root parent; interior rebalance is required.");
         }
 
         WriteSinglePage(entry.PageNumber, BuildInteriorImage(entry.PageNumber, links));
@@ -378,17 +378,8 @@ public sealed class SqliteIncrementalTableBtree
                 return;
             }
 
-            // Interior with one remaining child is illegal on disk; retarget the
-                        // grandparent pointer at the sole survivor, then free the interior.
-                        var parentEntry = path[level - 1];
-                        var parentLinks = ReadChildLinks(ParseInterior(parentEntry.PageNumber));
-                        parentLinks[parentEntry.ChildIndex] = parentLinks[parentEntry.ChildIndex] with
-                        {
-                            PageNumber = soleChild,
-                        };
-                        WriteSinglePage(parentEntry.PageNumber, BuildInteriorImage(parentEntry.PageNumber, parentLinks));
-                        _io.FreePage(entry.PageNumber);
-            return;
+            throw new SqliteBtreeMaintenanceRequiredException(
+                $"SQLite table-interior page {entry.PageNumber} would collapse to a single child under a non-root parent; interior rebalance is required.");
         }
 
         WriteSinglePage(entry.PageNumber, BuildInteriorImage(entry.PageNumber, links));

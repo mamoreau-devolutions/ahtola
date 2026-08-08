@@ -55,7 +55,7 @@ public sealed class AggregateIntegratedFeatureTests
                     "EXPLAIN QUERY PLAN SELECT group_concat(group_name || '!') "
                         + "FROM metrics WHERE amount > 0;")[0][3]
                 .AsText()
-                .Should().Contain("USING INDEX metrics_amount_partial");
+                .Should().MatchRegex("USING (COVERING )?INDEX metrics_amount_partial");
             ReadRows(
                     connection,
                     "EXPLAIN SELECT group_concat(group_name || '!') "
@@ -242,9 +242,10 @@ public sealed class AggregateIntegratedFeatureTests
             .Should().Equal(10, 17, 22);
         aggregateCalls.Should().Equal(10, 10, 7, 10, 7, 5);
         Assert.Throws<EmbeddedSqlException>(() => ReadRows(connection, "EXPLAIN " + window));
+        // Covering and non-covering plans both count as using the partial index.
         ReadRows(connection, "EXPLAIN QUERY PLAN " + window)[0][3]
             .AsText()
-            .Should().Contain("USING INDEX values_amount_partial");
+            .Should().MatchRegex("USING (COVERING )?INDEX values_amount_partial");
 
         aggregateCalls.Clear();
         const string namedWindow =
