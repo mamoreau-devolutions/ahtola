@@ -11,7 +11,6 @@ public sealed class ManagedPragmaRuntimeSliceTests
     {
         using var database = new EmbeddedDatabase();
         using var connection = database.Connect();
-
         ColumnNames(connection, "PRAGMA database_list;").Should().Equal("seq", "name", "file");
         var databases = ReadRows(connection, "PRAGMA database_list;");
         databases.Should().HaveCount(1);
@@ -267,6 +266,50 @@ public sealed class ManagedPragmaRuntimeSliceTests
     }
 
     [Test]
+    public void PagerMetadataPragmasAreScopedPerAttachedDatabase()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using var database = EmbeddedDatabase.OpenFile("pragma-state-main.db", fileSystem);
+        using var connection = database.Connect();
+        Execute(connection, "ATTACH 'pragma-state-aux.db' AS aux;");
+
+        Execute(connection, "PRAGMA main.cache_size=400;");
+        Execute(connection, "PRAGMA aux.cache_size=800;");
+        Execute(connection, "PRAGMA main.cache_spill=OFF;");
+        Execute(connection, "PRAGMA aux.cache_spill=ON;");
+        Execute(connection, "PRAGMA main.synchronous=OFF;");
+        Execute(connection, "PRAGMA aux.synchronous=EXTRA;");
+        ReadValue(connection, "PRAGMA main.locking_mode=NORMAL;").Should().Be(SqlValue.Text("normal"));
+        ReadValue(connection, "PRAGMA aux.locking_mode=EXCLUSIVE;").Should().Be(SqlValue.Text("exclusive"));
+
+        ReadValue(connection, "PRAGMA main.cache_size;").Should().Be(SqlValue.Integer(400));
+        ReadValue(connection, "PRAGMA aux.cache_size;").Should().Be(SqlValue.Integer(800));
+        ReadValue(connection, "PRAGMA main.cache_spill;").Should().Be(SqlValue.Integer(0));
+        ReadValue(connection, "PRAGMA aux.cache_spill;").Should().Be(SqlValue.Integer(1));
+        ReadValue(connection, "PRAGMA main.synchronous;").Should().Be(SqlValue.Integer(0));
+        ReadValue(connection, "PRAGMA aux.synchronous;").Should().Be(SqlValue.Integer(3));
+        ReadValue(connection, "PRAGMA main.locking_mode;").Should().Be(SqlValue.Text("normal"));
+        ReadValue(connection, "PRAGMA aux.locking_mode;").Should().Be(SqlValue.Text("exclusive"));
+    }
+
+    [Test]
+    public void PoolResetRestoresConnectionPragmaDefaultsAndDatabaseBusyTimeout()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "PRAGMA cache_size=777;");
+        Execute(connection, "PRAGMA cache_spill=OFF;");
+        Execute(connection, "PRAGMA busy_timeout=5000;");
+
+        connection.ResetForPooling();
+
+        ReadValue(connection, "PRAGMA cache_size;").Should().Be(SqlValue.Integer(-2000));
+        ReadValue(connection, "PRAGMA cache_spill;").Should().Be(SqlValue.Integer(1));
+        ReadValue(connection, "PRAGMA busy_timeout;").Should().Be(SqlValue.Integer(0));
+        database.BusyTimeout.Should().Be(TimeSpan.Zero);
+    }
+
+    [Test]
     public void FileBackedHeaderPragmaWritesAreDurableTransactionalAndSchemaScoped()
     {
         var fileSystem = new InMemoryFileSystem();
@@ -324,14 +367,62 @@ public sealed class ManagedPragmaRuntimeSliceTests
     }
 
     [Test]
-    public void UnsupportedPragmasAreRejectedByTheManagedParser()
+    public void IntrospectionAndUnknownPragmasFollowTursoAndSqliteBehavior()
     {
         using var database = new EmbeddedDatabase();
         using var connection = database.Connect();
+        connection.RegisterScalarFunction("managed_scalar", 2, values => values[0]);
+        connection.RegisterAggregateFunction(
+            "managed_aggregate",
+            1,
+            SqlValue.Integer(0),
+            (state, _) => SqlValue.Integer(state.AsInteger() + 1),
+            state => state);
 
-        var unsupported = () => connection.Prepare("PRAGMA function_list;");
-        unsupported.Should().Throw<EmbeddedSqlException>()
-            .WithMessage("Unsupported PRAGMA function_list. At SQL offset *");
+        ColumnNames(connection, "PRAGMA function_list;")
+            .Should().Equal("name", "builtin", "type", "enc", "narg", "flags");
+        var functions = ReadRows(connection, "PRAGMA function_list;");
+        functions.Should().Contain(row =>
+            row[0] == SqlValue.Text("abs")
+            && row[1] == SqlValue.Integer(1)
+            && row[2] == SqlValue.Text("s")
+            && row[3] == SqlValue.Text("utf8")
+            && row[4] == SqlValue.Integer(1)
+            && row[5] == SqlValue.Integer(0x200800));
+        functions.Should().Contain(row =>
+            row[0] == SqlValue.Text("count")
+            && row[2] == SqlValue.Text("w")
+            && row[4] == SqlValue.Integer(0)
+            && row[5] == SqlValue.Integer(0x200000));
+        functions.Should().Contain(row =>
+            row[0] == SqlValue.Text("count")
+            && row[2] == SqlValue.Text("w")
+            && row[4] == SqlValue.Integer(1)
+            && row[5] == SqlValue.Integer(0x200000));
+        functions.Should().Contain(row =>
+            row[0] == SqlValue.Text("round")
+            && row[4] == SqlValue.Integer(2));
+        functions.Should().Contain(row =>
+            row[0] == SqlValue.Text("min")
+            && row[2] == SqlValue.Text("s")
+            && row[4] == SqlValue.Integer(-1));
+        functions.Should().Contain(row =>
+            row[0] == SqlValue.Text("min")
+            && row[2] == SqlValue.Text("w")
+            && row[4] == SqlValue.Integer(1));
+        functions.Should().Contain(row =>
+            row[0] == SqlValue.Text("managed_scalar")
+            && row[1] == SqlValue.Integer(0)
+            && row[2] == SqlValue.Text("s")
+            && row[4] == SqlValue.Integer(2));
+        functions.Should().Contain(row =>
+            row[0] == SqlValue.Text("managed_aggregate")
+            && row[1] == SqlValue.Integer(0)
+            && row[2] == SqlValue.Text("a")
+            && row[4] == SqlValue.Integer(1));
+        ColumnNames(connection, "PRAGMA module_list;").Should().Equal("name");
+        ReadRows(connection, "PRAGMA module_list;")
+            .Should().Contain(row => row[0] == SqlValue.Text("generate_series"));
 
         // Unrecognized pragmas follow SQLite's silent no-op behavior.
         Execute(connection, "PRAGMA automatic_index;");
@@ -348,6 +439,33 @@ public sealed class ManagedPragmaRuntimeSliceTests
 
         ReadValue(connection, "PRAGMA temp.journal_mode;").Should().Be(SqlValue.Text("wal"));
         ReadValue(connection, "PRAGMA temp.journal_mode = MVCC;").Should().Be(SqlValue.Text("wal"));
+    }
+
+    [Test]
+    public void ConnectionMetadataPragmasRoundTrip()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        Execute(connection, "PRAGMA synchronous = OFF;");
+        ReadValue(connection, "PRAGMA synchronous;").Should().Be(SqlValue.Integer(0));
+        Execute(connection, "PRAGMA synchronous = NORMAL;");
+        ReadValue(connection, "PRAGMA synchronous;").Should().Be(SqlValue.Integer(1));
+        Execute(connection, "PRAGMA synchronous = FULL;");
+        ReadValue(connection, "PRAGMA synchronous;").Should().Be(SqlValue.Integer(2));
+
+        ReadValue(connection, "PRAGMA locking_mode = EXCLUSIVE;")
+            .Should().Be(SqlValue.Text("exclusive"));
+        ReadValue(connection, "PRAGMA locking_mode;").Should().Be(SqlValue.Text("exclusive"));
+        ReadValue(connection, "PRAGMA locking_mode = NORMAL;").Should().Be(SqlValue.Text("normal"));
+
+        ReadValue(connection, "PRAGMA auto_vacuum;").Should().Be(SqlValue.Integer(0));
+        Execute(connection, "PRAGMA auto_vacuum = NONE;");
+
+        Execute(connection, "PRAGMA data_sync_retry = ON;");
+        ReadValue(connection, "PRAGMA data_sync_retry;").Should().Be(SqlValue.Integer(1));
+        Execute(connection, "PRAGMA data_sync_retry = OFF;");
+        ReadValue(connection, "PRAGMA data_sync_retry;").Should().Be(SqlValue.Integer(0));
         ReadValue(connection, "PRAGMA temp.journal_mode;").Should().Be(SqlValue.Text("wal"));
         using var unknownSchema = connection.Prepare("PRAGMA missing.page_count;");
         Assert.Throws<EmbeddedSqlException>(() => unknownSchema.Step())!

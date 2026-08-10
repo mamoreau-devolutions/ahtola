@@ -25,7 +25,7 @@ public sealed class ManagedBoundedLeafInPlaceMutationDurabilityTests
             var writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(connection, "UPDATE target SET value = 'after' WHERE id = 48;");
 
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(4);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(5);
         }
 
         using (var pager = SqlitePager.Open(fileSystem, path, path + "-wal", readOnly: true))

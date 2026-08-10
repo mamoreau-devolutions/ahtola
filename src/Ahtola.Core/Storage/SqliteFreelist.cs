@@ -83,11 +83,13 @@ public sealed class SqliteFreelist
             return new SqliteFreelist(0, [], [], []);
 
         var freePages = new List<uint>();
+        var pendingBytePage = SqlitePageLimits.PendingBytePage(pageSize);
         for (var pageNumber = checked(usedPageCount + 1);
              pageNumber <= targetPageCount;
              pageNumber++)
         {
-            freePages.Add(pageNumber);
+            if (pageNumber != pendingBytePage)
+                freePages.Add(pageNumber);
             if (pageNumber == uint.MaxValue)
                 break;
         }
@@ -117,9 +119,17 @@ public sealed class SqliteFreelist
         ValidatePageLayout(pageSize, usableSpace);
 
         var freePages = new HashSet<uint>();
+        var pendingBytePage = SqlitePageLimits.PendingBytePage(pageSize);
         foreach (var pageNumber in freePageNumbers)
         {
             ValidateFreePageNumber(pageNumber, databasePageCount, "supplied");
+            if (pageNumber == pendingBytePage)
+            {
+                throw new ArgumentException(
+                    $"SQLite freelist page {pageNumber} is the unusable pending-byte page and can never be freed.",
+                    nameof(freePageNumbers));
+            }
+
             if (!freePages.Add(pageNumber))
                 throw new ArgumentException($"SQLite freelist page {pageNumber} was supplied more than once.", nameof(freePageNumbers));
         }

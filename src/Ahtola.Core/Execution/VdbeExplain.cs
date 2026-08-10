@@ -456,6 +456,12 @@ public static class VdbeExplain
                 guarded.Destination is RowSetDestination destination ? destination.RowSetIndex : -1,
                 FormatGuards(guarded.Guards),
                 $"{FormatDestination(guarded.Destination, guarded.Values)} if {FormatGuards(guarded.Guards)}"),
+            RowGateInstruction rowGate => (
+                rowGate.Values.Start.Index,
+                rowGate.RejectTarget.Offset,
+                rowGate.Values.Count,
+                FormatGuards(rowGate.Guards),
+                $"goto {rowGate.RejectTarget.Offset} unless {FormatRange(rowGate.Values)} {FormatGuards(rowGate.Guards)}"),
             OffsetGateInstruction offsetGate => (
                 offsetGate.Counter.Index,
                 offsetGate.SkipTarget.Offset,

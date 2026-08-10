@@ -41,11 +41,15 @@ public class SqliteWalStorageTests
         Assert.Throws<ArgumentOutOfRangeException>(() => SqliteWalHeader.Create(513, salt1: 1, salt2: 2));
 
         var maximumSizeHeader = SqliteWalHeader.Create(SqlitePageSize.Maximum, salt1: 1, salt2: 2).ToArray();
-        maximumSizeHeader.AsSpan(8, 4).ToArray().Should().Equal(0, 0, 0, 0);
+        maximumSizeHeader.AsSpan(8, 4).ToArray().Should().Equal(0, 1, 0, 0);
         SqliteWalHeader.Parse(maximumSizeHeader).PageSize.Should().Be(SqlitePageSize.Maximum);
 
         var malformedHeader = CreateHeader().ToArray();
         BinaryPrimitives.WriteUInt32BigEndian(malformedHeader.AsSpan(8, 4), 513);
+        RewriteHeaderChecksum(malformedHeader);
+        Assert.Throws<InvalidDataException>(() => SqliteWalHeader.Parse(malformedHeader));
+
+        BinaryPrimitives.WriteUInt32BigEndian(malformedHeader.AsSpan(8, 4), 0);
         RewriteHeaderChecksum(malformedHeader);
         Assert.Throws<InvalidDataException>(() => SqliteWalHeader.Parse(malformedHeader));
 

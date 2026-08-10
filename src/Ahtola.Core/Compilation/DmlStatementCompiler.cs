@@ -442,7 +442,7 @@ public static class DmlStatementCompiler
 
         instructions.Add(new OpenReadCursorInstruction(returningCursor, tableName, columnCount));
         instructions.Add(new RewindCursorInstruction(returningCursor, new ProgramCounter(commitAddr)));
-        instructions.AddRange(returning.Instructions);
+        instructions.AddRange(RelocateReturningBlock(returning.Instructions, returningLoopStart));
         instructions.Add(new ResultRowInstruction(
             new RegisterRange(new Register(0), returning.OutputCount)));
         instructions.Add(new NextInstruction(returningCursor, new ProgramCounter(returningLoopStart)));
@@ -457,6 +457,35 @@ public static class DmlStatementCompiler
             cursorCount: 2,
             instructions,
             parameterSlotCount: returning.ParameterIndices.Count);
+    }
+
+    // The RETURNING projection block is lowered standalone with a zero program-counter base, because the
+    // compiler that emits it cannot know where the two-phase loop will splice it. Control-flow lowering
+    // (searched/simple CASE, short-circuiting AND/OR, IN/NOT IN lists) emits absolute jump targets, so the
+    // block is relocated by its splice offset here. Every target the expression emitter produces is inside
+    // the block or one past its end (the shared ResultRow), so a uniform shift is exact.
+    private static IReadOnlyList<VdbeInstruction> RelocateReturningBlock(
+        IReadOnlyList<VdbeInstruction> instructions,
+        int offset)
+    {
+        if (offset == 0)
+            return instructions;
+
+        var relocated = new List<VdbeInstruction>(instructions.Count);
+        foreach (var instruction in instructions)
+        {
+            relocated.Add(instruction switch
+            {
+                GotoInstruction x => new GotoInstruction(Shift(x.Target)),
+                JumpIfInstruction x => new JumpIfInstruction(x.Register, Shift(x.Target)),
+                JumpIfNotTrueInstruction x => new JumpIfNotTrueInstruction(x.Value, Shift(x.FalseTarget)),
+                _ => instruction,
+            });
+        }
+
+        return relocated;
+
+        ProgramCounter Shift(ProgramCounter counter) => new(counter.Offset + offset);
     }
 
     private static void AppendForeignKeyChecks(List<VdbeInstruction> instructions, DmlCompileOptions options)

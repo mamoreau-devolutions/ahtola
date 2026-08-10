@@ -528,25 +528,56 @@ public sealed partial class EmbeddedDatabase
 
         var text = ToSqlText(arguments[0]);
         var ignored = arguments.Count == 2 ? ToSqlText(arguments[1]) : string.Empty;
-        if (ignored.Length > 0)
-            text = text.Trim(ignored.ToCharArray());
-
-        if ((text.Length & 1) != 0)
-            return SqlValue.Null;
-
-        var bytes = new byte[text.Length / 2];
-        for (var index = 0; index < bytes.Length; index++)
+        if (ignored.Length == 0)
         {
-            var high = ParseHexDigit(text[index * 2]);
-            var low = ParseHexDigit(text[(index * 2) + 1]);
-            if (high < 0 || low < 0)
+            if ((text.Length & 1) != 0)
                 return SqlValue.Null;
 
-            bytes[index] = (byte)((high << 4) | low);
+            var strict = new byte[text.Length / 2];
+            for (var index = 0; index < strict.Length; index++)
+            {
+                var high = ParseHexDigit(text[index * 2]);
+                var low = ParseHexDigit(text[(index * 2) + 1]);
+                if (high < 0 || low < 0)
+                    return SqlValue.Null;
+
+                strict[index] = (byte)((high << 4) | low);
+            }
+
+            return SqlValue.Blob(strict);
         }
 
-        return SqlValue.Blob(bytes);
+        // Separator characters are ignored anywhere in the stream, not only at the ends. A
+        // character listed as a separator that is also a hex digit keeps its digit meaning.
+        var bytes = new List<byte>(text.Length / 2);
+        var position = 0;
+        while (true)
+        {
+            while (position < text.Length && IsUnhexSeparator(text[position], ignored))
+                position++;
+
+            if (position >= text.Length)
+                return SqlValue.Blob(bytes.ToArray());
+
+            var high = ParseHexDigit(text[position]);
+            if (high < 0)
+                return SqlValue.Null;
+            position++;
+
+            if (position >= text.Length)
+                return SqlValue.Null;
+
+            var low = ParseHexDigit(text[position]);
+            if (low < 0)
+                return SqlValue.Null;
+            position++;
+
+            bytes.Add((byte)((high << 4) | low));
+        }
     }
+
+    private static bool IsUnhexSeparator(char character, string separators)
+        => separators.IndexOf(character) >= 0 && ParseHexDigit(character) < 0;
 
     private static int ParseHexDigit(char character)
         => character switch

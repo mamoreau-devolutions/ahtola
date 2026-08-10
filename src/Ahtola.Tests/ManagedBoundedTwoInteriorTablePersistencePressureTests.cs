@@ -179,7 +179,7 @@ public sealed class ManagedBoundedTwoInteriorTablePersistencePressureTests
         {
             var writesBeforeDelete = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(connection, $"DELETE FROM t WHERE id = {target.DeletedRowId};");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBeforeDelete).Should().Be(6);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBeforeDelete).Should().Be(7);
         }
 
         AssertNestedLeafDeletion(
@@ -665,7 +665,7 @@ public sealed class ManagedBoundedTwoInteriorTablePersistencePressureTests
         ReplaceWalWithEmptyFile(fileSystem, path, header, salt1: 97, salt2: 101);
         var writesBeforeReopen = faults.GetOperationCount(FileSystemOperation.Write);
         var reopen = () => EmbeddedDatabase.OpenFile(path, fileSystem);
-        reopen.Should().Throw<EmbeddedSqlException>().WithMessage("*separator*");
+        reopen.Should().Throw<InvalidDataException>().WithMessage("*untracked trailing free gap*");
         faults.GetOperationCount(FileSystemOperation.Write).Should().Be(writesBeforeReopen);
     }
 

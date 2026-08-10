@@ -28,9 +28,9 @@ public sealed class ManagedIndexedBoundedLeafFastPathInvariantTests
 
             // Three pages change - the table leaf, the target_code leaf and the
             // header page - and each is written once as a WAL frame and once by
-            // the checkpoint. target_value is not written because the indexed
-            // column did not change.
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(6);
+            // the checkpoint. The WAL restart writes its next-generation header.
+            // target_value is not written because the indexed column did not change.
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(7);
 
             writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             var duplicate = () => Execute(connection, "INSERT INTO target VALUES (99, 'code-002', 'duplicate');");
@@ -39,11 +39,11 @@ public sealed class ManagedIndexedBoundedLeafFastPathInvariantTests
 
             writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(connection, "DELETE FROM target WHERE id = 3;");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(8);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(9);
 
             writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(connection, "INSERT INTO target VALUES (30, 'code-030', 'inserted');");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(8);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(9);
         }
 
         using (var pager = SqlitePager.Open(fileSystem, path, path + "-wal", readOnly: true))

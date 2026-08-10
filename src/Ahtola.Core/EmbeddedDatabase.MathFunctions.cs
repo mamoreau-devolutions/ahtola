@@ -7,6 +7,7 @@ public sealed partial class EmbeddedDatabase
     // Reported by sqlite_version()/sqlite_source_id() for applications that gate on
     // a SQLite version. Kept in sync with the Rust core (core/vdbe/execute.rs).
     public const string SqliteCompatibilityVersion = "3.50.4";
+    public const string TursoCompatibilityVersion = "0.7.2";
     internal const string SqliteCompatibilitySourceId =
         "0000-00-00 00:00:00 0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -336,6 +337,12 @@ public sealed partial class EmbeddedDatabase
     {
         RequireArgumentCount("sqlite_version", arguments, 0);
         return SqlValue.Text(SqliteCompatibilityVersion);
+    }
+
+    private static SqlValue EvaluateTursoVersion(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("turso_version", arguments, 0);
+        return SqlValue.Text(TursoCompatibilityVersion);
     }
 
     private static SqlValue EvaluateSqliteSourceId(IReadOnlyList<SqlValue> arguments)

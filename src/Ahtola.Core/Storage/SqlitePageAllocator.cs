@@ -61,33 +61,68 @@ public sealed class SqliteAppendOnlyPageAllocator : ISqlitePageAllocator
 
     /// <summary>Creates an allocator beginning one page after the store's current end.</summary>
     public SqliteAppendOnlyPageAllocator(SqlitePageStore pageStore)
+        : this(RequirePageStore(pageStore).PageCount, pageStore.PageSize)
     {
-        ArgumentNullException.ThrowIfNull(pageStore);
-        SourceDatabaseSizeInPages = pageStore.PageCount;
-        _nextPageNumber = SourceDatabaseSizeInPages == uint.MaxValue
-            ? 0
-            : SourceDatabaseSizeInPages + 1;
     }
 
     /// <summary>
     /// Creates an allocator beginning one page after a committed pager view.
     /// </summary>
-    public SqliteAppendOnlyPageAllocator(uint sourceDatabaseSizeInPages)
+    /// <param name="sourceDatabaseSizeInPages">The committed page count.</param>
+    /// <param name="pageSize">
+    /// The database page size, used to locate the unusable pending-byte page.
+    /// </param>
+    /// <param name="maximumPageCount">
+    /// The growth ceiling; clamped to at least <paramref name="sourceDatabaseSizeInPages"/>
+    /// and at most <see cref="SqlitePageLimits.AbsoluteMaximumPageCount"/>.
+    /// </param>
+    public SqliteAppendOnlyPageAllocator(
+        uint sourceDatabaseSizeInPages,
+        int pageSize = SqlitePageSize.Default,
+        uint maximumPageCount = SqlitePageLimits.DefaultMaximumPageCount)
     {
         if (sourceDatabaseSizeInPages == 0)
             throw new ArgumentOutOfRangeException(nameof(sourceDatabaseSizeInPages));
 
+        SqlitePageSize.Validate(pageSize);
+
+        PageSize = pageSize;
+        PendingBytePageNumber = SqlitePageLimits.PendingBytePage(pageSize);
+        MaximumPageCount = SqlitePageLimits.ClampMaximumPageCount(
+            maximumPageCount,
+            sourceDatabaseSizeInPages);
         SourceDatabaseSizeInPages = sourceDatabaseSizeInPages;
-        _nextPageNumber = SourceDatabaseSizeInPages == uint.MaxValue
-            ? 0
-            : SourceDatabaseSizeInPages + 1;
+        _nextPageNumber = Advance(sourceDatabaseSizeInPages);
     }
 
     /// <summary>The page count observed when this allocator was created.</summary>
     public uint SourceDatabaseSizeInPages { get; }
 
+    /// <summary>The page size used to locate the unusable pending-byte page.</summary>
+    public int PageSize { get; }
+
+    /// <summary>The 1-based page number that contains the SQLite pending byte.</summary>
+    public uint PendingBytePageNumber { get; }
+
+    /// <summary>The clamped growth ceiling enforced by <see cref="Allocate"/>.</summary>
+    public uint MaximumPageCount { get; }
+
     /// <summary>The next append-only page number, or zero once the range is exhausted.</summary>
     public uint NextPageNumber => _nextPageNumber;
+
+    /// <summary>
+    /// The page number that would be produced <paramref name="ahead"/> allocations
+    /// after the next one, skipping the pending-byte page. <c>Peek(0)</c> equals
+    /// <see cref="NextPageNumber"/>.
+    /// </summary>
+    public uint Peek(uint ahead)
+    {
+        var pageNumber = _nextPageNumber;
+        for (var index = 0u; index < ahead && pageNumber != 0; index++)
+            pageNumber = Advance(pageNumber);
+
+        return pageNumber;
+    }
 
     /// <inheritdoc />
     public SqlitePageAllocation Allocate()
@@ -96,7 +131,31 @@ public sealed class SqliteAppendOnlyPageAllocator : ISqlitePageAllocator
             throw new InvalidOperationException("SQLite cannot allocate a page beyond UInt32.MaxValue.");
 
         var pageNumber = _nextPageNumber;
-        _nextPageNumber = pageNumber == uint.MaxValue ? 0 : pageNumber + 1;
+        if (pageNumber > MaximumPageCount)
+        {
+            throw new InvalidOperationException(
+                $"SQLite database is full: page {pageNumber} exceeds the maximum page count {MaximumPageCount}.");
+        }
+
+        _nextPageNumber = Advance(pageNumber);
         return new SqlitePageAllocation(pageNumber, pageNumber);
+    }
+
+    private uint Advance(uint pageNumber)
+    {
+        if (pageNumber == uint.MaxValue)
+            return 0;
+
+        var next = pageNumber + 1;
+        if (next == PendingBytePageNumber)
+            next = next == uint.MaxValue ? 0 : next + 1;
+
+        return next;
+    }
+
+    private static SqlitePageStore RequirePageStore(SqlitePageStore pageStore)
+    {
+        ArgumentNullException.ThrowIfNull(pageStore);
+        return pageStore;
     }
 }

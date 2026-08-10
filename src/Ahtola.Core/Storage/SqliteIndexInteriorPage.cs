@@ -351,7 +351,7 @@ public sealed class SqliteIndexInteriorPageView
         }
 
         var snapshot = page.ToArray();
-        var header = SqliteBtreePageHeader.Parse(snapshot, isFirstPage);
+        var header = SqliteBtreePageHeader.Parse(snapshot, isFirstPage, usableSpace);
         if (header.PageType != SqliteBtreePageType.IndexInterior)
             throw new InvalidDataException("SQLite page is not an index-interior b-tree page.");
         if (header.RightMostChildPage == 0)
@@ -391,6 +391,7 @@ public sealed class SqliteIndexInteriorPageView
         SqliteBtreePageValidation.ValidateCellsDoNotOverlapFreeblocks(
             snapshot,
             header,
+            usableSpace,
             ranges,
             "index-interior");
 

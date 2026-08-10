@@ -150,14 +150,16 @@ public class ArithmeticSqlRoutingTests
     }
 
     [Test]
-    public void DeliberatelyUnsupportedExpressionFamiliesStayOnEvaluator()
+    public void ConcatenationAndComparisonUseCompiledProjectionLowering()
     {
         using var connection = new EmbeddedDatabase().Connect();
 
         Value(connection, "SELECT ? || 'x'", SqlValue.Text("a")).Should().Be(SqlValue.Text("ax"));
         Value(connection, "SELECT ? < 5", SqlValue.Integer(3)).Should().Be(SqlValue.Integer(1));
-        ExplainRefused(connection, "EXPLAIN SELECT ? || 'x'", SqlValue.Text("a"));
-        ExplainRefused(connection, "EXPLAIN SELECT ? < 5", SqlValue.Integer(3));
+        Opcodes(Explain(connection, "EXPLAIN SELECT ? || 'x'", SqlValue.Text("a")))
+            .Should().Contain("Function");
+        Opcodes(Explain(connection, "EXPLAIN SELECT ? < 5", SqlValue.Integer(3)))
+            .Should().Contain("Compare");
     }
 
     [Test]

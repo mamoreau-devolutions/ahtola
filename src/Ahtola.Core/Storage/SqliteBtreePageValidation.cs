@@ -52,9 +52,11 @@ internal static class SqliteBtreePageValidation
     public static void ValidateCellsDoNotOverlapFreeblocks(
         ReadOnlySpan<byte> page,
         SqliteBtreePageHeader header,
+        int usableSpace,
         IReadOnlyList<(int Start, int End)> cellRanges,
         string cellDescription)
     {
+        var occupiedRanges = new List<(int Start, int End)>(cellRanges);
         var freeblockOffset = header.FirstFreeblockOffset;
         while (freeblockOffset != 0)
         {
@@ -67,7 +69,42 @@ internal static class SqliteBtreePageValidation
                     throw new InvalidDataException($"SQLite {cellDescription} cell overlaps a freeblock.");
             }
 
+            occupiedRanges.Add((freeblockOffset, freeblockEnd));
             freeblockOffset = BinaryPrimitives.ReadUInt16BigEndian(page[freeblockOffset..]);
+        }
+
+        occupiedRanges.Sort(static (left, right) => left.Start.CompareTo(right.Start));
+        var fragmentedBytes = 0;
+        var previousEnd = header.CellContentAreaOffset;
+        foreach (var (start, end) in occupiedRanges)
+        {
+            if (start < previousEnd)
+                throw new InvalidDataException($"SQLite {cellDescription} content ranges overlap.");
+
+            var gap = start - previousEnd;
+            if (gap > 3)
+            {
+                throw new InvalidDataException(
+                    $"SQLite {cellDescription} page has an untracked free gap of {gap} bytes.");
+            }
+
+            fragmentedBytes = checked(fragmentedBytes + gap);
+            previousEnd = end;
+        }
+
+        var trailingGap = usableSpace - previousEnd;
+        if (trailingGap > 3)
+        {
+            throw new InvalidDataException(
+                $"SQLite {cellDescription} page has an untracked trailing free gap of {trailingGap} bytes.");
+        }
+
+        fragmentedBytes = checked(fragmentedBytes + trailingGap);
+        if (fragmentedBytes != header.FragmentedFreeBytes)
+        {
+            throw new InvalidDataException(
+                $"SQLite {cellDescription} page declares {header.FragmentedFreeBytes} fragmented byte(s), "
+                + $"but its layout contains {fragmentedBytes}.");
         }
     }
 

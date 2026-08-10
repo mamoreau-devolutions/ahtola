@@ -1095,42 +1095,7 @@ public sealed class ResumableStatement : IDisposable
                 case GuardedRowInstruction guardedRow:
                     {
                         var candidate = ReadRegisters(guardedRow.Values);
-                        var accepted = true;
-                        foreach (var guard in guardedRow.Guards)
-                        {
-                            switch (guard)
-                            {
-                                case DistinctRowGuard distinctGuard:
-                                    accepted = TryInsertRowSet(
-                                        distinctGuard.RowSetIndex,
-                                        candidate,
-                                        distinctGuard.Equality);
-                                    break;
-                                case MembershipRowGuard membershipGuard:
-                                    foreach (var rowSetIndex in membershipGuard.RowSetIndices)
-                                    {
-                                        var contained = RowSetContains(
-                                            rowSetIndex,
-                                            candidate,
-                                            membershipGuard.Equality);
-                                        var required =
-                                            membershipGuard.Mode == CompoundMembershipMode.PresentInAll;
-                                        if (contained != required)
-                                        {
-                                            accepted = false;
-                                            break;
-                                        }
-                                    }
-
-                                    break;
-                                default:
-                                    throw new InvalidOperationException(
-                                        $"Validated guarded row contains unsupported guard {guard.GetType().Name}.");
-                            }
-
-                            if (!accepted)
-                                break;
-                        }
+                        var accepted = EvaluateRowGuards(guardedRow.Guards, candidate);
 
                         AdvanceInstructionPointer();
                         if (!accepted)
@@ -1149,6 +1114,19 @@ public sealed class ResumableStatement : IDisposable
                                 throw new InvalidOperationException(
                                     $"Validated guarded row contains unsupported destination {guardedRow.Destination.GetType().Name}.");
                         }
+
+                        break;
+                    }
+                case RowGateInstruction rowGate:
+                    {
+                        // Same guard pipeline as GuardedRow, but emission is left to the plain ResultRow that
+                        // follows. A rejected candidate jumps past the whole emit block, so it never reaches
+                        // the offset/limit counters and is not charged against them.
+                        var candidate = ReadRegisters(rowGate.Values);
+                        if (EvaluateRowGuards(rowGate.Guards, candidate))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = rowGate.RejectTarget;
 
                         break;
                     }
@@ -1817,6 +1795,40 @@ public sealed class ResumableStatement : IDisposable
     // Whether the candidate is present in the row set under the supplied equality. An unpopulated set
     // (null) holds no rows, so membership is false — INTERSECT against an empty term yields nothing and
     // EXCEPT against an empty term keeps every candidate.
+    // Runs a guard list over one candidate tuple, in order, with the same accept/insert semantics for both
+    // GuardedRow (which emits or row-set-inserts inline) and RowGate (which defers emission to a following
+    // ResultRow). A DistinctRowGuard inserts on accept, so a tuple later discarded by OFFSET still counts as
+    // seen — matching the evaluator, which de-duplicates before applying OFFSET.
+    private bool EvaluateRowGuards(IReadOnlyList<VdbeRowGuard> guards, SqlValue[] candidate)
+    {
+        foreach (var guard in guards)
+        {
+            switch (guard)
+            {
+                case DistinctRowGuard distinctGuard:
+                    if (!TryInsertRowSet(distinctGuard.RowSetIndex, candidate, distinctGuard.Equality))
+                        return false;
+
+                    break;
+                case MembershipRowGuard membershipGuard:
+                    foreach (var rowSetIndex in membershipGuard.RowSetIndices)
+                    {
+                        var contained = RowSetContains(rowSetIndex, candidate, membershipGuard.Equality);
+                        var required = membershipGuard.Mode == CompoundMembershipMode.PresentInAll;
+                        if (contained != required)
+                            return false;
+                    }
+
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        $"Validated row guard list contains unsupported guard {guard.GetType().Name}.");
+            }
+        }
+
+        return true;
+    }
+
     private bool RowSetContains(int rowSetIndex, SqlValue[] candidate, VdbeRowEquality equality)
     {
         var set = _distinctSets[rowSetIndex];

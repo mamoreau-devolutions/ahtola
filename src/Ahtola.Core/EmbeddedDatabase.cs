@@ -1029,6 +1029,18 @@ public sealed partial class EmbeddedDatabase : IDisposable
             target.RegisterCollation(name, compare);
     }
 
+    internal (
+        (string Name, int Arity)[] Scalars,
+        (string Name, int Arity)[] Aggregates) GetRegisteredFunctionMetadata()
+    {
+        lock (_gate)
+        {
+            return (
+                _scalarFunctions.Keys.OrderBy(key => key.Name, StringComparer.Ordinal).ThenBy(key => key.Arity).ToArray(),
+                _aggregateFunctions.Keys.OrderBy(key => key.Name, StringComparer.Ordinal).ThenBy(key => key.Arity).ToArray());
+        }
+    }
+
     public void RegisterScalarFunction(string name, int arity, Func<IReadOnlyList<SqlValue>, SqlValue> function)
     {
         ThrowIfRecursiveTriggerCallbackReentry();
@@ -8771,11 +8783,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         void EnsureTriggersMayFire(IReadOnlyList<TriggerDefinition> triggers)
         {
-            if (triggers.Count > 0 && context.InsideTrigger)
-            {
-                throw new EmbeddedSqlException(
-                    $"cannot modify {statement.TableName} within a trigger body: recursive triggers are not supported");
-            }
+            if (triggers.Count > 0 && context.TriggerDepth >= MaximumTriggerDepth)
+                throw new EmbeddedTriggerDepthException(context.LastInsertRowId);
         }
 
         T PreserveLastInsertRowIdOnFailure<T>(Func<T> operation)
@@ -13992,11 +14001,12 @@ public sealed partial class EmbeddedDatabase : IDisposable
         context = EnterCollationSource(context, select.Source);
 
         // A SELECT carrying LIMIT/OFFSET lowers only when its LIMIT/OFFSET-free base is a
-        // gate-able route. Direct scans, constant projections, source-less scalar Function programs,
+        // gate-able route. Direct scans (including direct DISTINCT, whose de-duplication the gate
+        // lowering hoists into a RowGate), constant projections, source-less scalar Function programs,
         // aggregates, windows, the deliberately narrow bounded sorted-scan subset, and a strictly-gated
         // equi-join subset route through the dedicated path that layers LimitOffsetProgramBuilder
-        // gates onto that base. DISTINCT, computed shapes, outer joins, and compounds keep
-        // LIMIT/OFFSET on the evaluator.
+        // gates onto that base. Computed shapes, outer joins, and compounds keep LIMIT/OFFSET on the
+        // evaluator.
         if (select.Limit is not null || select.Offset is not null)
         {
             // The window route owns its own LIMIT/OFFSET composition because its base is a buffered
@@ -14703,8 +14713,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
     //    equi-join or cross-join shape; DISTINCT, aggregate/window shapes, non-base sources, computed
     //    projections, and non-column order keys all need semantics this pipeline does not
     //    represent exactly.
-    //  - DISTINCT outside row-aware aggregation: direct DISTINCT still combines de-duplication
-    //    and emission in DistinctResultRow, which cannot be gated without counting duplicates.
+    //  - DISTINCT with a custom collation: the collation callback can throw while de-duplicating,
+    //    so its error timing stays evaluator-owned. Direct DISTINCT over declared columns with
+    //    built-in collations does route: the gate lowering hoists DistinctResultRow's de-duplication
+    //    into a RowGate ahead of the counters, so duplicates are never charged against LIMIT/OFFSET.
     //  - LIMIT 0: the evaluator validates every projection/WHERE/GROUP BY/HAVING/ORDER BY
     //    expression against a synthetic row and returns empty WITHOUT scanning, so its
     //    validation-and-evaluation timing differs from a gate that would scan first; keep it
@@ -14735,18 +14747,21 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         var baseSelect = select with { Limit = null, Offset = null };
 
-        // Row-aware aggregate DISTINCT lowers to DistinctGate + ResultRow, so its limit
-        // gates see only novel finalized rows. Other DISTINCT routes still emit through
-        // DistinctResultRow and remain ineligible for this transform.
-        if (select.Distinct)
+        // Row-aware aggregate DISTINCT lowers to DistinctGate + ResultRow, so its limit gates see
+        // only novel finalized rows. Direct DISTINCT emits through DistinctResultRow, which the
+        // limit/offset lowering now splits into a RowGate carrying the de-duplication guard followed
+        // by a plain ResultRow — the counters therefore sit downstream of de-duplication and charge
+        // OFFSET/LIMIT against distinct rows only, matching ApplyDistinctLimit. Custom collations stay
+        // evaluator-owned in both shapes because their callbacks can throw while de-duplicating.
+        if (select.Distinct
+            && select.Projections.Any(projection =>
+                IsCustomCollation(GetEffectiveCollation(projection.Expression, context))))
         {
-            if (!IsAggregateSelect(select)
-                || select.Projections.Any(projection =>
-                    IsCustomCollation(GetEffectiveCollation(projection.Expression, context))))
-            {
-                return false;
-            }
+            return false;
+        }
 
+        if (select.Distinct && IsAggregateSelect(select))
+        {
             if (!TryCompileAggregateSelect(
                     baseSelect,
                     parameters,
@@ -15379,11 +15394,35 @@ public sealed partial class EmbeddedDatabase : IDisposable
 
         if (context.CancellationToken.CanBeCanceled
             || statement.Operators.Count == 0
-            || statement.OrderBy.Count != 0
-            || statement.Limit is not null
-            || statement.Offset is not null)
+            || statement.OrderBy.Count != 0)
         {
             return false;
+        }
+
+        // LIMIT/OFFSET over a compound bounds the compound's own output stream. It lowers because the
+        // gate builder splits the set operators' conditional emitters (CompoundResultRow) into a RowGate
+        // carrying the membership/de-duplication guards followed by a plain ResultRow, so the counters
+        // observe only rows that actually survive INTERSECT/EXCEPT/UNION -- never a probed-and-rejected
+        // candidate. UNION ALL's spliced per-term ResultRows share the same counters, so the bound spans
+        // the concatenated stream exactly as the evaluator's ApplyDistinctLimit does.
+        long compoundOffset = 0;
+        long? compoundLimit = null;
+        if (statement.Limit is not null || statement.Offset is not null)
+        {
+            try
+            {
+                compoundLimit = statement.Limit is null
+                    ? null
+                    : RequireLimitInteger(Evaluate(statement.Limit, parameters, outerRow, context));
+                compoundOffset = statement.Offset is null
+                    ? 0
+                    : Math.Max(0, RequireLimitInteger(Evaluate(statement.Offset, parameters, outerRow, context)));
+            }
+            catch (EmbeddedSqlException)
+            {
+                // The evaluator owns diagnostics for non-integral bounds and any expression failure.
+                return false;
+            }
         }
 
         // Only a single uniform UNION ALL, UNION/DISTINCT, INTERSECT, or EXCEPT operator repeated
@@ -15486,7 +15525,10 @@ public sealed partial class EmbeddedDatabase : IDisposable
             };
         }
 
-        compiled = new CompiledSelect(compound.Program, compound.CursorSources, parameterIndices);
+        compiled = new CompiledSelect(
+            LimitOffsetProgramBuilder.Apply(compound.Program, compoundOffset, compoundLimit),
+            compound.CursorSources,
+            parameterIndices);
         return true;
     }
 
@@ -20265,6 +20307,8 @@ out bool hasReturning)
     // Reuses the SELECT expression emitter for RETURNING. The write loop first buffers every affected
     // row, then this block runs over that buffer in source order before Commit, preserving evaluator
     // predicate/assignment callback order while keeping projection failures statement-atomic.
+    // Control-flow lowering is enabled: the block is emitted with a zero program-counter base and
+    // DmlStatementCompiler relocates its jump targets to the splice address of the RETURNING loop.
     private bool TryCompileReturningClause(
         IReadOnlyList<Projection>? returning,
         EmbeddedTable table,
@@ -20304,7 +20348,7 @@ out bool hasReturning)
             projections.Count,
             instructions,
             programCounterBase: 0,
-            allowControlFlow: false,
+            allowControlFlow: true,
             IsConstantScalarExpression,
             expression => Evaluate(expression, parameters, null, context),
             function => TryGetRoutableBuiltinScalarCall(function, out var routable)
@@ -20882,6 +20926,7 @@ out bool hasReturning)
                 compound.OutputSetIndex,
                 FormatSetList(compound.MembershipSetIndices),
                 $"{DescribeResultRow(compound.Values)} if new to distinct set {compound.OutputSetIndex} and {FormatMembership(compound.Mode)} {FormatSetList(compound.MembershipSetIndices)}"),
+            RowGateInstruction => VdbeExplain.Describe(instruction),
             OffsetGateInstruction offsetGate => (
                 offsetGate.Counter.Index,
                 offsetGate.SkipTarget.Offset,
@@ -23812,7 +23857,13 @@ out bool hasReturning)
             parameters,
             context,
             outerRow,
-            requiredCteNames);
+            requiredCteNames,
+            GetRecursiveCteOuterRowBudgets(
+                statement.CommonTableExpressions,
+                statement.Query,
+                parameters,
+                context,
+                outerRow));
 
         return ExecuteQuery(statement.Query, parameters, cteContext, outerRow);
     }
@@ -23965,7 +24016,8 @@ out bool hasReturning)
         SqlValue[] parameters,
         QueryContext context,
         SourceRow? outerRow,
-        IReadOnlySet<string> requiredCteNames)
+        IReadOnlySet<string> requiredCteNames,
+        IReadOnlyDictionary<string, int>? outerRowBudgets = null)
     {
         var resolvedExpressions = new Dictionary<string, SourceData>(
             context.CommonTableExpressions,
@@ -23984,7 +24036,15 @@ out bool hasReturning)
 
             var cteContext = context with { CommonTableExpressions = resolvedExpressions };
             var resolved = CountAllReferences(commonTableExpression.Query, commonTableExpression.Name) > 0
-                ? EvaluateRecursiveCte(commonTableExpression, parameters, cteContext, outerRow)
+                ? EvaluateRecursiveCte(
+                    commonTableExpression,
+                    parameters,
+                    cteContext,
+                    outerRow,
+                    outerRowBudgets is not null
+                        && outerRowBudgets.TryGetValue(commonTableExpression.Name, out var budget)
+                            ? budget
+                            : null)
                 : EvaluateNonRecursiveCte(commonTableExpression, parameters, cteContext, outerRow);
             resolvedExpressions[commonTableExpression.Name] = resolved;
         }
@@ -24024,12 +24084,14 @@ out bool hasReturning)
             columnDefinitions);
     }
 
-    // Safety cap on the number of rows a recursive CTE may materialize. SQLite streams
-    // results and relies on the query eventually terminating; because this engine
-    // materializes eagerly, a runaway UNION ALL recursion (or a genuinely non-terminating
-    // query that SQLite would also loop on forever) is bounded here so it fails loudly
-    // instead of exhausting memory. The cap is far above any legitimately supported query.
-    private const int RecursiveCteRowLimit = 100_000;
+    // Memory backstop on the number of rows a recursive CTE may materialize. SQLite streams
+    // results and relies on the query eventually terminating; because this engine materializes
+    // eagerly, a genuinely non-terminating recursion (one SQLite would also loop on forever) is
+    // bounded here so it fails loudly instead of exhausting memory. This is deliberately not a
+    // query-shape limit: legitimate finite recursions far larger than the old 100,000-row cap
+    // complete normally, and a recursion consumed under an outer LIMIT stops at that budget
+    // (see TryGetRecursiveCteOuterRowBudget) without ever approaching this ceiling.
+    private const int RecursiveCteRowLimit = 1_000_000;
 
     // Evaluates a recursive common table expression using semi-naive (working-set)
     // iteration: run the anchor once, then repeatedly run the recursive term(s) over only
@@ -24039,7 +24101,8 @@ out bool hasReturning)
         CommonTableExpression commonTableExpression,
         SqlValue[] parameters,
         QueryContext cteContext,
-        SourceRow? outerRow)
+        SourceRow? outerRow,
+        int? outerRowBudget = null)
     {
         var name = commonTableExpression.Name;
         if (commonTableExpression.Query is not CompoundSelectStatement compound)
@@ -24117,7 +24180,8 @@ out bool hasReturning)
                 deduplicate,
                 parameters,
                 cteContext,
-                outerRow);
+                outerRow,
+                outerRowBudget);
         }
 
         var result = new List<SourceRow>();
@@ -24132,6 +24196,10 @@ out bool hasReturning)
             var sourceRow = new SourceRow(columns, values);
             result.Add(sourceRow);
             workingSet.Add(sourceRow);
+            // The outer consumer can never observe more than its budget, so stop expanding as soon
+            // as the budget is filled rather than materializing (or overflowing on) the whole set.
+            if (outerRowBudget is int anchorBudget && result.Count >= anchorBudget)
+                return new SourceData(columns, result, collations, columnDefinitions);
         }
 
         while (workingSet.Count > 0)
@@ -24163,6 +24231,8 @@ out bool hasReturning)
                     var sourceRow = new SourceRow(columns, values);
                     result.Add(sourceRow);
                     produced.Add(sourceRow);
+                    if (outerRowBudget is int budget && result.Count >= budget)
+                        return new SourceData(columns, result, collations, columnDefinitions);
                     if (result.Count > RecursiveCteRowLimit)
                         throw new EmbeddedSqlException(
                             $"recursive query for {name} exceeded the maximum of {RecursiveCteRowLimit} rows");
@@ -24273,7 +24343,8 @@ out bool hasReturning)
         bool deduplicate,
         SqlValue[] parameters,
         QueryContext cteContext,
-        SourceRow? outerRow)
+        SourceRow? outerRow,
+        int? outerRowBudget)
     {
         var program = BuildRecursiveCteProgram(
             name, anchorRows, columns, collations, recursiveTerm, deduplicate, parameters, cteContext, outerRow);
@@ -24284,6 +24355,12 @@ out bool hasReturning)
             using var runtime = new ResumableStatement(program);
             while (true)
             {
+                // An outer LIMIT/OFFSET budget bounds what the consumer can observe, so the drain
+                // loop stops pulling once it is filled. The worktable expands lazily per Step, so
+                // stopping here stops the recursion itself instead of merely discarding rows.
+                if (outerRowBudget is int budget && rows.Count >= budget)
+                    return new SourceData(columns, rows, collations, columnDefinitions);
+
                 switch (runtime.StepResumable())
                 {
                     case ResumableStatementStepResult.Row:
@@ -24467,6 +24544,72 @@ out bool hasReturning)
     // ORDER BY, or LIMIT/OFFSET -- the pass-through outer query whose output is exactly the CTE's
     // materialized rows, so a recursive-worktable program is a faithful whole-statement lowering EXPLAIN
     // may describe.
+    // An outer LIMIT/OFFSET over a bare scan of a recursive CTE bounds exactly how many CTE rows the
+    // consumer can ever observe, so the recursion may stop as soon as that many rows exist instead of
+    // materializing (or overflowing on) the full expansion. The shape is deliberately narrow: the CTE
+    // must be the sole source of a single un-filtered, un-grouped, un-ordered, non-DISTINCT SELECT whose
+    // projections are plain column/star/literal references (nothing that could add, drop, or reorder
+    // rows), and it must be referenced exactly once in the whole statement so a truncated materialization
+    // cannot leak into another consumer. Every other shape keeps the full materialization.
+    private IReadOnlyDictionary<string, int>? GetRecursiveCteOuterRowBudgets(
+        IReadOnlyList<CommonTableExpression> expressions,
+        QueryStatement query,
+        SqlValue[] parameters,
+        QueryContext context,
+        SourceRow? outerRow)
+    {
+        if (query is not SelectStatement select
+            || select.Limit is null
+            || select.Distinct
+            || select.Where is not null
+            || select.GroupBy.Count != 0
+            || select.Having is not null
+            || select.NamedWindows.Count != 0
+            || select.OrderBy.Count != 0
+            || select.Source is not NamedTableSource named
+            || named.IsSchemaQualified)
+        {
+            return null;
+        }
+
+        if (!select.Projections.All(projection => projection.Expression
+                is StarExpression or QualifiedStarExpression or ColumnExpression or LiteralExpression))
+        {
+            return null;
+        }
+
+        var target = expressions.FirstOrDefault(expression =>
+            string.Equals(expression.Name, named.Name, StringComparison.OrdinalIgnoreCase));
+        if (target is null || CountAllReferences(target.Query, target.Name) == 0)
+            return null;
+
+        // Any second consumer (including a sibling CTE) would see the truncated set, so only a single
+        // reference across the whole statement is safe.
+        var references = CountAllReferences(query, target.Name)
+            + expressions
+                .Where(expression => !ReferenceEquals(expression, target))
+                .Sum(expression => CountAllReferences(expression.Query, target.Name));
+        if (references != 1)
+            return null;
+
+        if (!TryResolveLimitOffset(select, parameters, context, outerRow, out var limit, out var offset)
+            || limit is not long limitValue
+            || limitValue < 0
+            || offset < 0)
+        {
+            return null;
+        }
+
+        var budget = limitValue + offset;
+        if (budget <= 0 || budget >= RecursiveCteRowLimit)
+            return null;
+
+        return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            [target.Name] = (int)budget,
+        };
+    }
+
     private static bool IsBareSelectStarFrom(QueryStatement query, string name)
         => query is SelectStatement select
             && !select.Distinct
@@ -28334,7 +28477,11 @@ out bool hasReturning)
         if (state.NonMemoizableSubqueries.Contains(query))
             return ExecuteQuery(query, parameters, context, row);
 
-        if (!IsMemoizableSubquery(query))
+        // UPDATE SET scalar subqueries are statement programs in SQLite/Turso. In the
+        // BEFORE-trigger path PreserveSubqueryMemoSnapshot models that Once-style lifetime:
+        // probe correlation even for aggregates or other expressions the general SELECT
+        // memoizer conservatively rejects, then retain an uncorrelated result for the update.
+        if (!context.PreserveSubqueryMemoSnapshot && !IsMemoizableSubquery(query))
         {
             state.NonMemoizableSubqueries.Add(query);
             return ExecuteQuery(query, parameters, context, row);
@@ -30963,12 +31110,6 @@ out bool hasReturning)
 
         if (function.Distinct)
         {
-            if (function.AggregateOrderBy is { Count: > 0 })
-            {
-                throw new EmbeddedSqlException(
-                    "DISTINCT aggregates with ORDER BY are not supported by the managed engine.");
-            }
-
             if (function.Arguments.Count != 1)
                 throw new EmbeddedSqlException("DISTINCT aggregates must have exactly one argument.");
 
@@ -31061,6 +31202,7 @@ out bool hasReturning)
     internal static bool IsManagedPercentileAggregate(string name)
     {
         return name.Equals("MEDIAN", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("MODE", StringComparison.OrdinalIgnoreCase)
             || name.Equals("PERCENTILE", StringComparison.OrdinalIgnoreCase)
             || name.Equals("PERCENTILE_CONT", StringComparison.OrdinalIgnoreCase)
             || name.Equals("PERCENTILE_DISC", StringComparison.OrdinalIgnoreCase);
@@ -31656,6 +31798,11 @@ out bool hasReturning)
         QueryContext context)
     {
         var name = function.Name.ToUpperInvariant();
+        if (name == "MODE")
+            return EvaluateModeAggregate(function, rows, parameters, context);
+        if (function.OrderedSet)
+            return EvaluateOrderedSetPercentileAggregate(function, rows, parameters, context);
+
         var isMedian = name == "MEDIAN";
         var isPercentile = name == "PERCENTILE";
         var isContinuous = !isMedian && name != "PERCENTILE_DISC";
@@ -31738,6 +31885,114 @@ out bool hasReturning)
         }
 
         return SqlValue.Real(values[(int)Math.Floor(rank)]);
+    }
+
+    private SqlValue EvaluateOrderedSetPercentileAggregate(
+        FunctionExpression function,
+        IReadOnlyList<SourceRow> rows,
+        SqlValue[] parameters,
+        QueryContext context)
+    {
+        RequireAggregateArgumentCount(function.Name.ToLowerInvariant(), function.Arguments, 2);
+        var fractionValue = Evaluate(
+            function.Arguments[1],
+            parameters,
+            new SourceRow([], []),
+            context);
+        if (fractionValue.Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+        if (!TryGetPercentileNumericValue(fractionValue, out var fraction)
+            || !(fraction >= 0d && fraction <= 1d))
+        {
+            throw new EmbeddedSqlException("Percentile value must be between 0.0 and 1.0 inclusive");
+        }
+
+        if (function.Name.Equals("PERCENTILE_CONT", StringComparison.OrdinalIgnoreCase))
+        {
+            var values = new List<double>();
+            foreach (var row in rows)
+            {
+                context.CheckInterrupt();
+                if (TryGetPercentileNumericValue(
+                        Evaluate(function.Arguments[0], parameters, row, context),
+                        out var value))
+                {
+                    values.Add(value);
+                }
+            }
+
+            if (values.Count == 0)
+                return SqlValue.Null;
+
+            values.Sort(ComparePercentileValues);
+            var rank = fraction * (values.Count - 1);
+            var lower = (int)Math.Floor(rank);
+            var upper = (int)Math.Ceiling(rank);
+            if (lower == upper)
+                return SqlValue.Real(values[lower]);
+
+            var weight = rank - lower;
+            return SqlValue.Real(values[lower] * (1d - weight) + values[upper] * weight);
+        }
+
+        var discreteValues = new List<SqlValue>();
+        foreach (var row in rows)
+        {
+            context.CheckInterrupt();
+            var value = Evaluate(function.Arguments[0], parameters, row, context);
+            if (value.Kind != SqlValueKind.Null)
+                discreteValues.Add(value);
+        }
+
+        if (discreteValues.Count == 0)
+            return SqlValue.Null;
+
+        var collation = GetCollation(function.Arguments[0]);
+        discreteValues.Sort((left, right) => Compare(left, right, collation));
+        var index = fraction <= 0d
+            ? 0
+            : Math.Max(0, (int)Math.Ceiling(fraction * discreteValues.Count) - 1);
+        return discreteValues[Math.Min(index, discreteValues.Count - 1)];
+    }
+
+    private SqlValue EvaluateModeAggregate(
+        FunctionExpression function,
+        IReadOnlyList<SourceRow> rows,
+        SqlValue[] parameters,
+        QueryContext context)
+    {
+        RequireAggregateArgumentCount("mode", function.Arguments, 1);
+        var values = new List<SqlValue>();
+        foreach (var row in rows)
+        {
+            context.CheckInterrupt();
+            var value = Evaluate(function.Arguments[0], parameters, row, context);
+            if (value.Kind != SqlValueKind.Null)
+                values.Add(value);
+        }
+
+        if (values.Count == 0)
+            return SqlValue.Null;
+
+        var collation = GetCollation(function.Arguments[0]);
+        values.Sort((left, right) => Compare(left, right, collation));
+        var bestIndex = 0;
+        var bestCount = 0;
+        for (var index = 0; index < values.Count;)
+        {
+            var end = index + 1;
+            while (end < values.Count && Compare(values[end], values[index], collation) == 0)
+                end++;
+            if (end - index > bestCount)
+            {
+                bestIndex = index;
+                bestCount = end - index;
+            }
+
+            index = end;
+        }
+
+        return values[bestIndex];
     }
 
     private static bool TryGetPercentileNumericValue(SqlValue value, out double numeric)
@@ -31940,7 +32195,7 @@ out bool hasReturning)
             "LTRIM" => EvaluateTrim(arguments, "ltrim", trimStart: true, trimEnd: false),
             "RTRIM" => EvaluateTrim(arguments, "rtrim", trimStart: false, trimEnd: true),
             "QUOTE" => EvaluateQuote(arguments),
-            "CHAR" => EvaluateChar(arguments),
+            "CHAR" or "CHR" => EvaluateChar(arguments),
             "UNICODE" => EvaluateUnicode(arguments),
             "UNHEX" => EvaluateUnhex(arguments),
             "ZEROBLOB" => EvaluateZeroBlob(arguments),
@@ -31948,11 +32203,12 @@ out bool hasReturning)
             "RANDOM" => EvaluateRandom(arguments),
             "CONCAT" => EvaluateConcat(arguments),
             "CONCAT_WS" => EvaluateConcatWithSeparator(arguments),
-            "IIF" => EvaluateIif(arguments),
+            "IF" or "IIF" => EvaluateIif(arguments),
             "LIKELY" => EvaluateProbabilityHint("likely", arguments, 1),
             "UNLIKELY" => EvaluateProbabilityHint("unlikely", arguments, 1),
             "LIKELIHOOD" => EvaluateProbabilityHint("likelihood", arguments, 2),
             "SQLITE_VERSION" => EvaluateSqliteVersion(arguments),
+            "TURSO_VERSION" => EvaluateTursoVersion(arguments),
             "SQLITE_SOURCE_ID" => EvaluateSqliteSourceId(arguments),
             "CHANGES" => EvaluateChanges(arguments),
             "TOTAL_CHANGES" => EvaluateTotalChanges(arguments),
@@ -31963,7 +32219,7 @@ out bool hasReturning)
             "GLOB" => EvaluateGlobFunction(arguments),
             "HEX" => EvaluateHex(arguments),
             "IFNULL" => EvaluateIfNull(arguments),
-            "INSTR" => EvaluateInstr(arguments),
+            "INSTR" or "STRPOS" => EvaluateInstr(arguments),
             "JSON" => SqliteJson.Json(arguments),
             "JSONB" => SqliteJson.Jsonb(arguments),
             "JSON_ARRAY" => SqliteJson.JsonArray(arguments),
@@ -31990,7 +32246,8 @@ out bool hasReturning)
             "JSON_VALID" => SqliteJson.JsonValid(arguments),
             "JULIANDAY" => SqliteDateTime.Execute(arguments, SqliteDateTime.Func.JulianDay),
             "LAST_INSERT_ROWID" => EvaluateLastInsertRowId(arguments, context),
-            "LENGTH" => EvaluateLength(arguments),
+            "IS_AUTOCOMMIT" => EvaluateIsAutocommit(arguments, context),
+            "LENGTH" or "CHAR_LENGTH" or "CHARACTER_LENGTH" => EvaluateLength(arguments),
             "OCTET_LENGTH" => EvaluateOctetLength(arguments),
             "LIKE" => EvaluateLikeFunction(arguments),
             "LOWER" => EvaluateCase(arguments, ToSqliteLower),
@@ -32010,6 +32267,9 @@ out bool hasReturning)
             "UUID7_TIMESTAMP_MS" => EvaluateUuid7TimestampMilliseconds(arguments),
             "UUID_STR" => EvaluateUuidString(arguments),
             "UUID_BLOB" => EvaluateUuidBlob(arguments),
+            "BOOLEAN_TO_INT" => EvaluateBooleanToInt(arguments),
+            "INT_TO_BOOLEAN" => EvaluateIntToBoolean(arguments),
+            "VALIDATE_IPADDR" => EvaluateValidateIpAddress(arguments),
             _ => throw new EmbeddedSqlException($"no such function: {function.Name}"),
         };
     }
@@ -33199,6 +33459,14 @@ out bool hasReturning)
         return SqlValue.Integer(GetLastInsertRowId(context));
     }
 
+    // is_autocommit() reports whether the connection is in autocommit mode: 1 outside an explicit
+    // transaction, 0 while one is open. Turso exposes this as a user-visible zero-argument scalar.
+    private static SqlValue EvaluateIsAutocommit(IReadOnlyList<SqlValue> arguments, QueryContext context)
+    {
+        RequireArgumentCount("is_autocommit", arguments, 0);
+        return SqlValue.Integer(context.InTransaction ? 0 : 1);
+    }
+
     private static long GetLastInsertRowId(QueryContext context)
         => context.TriggerState?.LiveLastInsertRowId
             ?? context.StatementState?.LastInsertRowId
@@ -33547,6 +33815,58 @@ out bool hasReturning)
             _ => throw new InvalidOperationException($"Unknown SQL value kind {arguments[0].Kind}."),
         });
     }
+
+    private static SqlValue EvaluateBooleanToInt(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("boolean_to_int", arguments, 1);
+        var value = arguments[0];
+        if (value.Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+        if (value.Kind == SqlValueKind.Integer && value.AsInteger() is 0 or 1)
+            return value;
+        if (value.Kind == SqlValueKind.Text)
+        {
+            return value.AsText().ToLowerInvariant() switch
+            {
+                "true" or "t" or "yes" or "on" or "1" => SqlValue.Integer(1),
+                "false" or "f" or "no" or "off" or "0" => SqlValue.Integer(0),
+                _ => throw InvalidTypedValue("boolean", value.AsText()),
+            };
+        }
+
+        throw InvalidTypedValue("boolean", ToSqlText(value));
+    }
+
+    private static SqlValue EvaluateIntToBoolean(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("int_to_boolean", arguments, 1);
+        var value = arguments[0];
+        if (value.Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+        return SqlValue.Text(value.Kind == SqlValueKind.Integer && value.AsInteger() == 0
+            ? "false"
+            : "true");
+    }
+
+    private static SqlValue EvaluateValidateIpAddress(IReadOnlyList<SqlValue> arguments)
+    {
+        RequireArgumentCount("validate_ipaddr", arguments, 1);
+        var value = arguments[0];
+        if (value.Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+        if (value.Kind != SqlValueKind.Text
+            || !System.Net.IPAddress.TryParse(value.AsText(), out _))
+        {
+            throw InvalidTypedValue(
+                "inet",
+                value.Kind == SqlValueKind.Text ? value.AsText() : ToSqlText(value));
+        }
+
+        return value;
+    }
+
+    private static EmbeddedSqlException InvalidTypedValue(string type, string value)
+        => new($"invalid input for type {type}: \"{value}\"");
 
     private static void RequireArgumentCount(string functionName, IReadOnlyList<SqlValue> arguments, int expected)
     {
@@ -37557,11 +37877,8 @@ out bool hasReturning)
             bool hasSign = z.StartsWith('+') || z.StartsWith('-');
             string cleanZ = hasSign ? z.Substring(1) : z;
 
-            // Case 1: YYYY-MM-DD [HH:MM:SS] arithmetic modifier.
-            // SQLite's date.c requires an explicit leading '+'/'-' sign for this form; the
-            // unsigned "NNNN-NN-NN[ HH:MM:SS]" spelling is rejected (yields NULL). Match that
-            // exactly, even though the Rust reference currently accepts the unsigned spelling.
-            if (hasSign && cleanZ.Length >= 10 && cleanZ[4] == '-' && cleanZ[7] == '-')
+            // Turso accepts the composite form with or without an explicit sign.
+            if (cleanZ.Length >= 10 && cleanZ[4] == '-' && cleanZ[7] == '-')
             {
                 bool okY = GetDigits(cleanZ.Substring(0, 4), 4, 0, 9999, out int yy, out _);
                 bool okM = GetDigits(cleanZ.Substring(5, 2), 2, 0, 11, out int mm, out _);
@@ -37786,13 +38103,15 @@ out bool hasReturning)
     // expression is evaluated, so constructors and mutators embed direct JSON function results.
     // Column affinity strips that subtype before values are stored or later read as column data.
     //
-    // The parser is strict RFC-8259. This yields exact parity with SQLite's json_valid()
-    // (whose default behavior is strict) and with json()/json_type()/json_extract() for every
-    // RFC-8259-conformant input. SQLite additionally accepts non-standard JSON5 leniencies
-    // (leading '+', a trailing '.', a leading '.', trailing commas, single quotes, unquoted
-    // object keys, hexadecimal, comments, and raw control characters inside strings). Those are
-    // deliberately rejected here as "malformed JSON" instead of returning a canonicalized value,
-    // matching the task's requirement to reject unsupported input rather than guess.
+    // The parser has two modes. Strict mode is RFC-8259 and backs json_valid() and
+    // json_error_position(), matching SQLite's default (json_valid(X) is json_valid(X,1)).
+    // Lenient mode additionally accepts the JSON5 leniencies Turso's jsonb parser accepts
+    // (hexadecimal integers, a leading '+', a leading '.', a trailing '.', Infinity/NaN,
+    // single-quoted strings, unquoted object keys, trailing commas, and // or /* */ comments)
+    // and backs every value-producing entry point: json(), jsonb(), json_type(),
+    // json_extract(), json_array_length(), json_pretty(), and the mutation family.
+    // Lenient parsing canonicalizes as it goes (0x1A -> 26, +42 -> 42, .5 -> 0.5, 42. -> 42.0,
+    // Infinity -> 9e999, NaN -> null, 'x' -> "x"), so serialization stays verbatim-Raw based.
     private static partial class SqliteJson
     {
         private static readonly UTF8Encoding JsonbUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -38719,9 +39038,9 @@ out bool hasReturning)
 
             var node = value.Kind switch
             {
-                SqlValueKind.Integer => TryParse(value.AsInteger().ToString(CultureInfo.InvariantCulture)),
-                SqlValueKind.Real => TryParse(FormatJsonReal(value.AsReal())),
-                _ => TryParse(InputText(value)),
+                SqlValueKind.Integer => TryParseJson5(value.AsInteger().ToString(CultureInfo.InvariantCulture)),
+                SqlValueKind.Real => TryParseJson5(FormatJsonReal(value.AsReal())),
+                _ => TryParseJson5(InputText(value)),
             };
 
             if (node is null)
@@ -39317,16 +39636,34 @@ out bool hasReturning)
             return parser.AtEnd ? node : null;
         }
 
+        private static JNode? TryParseJson5(string s)
+        {
+            var parser = new Parser(s, 0, json5: true);
+            parser.SkipWs();
+            var node = parser.ParseValue();
+            if (node is null)
+                return null;
+            parser.SkipWs();
+            return parser.AtEnd ? node : null;
+        }
+
         private sealed class Parser
         {
             private readonly string _s;
+            private readonly bool _json5;
             private int _i;
             private int _errorPosition = -1;
 
             public Parser(string s, int start)
+                : this(s, start, json5: false)
+            {
+            }
+
+            public Parser(string s, int start, bool json5)
             {
                 _s = s;
                 _i = start;
+                _json5 = json5;
             }
 
             public int Pos => _i;
@@ -39341,9 +39678,38 @@ out bool hasReturning)
                 {
                     char c = _s[_i];
                     if (c is ' ' or '\t' or '\n' or '\r')
+                    {
                         _i++;
-                    else
-                        break;
+                        continue;
+                    }
+
+                    if (_json5 && c == '/' && _i + 1 < _s.Length)
+                    {
+                        if (_s[_i + 1] == '/')
+                        {
+                            _i += 2;
+                            while (_i < _s.Length && _s[_i] != '\n')
+                                _i++;
+                            continue;
+                        }
+
+                        if (_s[_i + 1] == '*')
+                        {
+                            _i += 2;
+                            while (_i + 1 < _s.Length && !(_s[_i] == '*' && _s[_i + 1] == '/'))
+                                _i++;
+                            _i = _i + 1 < _s.Length ? _i + 2 : _s.Length;
+                            continue;
+                        }
+                    }
+
+                    if (_json5 && (c is '\f' or '\v' or '\u00a0' or '\u2028' or '\u2029' or '\ufeff'))
+                    {
+                        _i++;
+                        continue;
+                    }
+
+                    break;
                 }
             }
 
@@ -39364,19 +39730,34 @@ out bool hasReturning)
                         return ParseArray();
                     case '"':
                         return ParseString();
+                    case '\'' when _json5:
+                        return ParseString();
                     case 't':
                         return ParseLiteral("true", JKind.True);
                     case 'f':
                         return ParseLiteral("false", JKind.False);
                     case 'n':
+                    case 'N':
+                        if (_json5 && MatchesIgnoreCase("nan"))
+                        {
+                            _i += 3;
+                            return new JNode { Kind = JKind.Null };
+                        }
+
                         return ParseLiteral("null", JKind.Null);
                     default:
                         if (c == '-' || char.IsAsciiDigit(c))
+                            return ParseNumber();
+                        if (_json5 && (c == '+' || c == '.' || c is 'I' or 'i'))
                             return ParseNumber();
                         RecordFailure();
                         return null;
                 }
             }
+
+            private bool MatchesIgnoreCase(string literal)
+                => _i + literal.Length <= _s.Length
+                    && string.Compare(_s, _i, literal, 0, literal.Length, StringComparison.OrdinalIgnoreCase) == 0;
 
             private JNode? ParseLiteral(string literal, JKind kind)
             {
@@ -39398,8 +39779,19 @@ out bool hasReturning)
             private JNode? ParseNumber()
             {
                 int start = _i;
+                bool negative = false;
                 if (_i < _s.Length && _s[_i] == '-')
+                {
+                    negative = true;
                     _i++;
+                }
+                else if (_json5 && _i < _s.Length && _s[_i] == '+')
+                {
+                    // (2) JSON5 explicit-plus numbers: the sign is consumed and dropped so the
+                    // canonical form matches the unsigned spelling.
+                    _i++;
+                    start = _i;
+                }
 
                 if (_i >= _s.Length)
                 {
@@ -39407,6 +39799,59 @@ out bool hasReturning)
                     return null;
                 }
 
+                if (_json5 && (_s[_i] is 'I' or 'i'))
+                {
+                    // (5) JSON5 Infinity: canonicalized to SQLite's 9e999 spelling.
+                    if (!MatchesIgnoreCase("infinity"))
+                    {
+                        RecordFailure();
+                        return null;
+                    }
+
+                    _i += 8;
+                    return new JNode { Kind = JKind.Real, Raw = negative ? "-9e999" : "9e999" };
+                }
+
+                if (_json5 && (_s[_i] is 'N' or 'n'))
+                {
+                    // (5) JSON5 NaN: Turso materializes NaN as JSON null.
+                    if (!MatchesIgnoreCase("nan"))
+                    {
+                        RecordFailure();
+                        return null;
+                    }
+
+                    _i += 3;
+                    return new JNode { Kind = JKind.Null };
+                }
+
+                if (_json5 && _s[_i] == '0' && _i + 1 < _s.Length && (_s[_i + 1] is 'x' or 'X'))
+                {
+                    // (1) JSON5 hexadecimal numbers: canonicalized to a decimal integer.
+                    _i += 2;
+                    int hexStart = _i;
+                    while (_i < _s.Length && HexValue(_s[_i]) >= 0)
+                        _i++;
+                    if (_i == hexStart)
+                    {
+                        RecordFailure();
+                        return null;
+                    }
+
+                    string digits = _s.Substring(hexStart, _i - hexStart);
+                    if (!ulong.TryParse(digits, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong magnitude))
+                    {
+                        RecordFailure(hexStart);
+                        return null;
+                    }
+
+                    string hexRaw = negative
+                        ? "-" + magnitude.ToString(CultureInfo.InvariantCulture)
+                        : magnitude.ToString(CultureInfo.InvariantCulture);
+                    return new JNode { Kind = JKind.Integer, Raw = hexRaw };
+                }
+
+                bool leadingDot = false;
                 if (_s[_i] == '0')
                 {
                     _i++;
@@ -39416,6 +39861,11 @@ out bool hasReturning)
                     while (_i < _s.Length && char.IsAsciiDigit(_s[_i]))
                         _i++;
                 }
+                else if (_json5 && _s[_i] == '.')
+                {
+                    // (3) JSON5 leading-dot numbers: ".5" canonicalizes to "0.5".
+                    leadingDot = true;
+                }
                 else
                 {
                     RecordFailure();
@@ -39423,17 +39873,30 @@ out bool hasReturning)
                 }
 
                 bool isReal = false;
+                bool trailingDot = false;
                 if (_i < _s.Length && _s[_i] == '.')
                 {
                     isReal = true;
                     _i++;
                     if (_i >= _s.Length || !char.IsAsciiDigit(_s[_i]))
                     {
-                        RecordFailure();
-                        return null;
+                        // (4) JSON5 trailing-dot numbers: "42." canonicalizes to "42.0".
+                        if (!_json5 || leadingDot)
+                        {
+                            RecordFailure();
+                            return null;
+                        }
+
+                        trailingDot = true;
                     }
+
                     while (_i < _s.Length && char.IsAsciiDigit(_s[_i]))
                         _i++;
+                }
+                else if (leadingDot)
+                {
+                    RecordFailure();
+                    return null;
                 }
 
                 if (_i < _s.Length && (_s[_i] == 'e' || _s[_i] == 'E'))
@@ -39452,19 +39915,28 @@ out bool hasReturning)
                 }
 
                 string raw = _s.Substring(start, _i - start);
+                if (leadingDot)
+                    raw = negative ? "-0" + raw[1..] : "0" + raw;
+                else if (trailingDot)
+                    raw = raw.Insert(raw.IndexOf('.') + 1, "0");
+
                 return new JNode { Kind = isReal ? JKind.Real : JKind.Integer, Raw = raw };
             }
 
             public JNode? ParseString()
             {
-                if (_i >= _s.Length || _s[_i] != '"')
+                if (_i >= _s.Length || !(_s[_i] == '"' || (_json5 && _s[_i] == '\'')))
                 {
                     RecordFailure();
                     return null;
                 }
 
+                // (6) JSON5 single-quoted strings share the double-quoted scanner; only the
+                // terminating quote differs. The canonical Raw is always re-quoted with '"'.
+                char quote = _s[_i];
                 int start = _i;
                 _i++;
+                bool json5Only = false;
                 var sb = new StringBuilder();
                 while (true)
                 {
@@ -39475,7 +39947,7 @@ out bool hasReturning)
                     }
 
                     char c = _s[_i];
-                    if (c == '"')
+                    if (c == quote)
                     {
                         _i++;
                         break;
@@ -39516,6 +39988,50 @@ out bool hasReturning)
                             case 't':
                                 sb.Append('\t');
                                 break;
+                            case '\'' when _json5:
+                                sb.Append('\'');
+                                json5Only = true;
+                                break;
+                            case '0' when _json5:
+                                sb.Append('\0');
+                                json5Only = true;
+                                break;
+                            case 'v' when _json5:
+                                sb.Append('\v');
+                                json5Only = true;
+                                break;
+                            case '\n' when _json5:
+                                json5Only = true;
+                                break;
+                            case '\r' when _json5:
+                                if (_i + 1 < _s.Length && _s[_i + 1] == '\n')
+                                    _i++;
+                                json5Only = true;
+                                break;
+                            case 'x' when _json5:
+                                if (_i + 2 >= _s.Length)
+                                {
+                                    RecordFailure();
+                                    return null;
+                                }
+
+                                int hex = 0;
+                                for (int k = 1; k <= 2; k++)
+                                {
+                                    int hexDigit = HexValue(_s[_i + k]);
+                                    if (hexDigit < 0)
+                                    {
+                                        RecordFailure(_i + k);
+                                        return null;
+                                    }
+
+                                    hex = (hex * 16) + hexDigit;
+                                }
+
+                                sb.Append((char)hex);
+                                _i += 2;
+                                json5Only = true;
+                                break;
                             case 'u':
                                 if (_i + 4 >= _s.Length)
                                 {
@@ -39544,20 +40060,55 @@ out bool hasReturning)
 
                         _i++;
                     }
-                    else if (c < 0x20)
+                    else if (c < 0x20 && !_json5)
                     {
                         RecordFailure();
                         return null;
                     }
                     else
                     {
+                        if (c < 0x20)
+                            json5Only = true;
                         sb.Append(c);
                         _i++;
                     }
                 }
 
-                string raw = _s.Substring(start, _i - start);
-                return new JNode { Kind = JKind.Text, Raw = raw, Str = sb.ToString() };
+                string text = sb.ToString();
+                string raw = quote == '"' && !json5Only
+                    ? _s.Substring(start, _i - start)
+                    : QuoteString(text);
+                return new JNode { Kind = JKind.Text, Raw = raw, Str = text };
+            }
+
+            // (7) JSON5 unquoted object keys: a bare ECMAScript-style identifier is accepted as a
+            // key and re-emitted in canonical double-quoted form.
+            private JNode? ParseUnquotedKey()
+            {
+                int start = _i;
+                while (_i < _s.Length)
+                {
+                    char c = _s[_i];
+                    if (char.IsLetterOrDigit(c) || c == '_' || c == '$')
+                        _i++;
+                    else
+                        break;
+                }
+
+                if (_i == start)
+                {
+                    RecordFailure(start);
+                    return null;
+                }
+
+                if (char.IsAsciiDigit(_s[start]))
+                {
+                    RecordFailure(start);
+                    return null;
+                }
+
+                string text = _s.Substring(start, _i - start);
+                return new JNode { Kind = JKind.Text, Raw = QuoteString(text), Str = text };
             }
 
             private JNode? ParseArray()
@@ -39588,6 +40139,17 @@ out bool hasReturning)
                     if (c == ',')
                     {
                         _i++;
+                        // (8) JSON5 trailing commas: a comma immediately before ']' closes the array.
+                        if (_json5)
+                        {
+                            SkipWs();
+                            if (_i < _s.Length && _s[_i] == ']')
+                            {
+                                _i++;
+                                break;
+                            }
+                        }
+
                         continue;
                     }
 
@@ -39618,12 +40180,27 @@ out bool hasReturning)
                 while (true)
                 {
                     SkipWs();
-                    if (_i >= _s.Length || _s[_i] != '"')
+                    if (_i >= _s.Length)
                     {
                         RecordFailure();
                         return null;
                     }
-                    var key = ParseString();
+
+                    JNode? key;
+                    if (_s[_i] == '"' || (_json5 && _s[_i] == '\''))
+                    {
+                        key = ParseString();
+                    }
+                    else if (_json5)
+                    {
+                        key = ParseUnquotedKey();
+                    }
+                    else
+                    {
+                        RecordFailure();
+                        return null;
+                    }
+
                     if (key is null)
                         return null;
                     SkipWs();
@@ -39648,6 +40225,17 @@ out bool hasReturning)
                     if (c == ',')
                     {
                         _i++;
+                        // (8) JSON5 trailing commas: a comma immediately before '}' closes the object.
+                        if (_json5)
+                        {
+                            SkipWs();
+                            if (_i < _s.Length && _s[_i] == '}')
+                            {
+                                _i++;
+                                break;
+                            }
+                        }
+
                         continue;
                     }
 
@@ -39711,10 +40299,17 @@ public sealed class EmbeddedConnection : IDisposable
     private bool _foreignKeys;
     private bool _deferForeignKeys;
     private bool _recursiveTriggers;
-    private long _cacheSize = -2000;
-    private bool _cacheSpill = true;
+    private readonly Dictionary<EmbeddedDatabase, long> _cacheSizes = [];
+    private readonly Dictionary<EmbeddedDatabase, bool> _cacheSpills = [];
     private int _tempStore;
     private bool _ignoreCheckConstraints;
+    private readonly Dictionary<EmbeddedDatabase, int> _synchronousModes = [];
+    private readonly Dictionary<EmbeddedDatabase, string> _lockingModes = [];
+    private bool _dataSyncRetry;
+    private bool _fullColumnNames;
+    private bool _shortColumnNames = true;
+    private long _mvccCheckpointThreshold = DefaultMvccCheckpointThreshold;
+    private long _mvccGcThreshold = DefaultMvccGcThreshold;
     private bool _requireWhere;
     private bool _tempInitialized;
     private readonly Dictionary<EmbeddedDatabase, int> _pendingPageSizes = [];
@@ -39735,10 +40330,9 @@ public sealed class EmbeddedConnection : IDisposable
         set
         {
             _busyTimeout = value;
-            // The main database needs the timeout so its autocommit retry loop
-            // and stale-snapshot waits can honor it; attached databases keep the
-            // fail-fast default.
             _database.BusyTimeout = value;
+            foreach (var attachment in _attachedDatabases.Values)
+                attachment.Database.BusyTimeout = value;
         }
     }
 
@@ -40795,13 +41389,22 @@ public sealed class EmbeddedConnection : IDisposable
         ResetTransactionState();
         _lastInsertRowId = 0;
         _queryOnly = false;
-        _busyTimeout = TimeSpan.Zero;
+        BusyTimeout = TimeSpan.Zero;
         _foreignKeys = false;
         _deferForeignKeys = false;
         _recursiveTriggers = false;
         _tempStore = 0;
         _ignoreCheckConstraints = false;
         _requireWhere = false;
+        _cacheSizes.Clear();
+        _cacheSpills.Clear();
+        _synchronousModes.Clear();
+        _lockingModes.Clear();
+        _dataSyncRetry = false;
+        _fullColumnNames = false;
+        _shortColumnNames = true;
+        _mvccCheckpointThreshold = DefaultMvccCheckpointThreshold;
+        _mvccGcThreshold = DefaultMvccGcThreshold;
         _tempInitialized = false;
         _pendingPageSizes.Clear();
         _hooks.UpdateHook = null;
@@ -40974,6 +41577,10 @@ public sealed class EmbeddedConnection : IDisposable
 
     private void ResetTemporaryDatabase()
     {
+        _cacheSizes.Remove(_tempDatabase);
+        _cacheSpills.Remove(_tempDatabase);
+        _synchronousModes.Remove(_tempDatabase);
+        _lockingModes.Remove(_tempDatabase);
         _tempDatabase.Dispose();
         _tempDatabase = new EmbeddedDatabase();
         _database.CopyFunctionAndCollationRegistriesTo(_tempDatabase);
@@ -41006,6 +41613,13 @@ public sealed class EmbeddedConnection : IDisposable
         {
             throw new EmbeddedSqlException(
                 "Managed SQL callbacks cannot change transaction or attachment state during a write.");
+        }
+        if (_transactionIsConcurrent
+            && _transactionDatabases is not null
+            && EmbeddedDatabase.MayChangeSchema(statement))
+        {
+            throw new EmbeddedSqlException(
+                "Schema changes are not supported in concurrent transactions");
         }
 
         if (_transactionDatabases is null)
@@ -41090,6 +41704,28 @@ public sealed class EmbeddedConnection : IDisposable
                 return ExecutePragmaWalCheckpoint(walCheckpoint);
             case PragmaBusyTimeoutStatement busyTimeout:
                 return ExecutePragmaBusyTimeout(busyTimeout);
+            case PragmaSynchronousStatement synchronous:
+                return ExecutePragmaSynchronous(synchronous);
+            case PragmaLockingModeStatement lockingMode:
+                return ExecutePragmaLockingMode(lockingMode);
+            case PragmaAutoVacuumStatement autoVacuum:
+                return ExecutePragmaAutoVacuum(autoVacuum);
+            case PragmaDataSyncRetryStatement dataSyncRetry:
+                return ExecutePragmaDataSyncRetry(dataSyncRetry);
+            case PragmaFullColumnNamesStatement fullColumnNames:
+                return ExecutePragmaFullColumnNames(fullColumnNames);
+            case PragmaShortColumnNamesStatement shortColumnNames:
+                return ExecutePragmaShortColumnNames(shortColumnNames);
+            case PragmaMvccCheckpointThresholdStatement mvccCheckpointThreshold:
+                return ExecutePragmaMvccCheckpointThreshold(mvccCheckpointThreshold);
+            case PragmaMvccGcThresholdStatement mvccGcThreshold:
+                return ExecutePragmaMvccGcThreshold(mvccGcThreshold);
+            case PragmaListTypesStatement listTypes:
+                return ExecutePragmaListTypes(listTypes);
+            case PragmaFunctionListStatement functionList:
+                return ExecutePragmaFunctionList(functionList);
+            case PragmaModuleListStatement moduleList:
+                return ExecutePragmaModuleList(moduleList);
             case PragmaNoOpStatement:
                 // SQLite silently ignores unrecognized pragmas (Turso falls through its
                 // translate switch without emitting anything).
@@ -41394,11 +42030,6 @@ public sealed class EmbeddedConnection : IDisposable
 
         if (path.Equals(":memory:", StringComparison.OrdinalIgnoreCase))
         {
-            if (_database.IsFileBacked)
-            {
-                throw new EmbeddedSqlException(
-                    "Managed ATTACH supports only non-empty file paths; memory databases are not supported.");
-            }
             if (uriReadOnly)
                 throw new EmbeddedSqlException("Managed ATTACH cannot open an in-memory database read-only.");
             if (statement.Key is not null)
@@ -41409,6 +42040,7 @@ public sealed class EmbeddedConnection : IDisposable
             try
             {
                 _database.CopyFunctionAndCollationRegistriesTo(inMemoryAttached);
+                inMemoryAttached.BusyTimeout = BusyTimeout;
                 _attachedDatabases.Add(
                     statement.Alias,
                     new AttachedDatabase(
@@ -41483,6 +42115,7 @@ public sealed class EmbeddedConnection : IDisposable
         {
             attached = EmbeddedDatabase.OpenFile(path, attachmentFileSystem, readOnly);
             _database.CopyFunctionAndCollationRegistriesTo(attached);
+            attached.BusyTimeout = BusyTimeout;
             _attachedDatabases.Add(
                 statement.Alias,
                 new AttachedDatabase(path, pathIdentity, attached, GetNextAttachedDatabaseSequence(), ownedFileSystem));
@@ -41567,6 +42200,10 @@ public sealed class EmbeddedConnection : IDisposable
 
         _attachedDatabases.Remove(statement.Alias);
         _pendingPageSizes.Remove(attachment.Database);
+        _cacheSizes.Remove(attachment.Database);
+        _cacheSpills.Remove(attachment.Database);
+        _synchronousModes.Remove(attachment.Database);
+        _lockingModes.Remove(attachment.Database);
         attachment.Dispose();
         return ExecutionResult.Empty;
     }
@@ -44472,20 +45109,23 @@ public sealed class EmbeddedConnection : IDisposable
 
     private ExecutionResult ExecutePragmaCacheSize(PragmaCacheSizeStatement statement)
     {
-        ValidatePragmaSchema(statement.Schema);
+        var database = ResolvePragmaDatabase(statement.Schema);
         if (statement.Value is { } value)
         {
             // Connection-scoped hint; the managed pager does not evict on this bound yet,
             // but the stored value follows Turso's update_cache_size clamping so callers
             // can rely on SQLite's read-back contract.
-            _cacheSize = NormalizeCacheSize(value);
+            _cacheSizes[database] = NormalizeCacheSize(database, value);
             return ExecutionResult.Empty;
         }
 
-        return new ExecutionResult(["cache_size"], [[SqlValue.Integer(_cacheSize)]], 0);
+        return new ExecutionResult(
+            ["cache_size"],
+            [[SqlValue.Integer(_cacheSizes.GetValueOrDefault(database, -2000))]],
+            0);
     }
 
-    private long NormalizeCacheSize(long value)
+    private static long NormalizeCacheSize(EmbeddedDatabase database, long value)
     {
         // Mirrors turso-src/core/translate/pragma.rs update_cache_size: negative values are
         // KiB budgets converted to pages, > MAX_SAFE collapses to 0, and anything below the
@@ -44496,7 +45136,7 @@ public sealed class EmbeddedConnection : IDisposable
         var pages = value;
         if (value < 0)
         {
-            var pageSize = _database.GetPageSize();
+            var pageSize = database.GetPageSize();
             if (pageSize <= 0)
                 pageSize = 4096;
             long absoluteKiB = value == long.MinValue ? long.MaxValue : -value;
@@ -44512,14 +45152,17 @@ public sealed class EmbeddedConnection : IDisposable
 
     private ExecutionResult ExecutePragmaCacheSpill(PragmaCacheSpillStatement statement)
     {
-        ValidatePragmaSchema(statement.Schema);
+        var database = ResolvePragmaDatabase(statement.Schema);
         if (statement.Enabled is { } enabled)
         {
-            _cacheSpill = enabled;
+            _cacheSpills[database] = enabled;
             return ExecutionResult.Empty;
         }
 
-        return new ExecutionResult(["cache_spill"], [[SqlValue.Integer(_cacheSpill ? 1 : 0)]], 0);
+        return new ExecutionResult(
+            ["cache_spill"],
+            [[SqlValue.Integer(_cacheSpills.GetValueOrDefault(database, true) ? 1 : 0)]],
+            0);
     }
 
     private ExecutionResult ExecutePragmaMaxPageCount(PragmaMaxPageCountStatement statement)
@@ -44634,6 +45277,238 @@ public sealed class EmbeddedConnection : IDisposable
         }
 
         return new ExecutionResult(["busy_timeout"], [[SqlValue.Integer((long)BusyTimeout.TotalMilliseconds)]], 0);
+    }
+
+    private ExecutionResult ExecutePragmaSynchronous(PragmaSynchronousStatement statement)
+    {
+        var database = ResolvePragmaDatabase(statement.Schema);
+        if (statement.Value is null)
+        {
+            return new ExecutionResult(
+                ["synchronous"],
+                [[SqlValue.Integer(_synchronousModes.GetValueOrDefault(database, 2))]],
+                0);
+        }
+
+        var current = _synchronousModes.GetValueOrDefault(database, 2);
+        _synchronousModes[database] = statement.Value.ToUpperInvariant() switch
+        {
+            "OFF" or "0" => 0,
+            "NORMAL" or "1" => 1,
+            "FULL" or "2" => 2,
+            "EXTRA" or "3" => 3,
+            _ => current,
+        };
+        return ExecutionResult.Empty;
+    }
+
+    private ExecutionResult ExecutePragmaLockingMode(PragmaLockingModeStatement statement)
+    {
+        var database = ResolvePragmaDatabase(statement.Schema);
+        var lockingMode = _lockingModes.GetValueOrDefault(database, "normal");
+        if (statement.Value is not null
+            && statement.Value.Equals("normal", StringComparison.OrdinalIgnoreCase))
+        {
+            lockingMode = "normal";
+        }
+        else if (statement.Value is not null
+            && statement.Value.Equals("exclusive", StringComparison.OrdinalIgnoreCase))
+        {
+            lockingMode = "exclusive";
+        }
+
+        _lockingModes[database] = lockingMode;
+        return new ExecutionResult(["locking_mode"], [[SqlValue.Text(lockingMode)]], 0);
+    }
+
+    private ExecutionResult ExecutePragmaAutoVacuum(PragmaAutoVacuumStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        return statement.Value is null
+            ? new ExecutionResult(["auto_vacuum"], [[SqlValue.Integer(0)]], 0)
+            : ExecutionResult.Empty;
+    }
+
+    private ExecutionResult ExecutePragmaDataSyncRetry(PragmaDataSyncRetryStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Enabled is { } enabled)
+        {
+            _dataSyncRetry = enabled;
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(
+            ["data_sync_retry"],
+            [[SqlValue.Integer(_dataSyncRetry ? 1 : 0)]],
+            0);
+    }
+
+    // Turso tracks full_column_names/short_column_names as connection settings (core/lib.rs
+    // defaults them to false/true respectively) but its planner never consults them, so these
+    // are SQL-visible state only: result-column naming is unchanged.
+    private ExecutionResult ExecutePragmaFullColumnNames(PragmaFullColumnNamesStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Enabled is { } enabled)
+        {
+            _fullColumnNames = enabled;
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(
+            ["full_column_names"],
+            [[SqlValue.Integer(_fullColumnNames ? 1 : 0)]],
+            0);
+    }
+
+    private ExecutionResult ExecutePragmaShortColumnNames(PragmaShortColumnNamesStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Enabled is { } enabled)
+        {
+            _shortColumnNames = enabled;
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(
+            ["short_column_names"],
+            [[SqlValue.Integer(_shortColumnNames ? 1 : 0)]],
+            0);
+    }
+
+    // The managed engine has no background MVCC checkpointer or garbage collector, so both
+    // thresholds are stored and reported as connection state with Turso's exact validation.
+    private const long DefaultMvccCheckpointThreshold = 1000;
+
+    private const long DefaultMvccGcThreshold = 16 * 1024;
+
+    private ExecutionResult ExecutePragmaMvccCheckpointThreshold(PragmaMvccCheckpointThresholdStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Value is { } value)
+        {
+            if (value < -1)
+                throw new EmbeddedSqlException("mvcc_checkpoint_threshold must be -1, 0, or a positive integer");
+
+            _mvccCheckpointThreshold = value;
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(
+            ["mvcc_checkpoint_threshold"],
+            [[SqlValue.Integer(_mvccCheckpointThreshold)]],
+            0);
+    }
+
+    private ExecutionResult ExecutePragmaMvccGcThreshold(PragmaMvccGcThresholdStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        if (statement.Value is { } value)
+        {
+            if (value != -1 && value < 1)
+                throw new EmbeddedSqlException("mvcc_gc_threshold must be -1 (disabled) or a positive integer");
+
+            _mvccGcThreshold = value;
+            return ExecutionResult.Empty;
+        }
+
+        return new ExecutionResult(
+            ["mvcc_gc_threshold"],
+            [[SqlValue.Integer(_mvccGcThreshold)]],
+            0);
+    }
+
+    // PRAGMA list_types reuses the table_info result shape, reporting one row per built-in
+    // storage type with the remaining columns left NULL (Turso translate/pragma.rs).
+    private static readonly string[] ListTypeNames = ["INTEGER", "REAL", "TEXT", "BLOB", "ANY"];
+
+    private ExecutionResult ExecutePragmaListTypes(PragmaListTypesStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        var rows = ListTypeNames
+            .Select(name => new[]
+            {
+                SqlValue.Text(name),
+                SqlValue.Null,
+                SqlValue.Null,
+                SqlValue.Null,
+                SqlValue.Null,
+                SqlValue.Null,
+            })
+            .ToList();
+        return new ExecutionResult(
+            ["name", "type", "notnull", "dflt_value", "pk", "hidden"],
+            rows,
+            0);
+    }
+
+    private ExecutionResult ExecutePragmaFunctionList(PragmaFunctionListStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        const long innocuousFlag = 0x200000;
+        var rows = SqliteBuiltinFunctions.All
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .SelectMany(BuiltinFunctionListRows)
+            .ToList();
+        var registrations = _database.GetRegisteredFunctionMetadata();
+        rows.AddRange(registrations.Scalars.Select(function => FunctionListRow(
+            function.Name,
+            builtin: false,
+            type: "s",
+            function.Arity,
+            flags: 0)));
+        rows.AddRange(registrations.Aggregates.Select(function => FunctionListRow(
+            function.Name,
+            builtin: false,
+            type: "a",
+            function.Arity,
+            flags: 0)));
+        rows = rows
+            .OrderBy(row => row[0].AsText(), StringComparer.Ordinal)
+            .ThenBy(row => row[2].AsText(), StringComparer.Ordinal)
+            .ThenBy(row => row[4].AsInteger())
+            .ToList();
+        return new ExecutionResult(["name", "builtin", "type", "enc", "narg", "flags"], rows, 0);
+
+        IEnumerable<SqlValue[]> BuiltinFunctionListRows(string name)
+        {
+            var flags = innocuousFlag
+                | (SqliteBuiltinFunctions.IsDeterministic(name) ? 0x800 : 0);
+            if (name is "MIN" or "MAX")
+            {
+                yield return FunctionListRow(name, builtin: true, type: "s", arity: -1, flags);
+                yield return FunctionListRow(name, builtin: true, type: "w", arity: 1, flags: innocuousFlag);
+                yield break;
+            }
+
+            var type = SqliteBuiltinFunctions.IsWindowOnly(name) || SqliteBuiltinFunctions.IsAggregate(name)
+                ? "w"
+                : "s";
+            foreach (var arity in SqliteBuiltinFunctions.GetArities(name))
+                yield return FunctionListRow(name, builtin: true, type, arity, flags);
+        }
+
+        static SqlValue[] FunctionListRow(string name, bool builtin, string type, int arity, long flags)
+            =>
+            [
+                SqlValue.Text(name.ToLowerInvariant()),
+                SqlValue.Integer(builtin ? 1 : 0),
+                SqlValue.Text(type),
+                SqlValue.Text("utf8"),
+                SqlValue.Integer(arity),
+                SqlValue.Integer(flags),
+            ];
+    }
+
+    private ExecutionResult ExecutePragmaModuleList(PragmaModuleListStatement statement)
+    {
+        ValidatePragmaSchema(statement.Schema);
+        var rows = TableValuedFunctionRegistry.AllNames
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .Select(name => new[] { SqlValue.Text(name) })
+            .ToArray();
+        return new ExecutionResult(["name"], rows, 0);
     }
 
     private ExecutionResult ExecuteVacuum(VacuumStatement statement, SqlValue[] parameters)
@@ -44777,6 +45652,28 @@ public sealed class EmbeddedConnection : IDisposable
             return ["busy", "log", "checkpointed"];
         if (statement is PragmaBusyTimeoutStatement { Value: null })
             return ["busy_timeout"];
+        if (statement is PragmaSynchronousStatement { Value: null })
+            return ["synchronous"];
+        if (statement is PragmaLockingModeStatement)
+            return ["locking_mode"];
+        if (statement is PragmaAutoVacuumStatement { Value: null })
+            return ["auto_vacuum"];
+        if (statement is PragmaDataSyncRetryStatement { Enabled: null })
+            return ["data_sync_retry"];
+        if (statement is PragmaFullColumnNamesStatement { Enabled: null })
+            return ["full_column_names"];
+        if (statement is PragmaShortColumnNamesStatement { Enabled: null })
+            return ["short_column_names"];
+        if (statement is PragmaMvccCheckpointThresholdStatement { Value: null })
+            return ["mvcc_checkpoint_threshold"];
+        if (statement is PragmaMvccGcThresholdStatement { Value: null })
+            return ["mvcc_gc_threshold"];
+        if (statement is PragmaListTypesStatement)
+            return ["name", "type", "notnull", "dflt_value", "pk", "hidden"];
+        if (statement is PragmaFunctionListStatement)
+            return ["name", "builtin", "type", "enc", "narg", "flags"];
+        if (statement is PragmaModuleListStatement)
+            return ["name"];
 
         var routed = RouteStatement(statement);
         var transactionState = GetTransactionState(routed.Database);

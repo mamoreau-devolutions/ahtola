@@ -64,7 +64,10 @@ public class ManagedJsonConstructionMutationSliceTests
             .Message.Should().Be("json_insert() needs an odd number of arguments");
         Assert.Throws<EmbeddedSqlException>(() => Scalar("json_replace('{}', '$.value')"))
             .Message.Should().Be("json_replace() needs an odd number of arguments");
-        Assert.Throws<EmbeddedSqlException>(() => Scalar("json('{unquoted:1}')"));
+        // JSON5 unquoted object keys are accepted by every value-producing entry point
+        // (Turso jsonb.rs deserialize_obj); json_valid() stays RFC-strict.
+        AssertText("json('{unquoted:1}')", "{\"unquoted\":1}");
+        AssertInteger("json_valid('{unquoted:1}')", 0);
         AssertText("json(jsonb_array(1))", "[1]");
     }
 

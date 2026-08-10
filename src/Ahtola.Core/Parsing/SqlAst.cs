@@ -328,6 +328,28 @@ internal sealed record PragmaWalCheckpointStatement(string? Mode, string? Schema
 
 internal sealed record PragmaBusyTimeoutStatement(long? Value, string? Schema = null) : ParsedStatement;
 
+internal sealed record PragmaSynchronousStatement(string? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaLockingModeStatement(string? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaAutoVacuumStatement(string? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaDataSyncRetryStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaFullColumnNamesStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaShortColumnNamesStatement(bool? Enabled, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaMvccCheckpointThresholdStatement(long? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaMvccGcThresholdStatement(long? Value, string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaListTypesStatement(string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaFunctionListStatement(string? Schema = null) : ParsedStatement;
+
+internal sealed record PragmaModuleListStatement(string? Schema = null) : ParsedStatement;
+
 /// <summary>
 /// An unrecognized pragma: SQLite silently ignores unknown pragmas (Turso's
 /// translate/pragma.rs falls through without emitting anything), so the engine executes
@@ -798,7 +820,8 @@ internal sealed record FunctionExpression(
     bool Distinct = false,
     Expression? Filter = null,
     WindowSpecification? Window = null,
-    IReadOnlyList<OrderByTerm>? AggregateOrderBy = null) : Expression;
+    IReadOnlyList<OrderByTerm>? AggregateOrderBy = null,
+    bool OrderedSet = false) : Expression;
 
 internal sealed record ScalarSubqueryExpression(QueryStatement Query) : Expression;
 

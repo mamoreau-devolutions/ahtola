@@ -400,6 +400,12 @@ public sealed record SqliteWalIndexHeader
     /// writer and every read-mark lock, and has durably installed the main store.
     /// </summary>
     public SqliteWalIndexHeader WithRestartedWal(uint databasePageCount)
+        => WithRestartedWal(databasePageCount, Salt1, Salt2);
+
+    internal SqliteWalIndexHeader WithRestartedWal(
+        uint databasePageCount,
+        uint salt1,
+        uint salt2)
     {
         if (databasePageCount == 0)
         {
@@ -408,12 +414,16 @@ public sealed record SqliteWalIndexHeader
                 "A restarted SQLite WAL must retain a nonzero main-database page count.");
         }
 
-        return Create(
+        return SqliteWalIndexHeader.Create(
             changeCounter: unchecked(ChangeCounter + 1),
+            WalChecksumByteOrder,
+            PageSize,
             maximumFrame: 0,
             databasePageCount,
             frameChecksum1: 0,
-            frameChecksum2: 0);
+            frameChecksum2: 0,
+            salt1,
+            salt2);
     }
 
     private SqliteWalIndexHeader Create(

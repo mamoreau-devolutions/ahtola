@@ -36,7 +36,7 @@ public sealed class ManagedInteriorSingleLeafMutationTests
 
             var writesBeforeDelete = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(connection, $"DELETE FROM target WHERE id = {deletedId};");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBeforeDelete).Should().Be(6);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBeforeDelete).Should().Be(7);
 
             var afterDelete = ReadTopology(fileSystem, path);
             afterDelete.RootPage.Should().Be(before.RootPage);
@@ -47,7 +47,7 @@ public sealed class ManagedInteriorSingleLeafMutationTests
             var rootBeforeUpdate = ReadPage(fileSystem, path, afterDelete.RootPage);
             var writesBeforeUpdate = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(connection, $"UPDATE target SET payload = 'updated-{updatedId:D3}-{new string('u', PayloadLength)}' WHERE id = {updatedId};");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBeforeUpdate).Should().Be(4);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBeforeUpdate).Should().Be(5);
             ReadPage(fileSystem, path, afterDelete.RootPage).Should().Equal(rootBeforeUpdate);
         }
 

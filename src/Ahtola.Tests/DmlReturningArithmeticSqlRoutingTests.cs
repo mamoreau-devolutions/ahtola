@@ -277,27 +277,28 @@ public class DmlReturningArithmeticSqlRoutingTests
     }
 
     [Test]
-    public void ComparisonProjectionFallsBackToEvaluator()
+    public void ComparisonProjectionUsesCompiledLowering()
     {
         using var connection = Connect();
         Execute(connection, "CREATE TABLE t(value INTEGER);");
 
-        // A comparison is a BinaryExpression but not an arithmetic operator, so it never enters the
-        // arithmetic route.
-        ExplainRefused(connection, "EXPLAIN INSERT INTO t VALUES (10) RETURNING value < 5;");
+        Opcodes(ReadRows(connection, "EXPLAIN INSERT INTO t VALUES (10) RETURNING value < 5;"))
+            .Should().Contain("Compare");
 
         RoutedValue(connection, "INSERT INTO t VALUES (10) RETURNING value < 5;")
             .Should().Be(SqlValue.Integer(0));
     }
 
     [Test]
-    public void ConcatenationProjectionFallsBackToEvaluator()
+    public void ConcatenationProjectionUsesCompiledLowering()
     {
         using var connection = Connect();
         Execute(connection, "CREATE TABLE t(value INTEGER);");
 
-        // Concatenation carries text semantics the numeric Arithmetic opcode does not model.
-        ExplainRefused(connection, "EXPLAIN INSERT INTO t VALUES (10) RETURNING value || 'x';");
+        Opcodes(ReadRows(connection, "EXPLAIN INSERT INTO t VALUES (10) RETURNING value || 'x';"))
+            .Should().Contain("Function");
+        RoutedValue(connection, "INSERT INTO t VALUES (10) RETURNING value || 'x';")
+            .Should().Be(SqlValue.Text("10x"));
     }
 
     [Test]

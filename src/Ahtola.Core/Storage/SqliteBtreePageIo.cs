@@ -79,9 +79,11 @@ public interface ISqliteBtreePageIo
 public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
 {
     private const int TrunkHeaderLength = 2 * sizeof(uint);
+    private const uint PendingByte = SqlitePageLimits.PendingByte;
 
     private readonly Func<uint, byte[]> _readCommittedPage;
     private readonly Dictionary<uint, byte[]> _staged = [];
+    private readonly HashSet<uint> _freePages = [];
     private readonly uint _committedPageCount;
     private uint _pageCount;
     private uint _firstFreelistTrunkPage;
@@ -121,6 +123,8 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
         _freelistPageCount = freelistPageCount;
         PageSize = pageSize;
         UsableSpace = usableSpace;
+        MaximumPageCount = SqlitePageLimits.DefaultMaximumPageCount;
+        ValidateCommittedFreelist();
     }
 
     /// <inheritdoc />
@@ -131,6 +135,18 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
 
     /// <inheritdoc />
     public uint PageCount => _pageCount;
+
+    /// <summary>
+    /// The growth ceiling enforced by <see cref="AllocatePage"/>, mirroring
+    /// SQLite's <c>max_page_count</c> pragma and Turso
+    /// <c>Pager::set_max_page_count</c>: it never drops below the pages the
+    /// database already occupies and never exceeds the format ceiling.
+    /// </summary>
+    public uint MaximumPageCount { get; private set; }
+
+    /// <summary>Applies a clamped growth ceiling to subsequent allocations.</summary>
+    public uint SetMaximumPageCount(uint requested)
+        => MaximumPageCount = SqlitePageLimits.ClampMaximumPageCount(requested, _pageCount);
 
     /// <summary>The page count this staging layer started from.</summary>
     public uint CommittedPageCount => _committedPageCount;
@@ -182,9 +198,27 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
             return AllocateFromFreelist();
 
         var pageNumber = checked(_pageCount + 1);
+        if (SqlitePageLimits.IsPendingBytePage(pageNumber, PageSize))
+        {
+            EnsureWithinGrowthCeiling(pageNumber);
+            _pageCount = pageNumber;
+            _staged[pageNumber] = new byte[PageSize];
+            pageNumber = checked(pageNumber + 1);
+        }
+
+        EnsureWithinGrowthCeiling(pageNumber);
         _pageCount = pageNumber;
         _staged[pageNumber] = new byte[PageSize];
         return pageNumber;
+    }
+
+    private void EnsureWithinGrowthCeiling(uint pageNumber)
+    {
+        if (pageNumber > MaximumPageCount)
+        {
+            throw new InvalidOperationException(
+                $"SQLite database is full: page {pageNumber} exceeds the maximum page count {MaximumPageCount}.");
+        }
     }
 
     /// <inheritdoc />
@@ -197,10 +231,13 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
                 pageNumber,
                 $"SQLite cannot free page {pageNumber} outside 2..{_pageCount}.");
         }
+        if (_freePages.Contains(pageNumber))
+            throw new InvalidOperationException($"SQLite page {pageNumber} is already on the freelist.");
 
         // Ensure the freed page image is staged so callers publish a zeroed leaf
         // or rewritten trunk as part of the same mutation.
         _ = ReadPage(pageNumber);
+        _freePages.Add(pageNumber);
         _freelistPageCount = checked(_freelistPageCount + 1);
 
         if (_firstFreelistTrunkPage != 0)
@@ -261,6 +298,7 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
                 trunk.AsSpan(TrunkHeaderLength + (remaining * sizeof(uint))),
                 0);
             _freelistPageCount--;
+            _freePages.Remove(leafPageNumber);
             ZeroPage(leafPageNumber);
             return leafPageNumber;
         }
@@ -268,6 +306,7 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
         // Empty trunk: reuse the trunk page itself.
         _firstFreelistTrunkPage = nextTrunk;
         _freelistPageCount--;
+        _freePages.Remove(trunkPageNumber);
         if ((_freelistPageCount == 0) != (_firstFreelistTrunkPage == 0))
         {
             throw new InvalidDataException(
@@ -276,6 +315,62 @@ public sealed class SqliteStagedBtreePageIo : ISqliteBtreePageIo
 
         trunk.AsSpan().Clear();
         return trunkPageNumber;
+    }
+
+    private void ValidateCommittedFreelist()
+    {
+        if (_freelistPageCount == 0)
+            return;
+
+        var leafCapacity = (UsableSpace - TrunkHeaderLength) / sizeof(uint);
+        var currentTrunk = _firstFreelistTrunkPage;
+        while (currentTrunk != 0)
+        {
+            ValidateFreePage(currentTrunk, "trunk");
+            if (!_freePages.Add(currentTrunk))
+                throw new InvalidDataException($"SQLite freelist contains a cycle at trunk page {currentTrunk}.");
+
+            var trunk = _readCommittedPage(currentTrunk);
+            if (trunk.Length != PageSize)
+            {
+                throw new InvalidDataException(
+                    $"SQLite freelist trunk page {currentTrunk} has {trunk.Length} bytes, expected {PageSize}.");
+            }
+
+            var nextTrunk = BinaryPrimitives.ReadUInt32BigEndian(trunk);
+            var leafCount = BinaryPrimitives.ReadUInt32BigEndian(trunk.AsSpan(sizeof(uint)));
+            if (leafCount > leafCapacity)
+            {
+                throw new InvalidDataException(
+                    $"SQLite freelist trunk page {currentTrunk} declares {leafCount} leaves, exceeding capacity {leafCapacity}.");
+            }
+
+            for (var index = 0U; index < leafCount; index++)
+            {
+                var offset = checked(TrunkHeaderLength + ((int)index * sizeof(uint)));
+                var leafPage = BinaryPrimitives.ReadUInt32BigEndian(trunk.AsSpan(offset));
+                ValidateFreePage(leafPage, "leaf");
+                if (!_freePages.Add(leafPage))
+                    throw new InvalidDataException($"SQLite freelist page {leafPage} appears more than once.");
+            }
+
+            currentTrunk = nextTrunk;
+        }
+
+        if (_freePages.Count != _freelistPageCount)
+        {
+            throw new InvalidDataException(
+                $"SQLite freelist header declares {_freelistPageCount} pages but its trunks contain {_freePages.Count}.");
+        }
+    }
+
+    private void ValidateFreePage(uint pageNumber, string kind)
+    {
+        if (pageNumber < 2 || pageNumber > _committedPageCount)
+        {
+            throw new InvalidDataException(
+                $"SQLite freelist {kind} page {pageNumber} is outside the valid non-root page range 2..{_committedPageCount}.");
+        }
     }
 
     private byte[] GetMutablePage(uint pageNumber)

@@ -331,7 +331,7 @@ public class CompoundSelectSqlRoutingTests
     }
 
     [Test]
-    public void LimitFallsBackToEvaluator()
+    public void LimitNowLowersToBytecode()
     {
         using var connection = new EmbeddedDatabase().Connect();
         SeedSingleColumn(connection);
@@ -339,12 +339,13 @@ public class CompoundSelectSqlRoutingTests
         Column0(ReadRows(connection, "SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 2;"))
             .Should().Equal(SqlValue.Integer(1), SqlValue.Integer(2));
 
-        Assert.Throws<EmbeddedSqlException>(
-            () => ReadRows(connection, "EXPLAIN SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 2;"));
+        // UNION ALL splices per-term emitters, so every spliced ResultRow shares the same counter.
+        Opcodes(ReadRows(connection, "EXPLAIN SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 2;"))
+            .Should().ContainInOrder("LimitGate", "ResultRow");
     }
 
     [Test]
-    public void LimitOffsetFallsBackToEvaluator()
+    public void LimitOffsetNowLowersToBytecode()
     {
         using var connection = new EmbeddedDatabase().Connect();
         SeedSingleColumn(connection);
@@ -352,8 +353,8 @@ public class CompoundSelectSqlRoutingTests
         Column0(ReadRows(connection, "SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 2 OFFSET 1;"))
             .Should().Equal(SqlValue.Integer(2), SqlValue.Integer(2));
 
-        Assert.Throws<EmbeddedSqlException>(
-            () => ReadRows(connection, "EXPLAIN SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 2 OFFSET 1;"));
+        Opcodes(ReadRows(connection, "EXPLAIN SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 2 OFFSET 1;"))
+            .Should().ContainInOrder("OffsetGate", "LimitGate", "ResultRow");
     }
 
     [Test]

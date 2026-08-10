@@ -27,7 +27,7 @@ public sealed class ManagedMultiIndexBoundedLeafWalMutationTests
             var writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(writableConnection,
                 $"UPDATE target SET code = '{ChangedCode(12)}', category = '{ChangedCategory(12)}', note = '{ChangedNote(12)}' WHERE id = 12;");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(10);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(11);
 
             var afterUpdate = ReadRoots(fileSystem, path);
             afterUpdate.Header.ChangeCounter.Should().Be(before.Header.ChangeCounter + 1);
@@ -42,12 +42,12 @@ public sealed class ManagedMultiIndexBoundedLeafWalMutationTests
 
             writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(writableConnection, "DELETE FROM target WHERE id = 3;");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(10);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(11);
 
             writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(writableConnection,
                 $"INSERT INTO target VALUES (30, '{Code(30)}', '{Category(30)}', '{Note(30)}');");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(10);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(11);
         }
 
         using var reopened = EmbeddedDatabase.OpenFile(path, fileSystem);

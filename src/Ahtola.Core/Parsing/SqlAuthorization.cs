@@ -260,6 +260,21 @@ internal static class SqlAuthorization
                 PragmaForeignKeysStatement pragma => ("foreign_keys", Flag(pragma.Enabled)),
                 PragmaDeferForeignKeysStatement pragma => ("defer_foreign_keys", Flag(pragma.Enabled)),
                 PragmaRecursiveTriggersStatement pragma => ("recursive_triggers", Flag(pragma.Enabled)),
+                PragmaSynchronousStatement pragma => ("synchronous", pragma.Value),
+                PragmaLockingModeStatement pragma => ("locking_mode", pragma.Value),
+                PragmaAutoVacuumStatement pragma => ("auto_vacuum", pragma.Value),
+                PragmaDataSyncRetryStatement pragma => ("data_sync_retry", Flag(pragma.Enabled)),
+                PragmaFullColumnNamesStatement pragma => ("full_column_names", Flag(pragma.Enabled)),
+                PragmaShortColumnNamesStatement pragma => ("short_column_names", Flag(pragma.Enabled)),
+                PragmaMvccCheckpointThresholdStatement pragma => (
+                    "mvcc_checkpoint_threshold",
+                    pragma.Value?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                PragmaMvccGcThresholdStatement pragma => (
+                    "mvcc_gc_threshold",
+                    pragma.Value?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                PragmaListTypesStatement => ("list_types", null),
+                PragmaFunctionListStatement => ("function_list", null),
+                PragmaModuleListStatement => ("module_list", null),
                 PragmaHeaderIntegerStatement pragma => (
                     pragma.Kind switch
                     {

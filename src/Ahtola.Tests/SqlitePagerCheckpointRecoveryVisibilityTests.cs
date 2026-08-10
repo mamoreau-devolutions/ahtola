@@ -28,7 +28,7 @@ public sealed class SqlitePagerCheckpointRecoveryVisibilityTests
     }
 
     [Test]
-    public void ResetWalPublishesCheckpointedCommitAfterReopen()
+    public void ResetWalReopensAsAStandardEmptyWal()
     {
         var fileSystem = new InMemoryFileSystem();
 
@@ -71,7 +71,7 @@ public sealed class SqlitePagerCheckpointRecoveryVisibilityTests
     }
 
     [Test]
-    public void EncryptedResetWalPublishesCheckpointedCommitAfterReopen()
+    public void EncryptedResetWalReopensAsAStandardEmptyWal()
     {
         var fileSystem = new InMemoryFileSystem();
         using var encryption = new AhtolaEncryptionOptions(
@@ -108,6 +108,7 @@ public sealed class SqlitePagerCheckpointRecoveryVisibilityTests
             CommitPageOne(pager);
             pager.CheckpointToMainStoreAndResetWal();
         }
+        PublishLegacyCheckpointMarker(fileSystem, "non-authoritative.db-wal");
 
         using (var store = SqlitePageStore.Open(fileSystem, "non-authoritative.db"))
         {
@@ -132,9 +133,15 @@ public sealed class SqlitePagerCheckpointRecoveryVisibilityTests
             CommitPageOne(pager);
             pager.CheckpointToMainStoreAndResetWal();
         }
+        PublishLegacyCheckpointMarker(fileSystem, "tampered.db-wal");
 
         using (var wal = fileSystem.OpenFile("tampered.db-wal", FileOpenMode.OpenExisting))
-            wal.Write(12, [0]);
+        {
+            Span<byte> sequenceByte = stackalloc byte[1];
+            wal.Read(15, sequenceByte).Should().Be(1);
+            sequenceByte[0] ^= 0xff;
+            wal.Write(15, sequenceByte);
+        }
 
         Assert.Throws<InvalidDataException>(() =>
             SqlitePager.Open(fileSystem, "tampered.db", "tampered.db-wal", readOnly: true));
@@ -172,6 +179,23 @@ public sealed class SqlitePagerCheckpointRecoveryVisibilityTests
         return page;
     }
 
+    private static void PublishLegacyCheckpointMarker(InMemoryFileSystem fileSystem, string walPath)
+    {
+        SqliteWalHeader legacyHeader;
+        using (var wal = SqliteWalFile.Open(fileSystem, walPath, readOnly: true))
+        {
+            legacyHeader = SqliteWalHeader.Create(
+                wal.Header.PageSize,
+                wal.Header.Salt1,
+                wal.Header.Salt2,
+                checkpointSequence: 0xA5C3_5A3C,
+                checksumByteOrder: wal.Header.ChecksumByteOrder);
+        }
+
+        using var raw = fileSystem.OpenFile(walPath, FileOpenMode.OpenExisting);
+        raw.Write(0, legacyHeader.ToArray());
+    }
+
     private static void AssertCheckpointedMainStore(SqliteWalRecoveryInfo recovery)
     {
         recovery.LastValidFrameNumber.Should().Be(0);
@@ -180,4 +204,5 @@ public sealed class SqlitePagerCheckpointRecoveryVisibilityTests
         recovery.StopReason.Should().Be(SqliteWalRecoveryStopReason.EndOfFile);
         recovery.IsDurablyCheckpointedMainStore.Should().BeTrue();
     }
+
 }

@@ -471,7 +471,10 @@ public sealed class SqliteWalWriterCheckpointCoordinator : IDisposable
 
                 _wal.ResetAfterDurableCheckpoint(publishCheckpointedRecoveryMarker: true);
                 _index.ResetAfterDurableRestart(
-                    confirmation.Header.WithRestartedWal(_mainStore.PageCount));
+                    confirmation.Header.WithRestartedWal(
+                        _mainStore.PageCount,
+                        _wal.Header.Salt1,
+                        _wal.Header.Salt2));
                 if (mode == SqliteWalCheckpointMode.Truncate)
                     _wal.TruncateAfterDurableCheckpoint();
                 return new SqliteWalCheckpointResult(

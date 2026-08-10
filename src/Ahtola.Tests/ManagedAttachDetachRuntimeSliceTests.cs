@@ -122,6 +122,23 @@ public sealed class ManagedAttachDetachRuntimeSliceTests
     }
 
     [Test]
+    public void FileBackedPrimaryCanAttachConnectionOwnedMemoryDatabase()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using var main = EmbeddedDatabase.OpenFile("attach-memory-main.db", fileSystem);
+        using var connection = main.Connect();
+
+        Execute(connection, "ATTACH DATABASE ':memory:' AS aux;");
+        Execute(connection, "CREATE TABLE aux.items(value TEXT);");
+        Execute(connection, "INSERT INTO aux.items VALUES ('memory');");
+
+        ReadRows(connection, "SELECT value FROM aux.items;")
+            .Should().ContainSingle()
+            .Which.Should().Equal(SqlValue.Text("memory"));
+        fileSystem.FileExists(":memory:").Should().BeFalse();
+    }
+
+    [Test]
     public void AttachedWithoutRowidCatalogCommitsRollsBackAndReopens()
     {
         var fileSystem = new InMemoryFileSystem();
@@ -266,8 +283,8 @@ public sealed class ManagedAttachDetachRuntimeSliceTests
         using var main = EmbeddedDatabase.OpenFile("attach-errors-main.db", fileSystem);
         using var connection = main.Connect();
 
-        var memory = () => Execute(connection, "ATTACH DATABASE ':memory:' AS aux;");
-        memory.Should().Throw<EmbeddedSqlException>().WithMessage("*memory databases*not supported*");
+        Execute(connection, "ATTACH DATABASE ':memory:' AS memory;");
+        Execute(connection, "DETACH DATABASE memory;");
 
         var key = () => Execute(connection, "ATTACH DATABASE 'attach-errors-key.db' AS encrypted KEY '00';");
         key.Should().Throw<EmbeddedSqlException>().WithMessage("*encrypted primary database*");

@@ -77,7 +77,7 @@ public sealed class SqliteIndexLeafPageView
         }
 
         var snapshot = page.ToArray();
-        var header = SqliteBtreePageHeader.Parse(snapshot, isFirstPage);
+        var header = SqliteBtreePageHeader.Parse(snapshot, isFirstPage, usableSpace);
         if (header.PageType != SqliteBtreePageType.IndexLeaf)
             throw new InvalidDataException("SQLite page is not an index-leaf b-tree page.");
 
@@ -106,6 +106,7 @@ public sealed class SqliteIndexLeafPageView
         SqliteBtreePageValidation.ValidateCellsDoNotOverlapFreeblocks(
             snapshot,
             header,
+            usableSpace,
             ranges,
             "index-leaf");
         recordComparer ??= new SqliteIndexRecordComparer(textEncoding);

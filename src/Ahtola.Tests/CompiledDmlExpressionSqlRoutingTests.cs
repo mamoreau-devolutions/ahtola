@@ -176,7 +176,7 @@ public sealed class CompiledDmlExpressionSqlRoutingTests
     }
 
     [Test]
-    public void UnsupportedOrObservableReturningFamiliesRemainEvaluatorOwned()
+    public void ObservableReturningFamiliesRemainEvaluatorOwnedWhilePureExpressionsCompile()
     {
         var database = new EmbeddedDatabase();
         database.RegisterScalarFunction("upper", 1, values => values[0]);
@@ -185,13 +185,12 @@ public sealed class CompiledDmlExpressionSqlRoutingTests
 
         ExplainRefused(connection, "EXPLAIN INSERT INTO t VALUES ('x') RETURNING upper(value);");
         ExplainRefused(connection, "EXPLAIN INSERT INTO t VALUES ('x') RETURNING random();");
-        ExplainRefused(connection, "EXPLAIN INSERT INTO t VALUES ('x') RETURNING value || '!';");
-        ExplainRefused(connection, "EXPLAIN INSERT INTO t VALUES ('x') RETURNING value = 'x';");
         ExplainRefused(connection, "EXPLAIN INSERT INTO t VALUES ('x') RETURNING (SELECT value);");
 
-        // CAST is lowered rather than refused, so it must report a compiled program instead.
-        Opcodes(Explain(connection, "EXPLAIN INSERT INTO t VALUES ('x') RETURNING CAST(value AS TEXT);"))
-            .Should().Contain("Cast");
+        Opcodes(Explain(
+                connection,
+                "EXPLAIN INSERT INTO t VALUES ('x') RETURNING value || '!', value = 'x', CAST(value AS TEXT);"))
+            .Should().Contain(["Function", "Compare", "Cast"]);
     }
 
     private static void ExplainRefused(EmbeddedConnection connection, string sql)

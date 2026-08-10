@@ -114,7 +114,7 @@ public class RecursiveCteSqlRoutingTests
         var open = rows.Single(row => row[1].AsText() == "OpenWorkTable");
 
         open[5].AsText().Should().Be("union all");
-        open[6].AsText().Should().Be("open work table 0 (1 cols, union all, <=100000 rows, depth<=100000)");
+        open[6].AsText().Should().Be("open work table 0 (1 cols, union all, <=1000000 rows, depth<=1000000)");
     }
 
     [Test]
@@ -126,7 +126,7 @@ public class RecursiveCteSqlRoutingTests
         var open = rows.Single(row => row[1].AsText() == "OpenWorkTable");
 
         open[5].AsText().Should().Be("distinct");
-        open[6].AsText().Should().Be("open work table 0 (1 cols, distinct, <=100000 rows, depth<=100000)");
+        open[6].AsText().Should().Be("open work table 0 (1 cols, distinct, <=1000000 rows, depth<=1000000)");
     }
 
     [Test]

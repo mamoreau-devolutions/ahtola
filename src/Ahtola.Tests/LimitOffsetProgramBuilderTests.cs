@@ -10,7 +10,7 @@ namespace Ahtola.Tests;
 // resumable state machine, so the tests assert real emitted output as well as the lowered opcode shape.
 // The transform composes with any program that emits through unconditional ResultRow opcodes (scans,
 // sorted scans, UNION ALL) and rejects the conditional compound emitters, mirroring the evaluator's
-// OFFSET-then-LIMIT semantics exactly.
+// OFFSET-then-LIMIT semantics exactly, including conditional compound emitters.
 public class LimitOffsetProgramBuilderTests
 {
     private static readonly VdbeRowEquality ByteExactRows = (left, right) =>
@@ -193,25 +193,29 @@ public class LimitOffsetProgramBuilderTests
     }
 
     [Test]
-    public void RejectsAUnionDistinctProgram()
+    public void AppliesLimitToAUnionDistinctProgram()
     {
         var compound = CompoundProgramBuilder.BuildUnionDistinct(
             [ScanTerm("a", 1, 2), ScanTerm("b", 2, 3)],
             ByteExactRows);
 
-        Assert.Throws<StatementCompilationException>(
-            () => LimitOffsetProgramBuilder.Apply(compound.Program, offset: 0, limit: 1));
+        var gated = LimitOffsetProgramBuilder.Apply(compound, offset: 0, limit: 1);
+
+        Integers(RunCompound(gated)).Should().Equal(1);
+        gated.Program.Instructions.Should().Contain(instruction => instruction is LimitGateInstruction);
     }
 
     [Test]
-    public void RejectsAnIntersectProgram()
+    public void AppliesLimitToAnIntersectProgram()
     {
         var compound = CompoundProgramBuilder.BuildIntersect(
             [ScanTerm("a", 1, 2, 3), ScanTerm("b", 2, 3)],
             ByteExactRows);
 
-        Assert.Throws<StatementCompilationException>(
-            () => LimitOffsetProgramBuilder.Apply(compound.Program, offset: 0, limit: 1));
+        var gated = LimitOffsetProgramBuilder.Apply(compound, offset: 0, limit: 1);
+
+        Integers(RunCompound(gated)).Should().Equal(2);
+        gated.Program.Instructions.Should().Contain(instruction => instruction is LimitGateInstruction);
     }
 
     [Test]

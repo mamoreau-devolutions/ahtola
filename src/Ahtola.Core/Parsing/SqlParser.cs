@@ -314,15 +314,45 @@ internal sealed class SqlParser
             return new PragmaWalCheckpointStatement(ParseOptionalPragmaMode(name), schema);
         if (name.Equals("busy_timeout", StringComparison.OrdinalIgnoreCase))
             return new PragmaBusyTimeoutStatement(ParseOptionalPragmaLong(name), schema);
+        if (name.Equals("synchronous", StringComparison.OrdinalIgnoreCase))
+            return new PragmaSynchronousStatement(ParseOptionalPragmaSetting(name), schema);
+        if (name.Equals("locking_mode", StringComparison.OrdinalIgnoreCase))
+            return new PragmaLockingModeStatement(ParseOptionalPragmaSetting(name), schema);
+        if (name.Equals("auto_vacuum", StringComparison.OrdinalIgnoreCase))
+            return new PragmaAutoVacuumStatement(ParseOptionalPragmaSetting(name), schema);
+        if (name.Equals("data_sync_retry", StringComparison.OrdinalIgnoreCase))
+            return new PragmaDataSyncRetryStatement(ParseOptionalPragmaBoolean(name), schema);
+        if (name.Equals("full_column_names", StringComparison.OrdinalIgnoreCase))
+            return new PragmaFullColumnNamesStatement(ParseOptionalPragmaBoolean(name), schema);
+        if (name.Equals("short_column_names", StringComparison.OrdinalIgnoreCase))
+            return new PragmaShortColumnNamesStatement(ParseOptionalPragmaBoolean(name), schema);
+        if (name.Equals("mvcc_checkpoint_threshold", StringComparison.OrdinalIgnoreCase))
+            return new PragmaMvccCheckpointThresholdStatement(ParseOptionalPragmaLong(name), schema);
+        if (name.Equals("mvcc_gc_threshold", StringComparison.OrdinalIgnoreCase))
+            return new PragmaMvccGcThresholdStatement(ParseOptionalPragmaLong(name), schema);
+        if (name.Equals("list_types", StringComparison.OrdinalIgnoreCase))
+        {
+            // Turso rejects an assignment to list_types with a dedicated diagnostic rather
+            // than the generic "does not accept a value" shape used by other read-only pragmas.
+            if (_lexer.Current.Kind is not (TokenKind.Semicolon or TokenKind.End))
+                throw Error("list_types cannot be set");
 
-        // The introspection pragmas stay documented-unsupported (they return rows in
-        // Turso). Every other unrecognized pragma is silently ignored by SQLite, so accept
+            return new PragmaListTypesStatement(schema);
+        }
+        if (name.Equals("function_list", StringComparison.OrdinalIgnoreCase))
+        {
+            RequireReadOnlyPragma(name);
+            return new PragmaFunctionListStatement(schema);
+        }
+        if (name.Equals("module_list", StringComparison.OrdinalIgnoreCase))
+        {
+            RequireReadOnlyPragma(name);
+            return new PragmaModuleListStatement(schema);
+        }
+
+        // Every other unrecognized pragma is silently ignored by SQLite, so accept
         // the common argument shapes and execute as a no-op (Turso translate/pragma.rs
         // falls through the same way).
-        if (name.Equals("function_list", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("module_list", StringComparison.OrdinalIgnoreCase))
-            throw Error($"Unsupported PRAGMA {name}.");
-
         ParseOptionalPragmaIgnoredValue(name);
         return new PragmaNoOpStatement(name, schema);
     }
@@ -604,6 +634,25 @@ internal sealed class SqlParser
             return null;
 
         throw Error($"PRAGMA {name} requires '=' or a parenthesized value.");
+    }
+
+    private string? ParseOptionalPragmaSetting(string name)
+    {
+        if (_lexer.Current.Kind is TokenKind.Semicolon or TokenKind.End)
+            return null;
+
+        var parenthesized = Consume(TokenKind.LeftParen);
+        if (!parenthesized)
+            Expect(TokenKind.Equal);
+
+        var token = _lexer.Current;
+        if (token.Kind is not (TokenKind.Identifier or TokenKind.String or TokenKind.Integer))
+            throw Error($"Invalid value for PRAGMA {name}.");
+        _lexer.Next();
+
+        if (parenthesized)
+            Expect(TokenKind.RightParen);
+        return token.Text;
     }
 
     private string ParsePragmaMode(string name)
@@ -3154,13 +3203,17 @@ internal sealed class SqlParser
                     }
 
                     var distinct = ConsumeKeyword("DISTINCT");
-                    if (!distinct)
-                        ConsumeKeyword("ALL");
+                    var all = !distinct && ConsumeKeyword("ALL");
 
                     if (Consume(TokenKind.RightParen))
                     {
-                        var (emptyFilter, emptyWindow) = ParseFunctionSuffix();
-                        return new FunctionExpression(functionName, [], false, false, emptyFilter, emptyWindow);
+                        return ParseCompletedFunction(
+                            token.Text,
+                            functionName,
+                            [],
+                            distinct,
+                            distinct || all,
+                            null);
                     }
 
                     var arguments = new List<Expression> { ParseExpression() };
@@ -3180,8 +3233,13 @@ internal sealed class SqlParser
                     if (string.Equals(token.Text, "COUNT", StringComparison.OrdinalIgnoreCase) && arguments.Count != 1)
                         throw Error("wrong number of arguments to function COUNT()");
 
-                    var (filter, window) = ParseFunctionSuffix();
-                    return new FunctionExpression(functionName, arguments, false, distinct, filter, window, aggregateOrderBy);
+                    return ParseCompletedFunction(
+                        token.Text,
+                        functionName,
+                        arguments,
+                        distinct,
+                        distinct || all,
+                        aggregateOrderBy);
                 }
 
                 var bareColumn = new ColumnExpression(token.Text, BooleanKeyword: GetBooleanKeyword(token));
@@ -3190,6 +3248,75 @@ internal sealed class SqlParser
             default:
                 throw Error("Expected an expression.");
         }
+    }
+
+    private FunctionExpression ParseCompletedFunction(
+        string sourceName,
+        string functionName,
+        IReadOnlyList<Expression> arguments,
+        bool distinct,
+        bool hasDistinctnessModifier,
+        IReadOnlyList<OrderByTerm>? aggregateOrderBy)
+    {
+        if (!ConsumeKeyword("WITHIN"))
+        {
+            if (functionName == "MODE")
+                throw Error("mode() requires a WITHIN GROUP (ORDER BY ...) clause");
+
+            var (plainFilter, plainWindow) = ParseFunctionSuffix();
+            return new FunctionExpression(
+                functionName,
+                arguments,
+                false,
+                distinct,
+                plainFilter,
+                plainWindow,
+                aggregateOrderBy);
+        }
+
+        if (functionName is not ("MODE" or "PERCENTILE_CONT" or "PERCENTILE_DISC"))
+            throw Error($"WITHIN GROUP is not supported for function {sourceName}()");
+        if (hasDistinctnessModifier)
+            throw Error($"DISTINCT is not supported for ordered-set aggregate {sourceName}()");
+        if (aggregateOrderBy is not null)
+            throw Error($"{sourceName}() does not accept an argument ORDER BY together with WITHIN GROUP");
+
+        ExpectKeyword("GROUP");
+        Expect(TokenKind.LeftParen);
+        ExpectKeyword("ORDER");
+        ExpectKeyword("BY");
+        var withinGroup = new List<OrderByTerm> { ParseAggregateOrderByTerm() };
+        while (Consume(TokenKind.Comma))
+            withinGroup.Add(ParseAggregateOrderByTerm());
+        Expect(TokenKind.RightParen);
+
+        if (withinGroup.Count != 1)
+            throw Error($"WITHIN GROUP for {sourceName}() must specify exactly one ORDER BY expression");
+        if (withinGroup[0].Descending || withinGroup[0].NullPlacement != NullPlacement.Default)
+            throw Error("DESC and NULLS ordering inside WITHIN GROUP are not supported yet");
+
+        var expectedDirectArguments = functionName == "MODE" ? 0 : 1;
+        if (arguments.Count != expectedDirectArguments)
+            throw Error($"wrong number of arguments to function {sourceName}()");
+
+        var rewrittenArguments = new List<Expression>(arguments.Count + 1)
+        {
+            withinGroup[0].Expression,
+        };
+        rewrittenArguments.AddRange(arguments);
+
+        var (filter, window) = ParseFunctionSuffix();
+        if (window is not null)
+            throw Error($"ordered-set aggregate {sourceName}() may not be used as a window function");
+
+        return new FunctionExpression(
+            functionName,
+            rewrittenArguments,
+            false,
+            false,
+            filter,
+            null,
+            OrderedSet: true);
     }
 
     /// <summary>
