@@ -28553,9 +28553,9 @@ out bool hasReturning)
     // can be re-read after the surrounding statement moves on. Row values are preserved
     // exactly (no JSON-subtype stripping); only the lazy wrapper is forced.
     private static ExecutionResult MaterializeSubqueryResult(ExecutionResult result)
-        => result.Rows is StreamingProjectionRows
-            ? result with { Rows = result.Rows.ToArray() }
-            : result;
+            => result.Rows is StreamingProjectionRows
+                ? result with { Rows = result.Rows.ToArray() }
+                : result;
 
     private static long ComputeSubqueryRevisionFingerprint(QueryContext context)
     {
@@ -28742,7 +28742,15 @@ out bool hasReturning)
                 case RaiseExpression:
                     return false; // wall-clock value / side-effecting control flow
                 case FunctionExpression function:
-                    if (!SqliteBuiltinFunctions.IsDeterministic(function.Name))
+                    // Aggregates and window functions are stable over stable table data (the
+                    // revision fingerprint invalidates the memo if underlying rows change).
+                    // SqliteBuiltinFunctions.IsDeterministic intentionally rejects aggregate
+                    // names so callers that want scalar-only determinism stay conservative;
+                    // memoization must allow COUNT/SUM/... or uncorrelated GROUP BY subqueries
+                    // (EF BulkUpdates) would never cache.
+                    if (!SqliteBuiltinFunctions.IsAggregate(function.Name)
+                        && function.Window is null
+                        && !SqliteBuiltinFunctions.IsDeterministic(function.Name))
                         return false;
                     foreach (var argument in function.Arguments)
                         pending.Push(argument);
