@@ -260,8 +260,8 @@ public sealed class ManagedMaintenanceStatementTests
                 CREATE INDEX aux.entries_expr ON entries(lower(value)) WHERE id > 0;
                 INSERT INTO aux.entries VALUES (1, 'attached');
                 """);
-            Assert.Throws<EmbeddedSqlException>(() => Execute(connection, "REINDEX;"))!
-                .Message.Should().Contain("qualify a table or index");
+            // Bare REINDEX walks temp/main/attached (Turso collect_all_reindex_targets).
+            Execute(connection, "REINDEX;");
             Execute(connection, "REINDEX aux.entries_expr;");
             Execute(connection, "DETACH aux;");
 

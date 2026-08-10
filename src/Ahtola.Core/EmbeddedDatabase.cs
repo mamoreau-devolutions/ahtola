@@ -343,7 +343,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         string path,
         IFileSystem? fileSystem = null,
         bool readOnly = false,
-        bool foreignReadOnly = false)
+            bool foreignReadOnly = false,
+            int? initialPageSize = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         if (foreignReadOnly && !readOnly)
@@ -360,6 +361,7 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 effectiveFileSystem,
                 out var catalog,
                 readOnly: readOnly,
+                initialPageSize: initialPageSize,
                 foreignReadOnly: foreignReadOnly);
             try
             {
@@ -643,8 +645,8 @@ public sealed partial class EmbeddedDatabase : IDisposable
         /// <summary>
         /// Reports a committed row change to the connection's update hook. Mirrors SQLite:
         /// WITHOUT ROWID tables and internal <c>sqlite_*</c> tables never notify.
-        /// Concurrent MVCC transactions also mirror DELETE/UPDATE into the version store
-        /// here (INSERT stays on the connection allocation path).
+        /// Concurrent MVCC transactions also mirror INSERT/DELETE/UPDATE into the version
+        /// store here (including trigger-body and multi-row inserts).
         /// </summary>
         internal void ReportRowChange(SqliteChangeOperation operation, string tableName, EmbeddedTable table, long rowId)
         {
@@ -653,17 +655,51 @@ public sealed partial class EmbeddedDatabase : IDisposable
                 && ConcurrentMvccTxId is { } txId
                 && !tableName.StartsWith("sqlite_", StringComparison.OrdinalIgnoreCase))
             {
-                var key = new MvccRowId(store.GetOrCreateTableId(tableName), rowId);
                 switch (operation)
                 {
                     case SqliteChangeOperation.Delete:
-                        store.DeleteOrTombstoneBase(txId, key);
+                        store.DeleteOrTombstoneBase(
+                            txId,
+                            new MvccRowId(store.GetOrCreateTableId(tableName), rowId));
                         break;
                     case SqliteChangeOperation.Update:
                         {
                             var index = table.RowIds.IndexOf(rowId);
                             if (index >= 0 && index < table.Rows.Count)
-                                store.UpdateIncludingBase(txId, key, table.Rows[index]);
+                            {
+                                store.UpdateIncludingBase(
+                                    txId,
+                                    new MvccRowId(store.GetOrCreateTableId(tableName), rowId),
+                                    table.Rows[index]);
+                            }
+
+                            break;
+                        }
+                    case SqliteChangeOperation.Insert:
+                        {
+                            var index = table.RowIds.IndexOf(rowId);
+                            if (index < 0 || index >= table.Rows.Count)
+                                break;
+
+                            var tableId = store.GetOrCreateTableId(tableName);
+                            // Concurrent catalogs may both pick the same local rowid; promote
+                            // to a store-global id so first-committer-wins does not collapse
+                            // two inserts (Turso process-wide allocator).
+                            var allocated = store.AllocateRowId(tableId, minimumExclusive: rowId - 1);
+                            if (allocated != rowId)
+                            {
+                                table.RowIds[index] = allocated;
+                                var aliasIndex = table.RowidAliasColumnIndex;
+                                if (aliasIndex >= 0 && aliasIndex < table.Rows[index].Length)
+                                    table.Rows[index][aliasIndex] = SqlValue.Integer(allocated);
+                                rowId = allocated;
+                            }
+                            else
+                            {
+                                store.ObserveRowId(tableId, rowId);
+                            }
+
+                            store.Insert(txId, new MvccRowId(tableId, rowId), table.Rows[index]);
                             break;
                         }
                 }
@@ -41663,6 +41699,8 @@ public sealed class EmbeddedConnection : IDisposable
                     () => ExecuteAttach(attach, parameters));
             case DetachDatabaseStatement detach:
                 return ExecuteDetach(detach);
+            case ReindexStatement reindex when IsMultiDatabaseReindex(reindex):
+                return ExecuteMultiDatabaseReindex(reindex, cancellationToken);
             case PragmaDatabaseListStatement databaseList:
                 ValidatePragmaSchema(databaseList.Schema);
                 return ExecutePragmaDatabaseList();
@@ -42039,8 +42077,12 @@ public sealed class EmbeddedConnection : IDisposable
             var inMemoryAttached = new EmbeddedDatabase();
             try
             {
+                // Fresh in-memory attach inherits main page size (and MVCC when enabled).
+                inMemoryAttached._inMemoryPageSize = _database.GetPageSize();
                 _database.CopyFunctionAndCollationRegistriesTo(inMemoryAttached);
                 inMemoryAttached.BusyTimeout = BusyTimeout;
+                if (_database.IsMvccEnabled)
+                    _ = inMemoryAttached.EnableMvccMode();
                 _attachedDatabases.Add(
                     statement.Alias,
                     new AttachedDatabase(
@@ -42072,7 +42114,7 @@ public sealed class EmbeddedConnection : IDisposable
         if (pathComparer.Equals(pathIdentity, GetAttachmentPathIdentity(_database.DatabasePath)))
             throw new EmbeddedSqlException("database file is already open as main");
         if (_attachedDatabases.Values.Any(attachment =>
-                pathComparer.Equals(attachment.PathIdentity, pathIdentity)))
+        pathComparer.Equals(attachment.PathIdentity, pathIdentity)))
         {
             throw new EmbeddedSqlException("database file is already attached");
         }
@@ -42110,12 +42152,29 @@ public sealed class EmbeddedConnection : IDisposable
             attachmentFileSystem = ownedFileSystem;
         }
 
+        var isFreshAttach = !attachmentFileSystem.FileExists(path);
         EmbeddedDatabase? attached = null;
         try
         {
-            attached = EmbeddedDatabase.OpenFile(path, attachmentFileSystem, readOnly);
+            // Fresh files inherit main page size (Turso apply_page_layout_to_fresh_attach_db).
+            attached = EmbeddedDatabase.OpenFile(
+                path,
+                attachmentFileSystem,
+                readOnly,
+                initialPageSize: isFreshAttach ? _database.GetPageSize() : null);
             _database.CopyFunctionAndCollationRegistriesTo(attached);
             attached.BusyTimeout = BusyTimeout;
+
+            if (isFreshAttach)
+            {
+                if (_database.IsMvccEnabled && !readOnly)
+                    _ = attached.EnableMvccMode();
+            }
+            else
+            {
+                RejectInitializedAttachMismatches(statement.Alias, attached);
+            }
+
             _attachedDatabases.Add(
                 statement.Alias,
                 new AttachedDatabase(path, pathIdentity, attached, GetNextAttachedDatabaseSequence(), ownedFileSystem));
@@ -42128,6 +42187,36 @@ public sealed class EmbeddedConnection : IDisposable
         }
 
         return ExecutionResult.Empty;
+    }
+
+    /// <summary>
+    /// Turso <c>reject_initialized_attach_mismatches</c>: initialized attachments must
+    /// share the main database page size and MVCC/WAL journal mode family.
+    /// </summary>
+    private void RejectInitializedAttachMismatches(string alias, EmbeddedDatabase attached)
+    {
+        _database.EnsureMvccAttachedIfDurable();
+        attached.EnsureMvccAttachedIfDurable();
+
+        var mainMvcc = _database.IsMvccEnabled;
+        var attachedMvcc = attached.IsMvccEnabled;
+        if (mainMvcc != attachedMvcc)
+        {
+            var mainMode = mainMvcc ? "MVCC" : "WAL";
+            var attachedMode = attachedMvcc ? "MVCC" : "WAL";
+            throw new EmbeddedSqlException(
+                $"cannot attach database '{alias}': main database uses {mainMode} journal mode "
+                + $"but attached database uses {attachedMode}. Both must use the same journal mode.");
+        }
+
+        var mainPageSize = _database.GetPageSize();
+        var attachedPageSize = attached.GetPageSize();
+        if (mainPageSize != attachedPageSize)
+        {
+            throw new EmbeddedSqlException(
+                $"cannot attach database '{alias}': page size mismatch "
+                + $"(main={mainPageSize}, attached={attachedPageSize})");
+        }
     }
 
     internal void ApplySnapshotPragmaHeader(int schemaVersion, int userVersion, int applicationId)
@@ -42484,14 +42573,9 @@ public sealed class EmbeddedConnection : IDisposable
             UpdateStatement update => RouteDataStatement(update),
             DeleteStatement delete => RouteDataStatement(delete),
             QueryStatement query => RouteQuery(query),
-            ExplainStatement { Inner: var inner } when ContainsAttachedSchemaQualification(inner)
-                => throw new EmbeddedSqlException("EXPLAIN for schema-qualified managed ATTACH statements is not supported."),
-            ExplainQueryPlanStatement { Inner: var inner } when ContainsAttachedSchemaQualification(inner)
-                => throw new EmbeddedSqlException(
-                    "EXPLAIN QUERY PLAN for schema-qualified managed ATTACH statements is not supported."),
             ExplainStatement explain => RouteExplain(
-                explain.Inner,
-                rewritten => new ExplainStatement(rewritten)),
+                            explain.Inner,
+                            rewritten => new ExplainStatement(rewritten)),
             ExplainQueryPlanStatement explainQueryPlan => RouteExplain(
                 explainQueryPlan.Inner,
                 rewritten => new ExplainQueryPlanStatement(rewritten)),
@@ -42561,30 +42645,17 @@ public sealed class EmbeddedConnection : IDisposable
 
     private RoutedStatement RouteReindex(ReindexStatement statement)
     {
+        // Bare REINDEX and collation REINDEX walk every schema (temp/main/attached),
+        // matching Turso collect_all_reindex_targets / collect_reindex_targets_by_collation.
+        // Multi-database execution is handled before single-DB routing when needed.
         if (statement.Target is null)
-        {
-            if (_attachedDatabases.Count != 0)
-            {
-                throw new EmbeddedSqlException(
-                    "Managed REINDEX without a target is not supported while databases are attached; "
-                    + "qualify a table or index.");
-            }
-
             return new RoutedStatement(_database, statement, IsAttached: false);
-        }
 
         if (ManagedSchemaName.TrySplit(statement.Target, out var schema, out var localName))
             return RouteSchema(schema, localName, name => statement with { Target = name });
 
-        if (_database.HasCollation(statement.Target))
+        if (HasCollationAnywhere(statement.Target))
         {
-            if (_attachedDatabases.Count != 0)
-            {
-                throw new EmbeddedSqlException(
-                    "Managed collation REINDEX is not supported while databases are attached; "
-                    + "qualify a table or index.");
-            }
-
             return new RoutedStatement(
                 _database,
                 statement with { TargetKind = ReindexTargetKind.Collation },
@@ -42598,9 +42669,121 @@ public sealed class EmbeddedConnection : IDisposable
         return RouteSchema(schema, statement.Target, name => statement with { Target = name });
     }
 
+    private bool HasCollationAnywhere(string name)
+    {
+        if (_database.HasCollation(name) || _tempDatabase.HasCollation(name))
+            return true;
+        foreach (var attachment in _attachedDatabases.Values)
+        {
+            if (attachment.Database.HasCollation(name))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Bare REINDEX and collation REINDEX always fan out across schemas so indexes
+    /// on temp/main/attached stay consistent (Turso collect_all_reindex_targets).
+    /// </summary>
+    private bool IsMultiDatabaseReindex(ReindexStatement statement)
+    {
+        if (statement.Target is null)
+            return true;
+        if (ManagedSchemaName.TrySplit(statement.Target, out _, out _))
+            return false;
+        return HasCollationAnywhere(statement.Target);
+    }
+
+    private ExecutionResult ExecuteMultiDatabaseReindex(
+            ReindexStatement statement,
+            CancellationToken cancellationToken)
+    {
+        // Turso blocks REINDEX entirely under MVCC mode.
+        _database.EnsureMvccAttachedIfDurable();
+        if (_database.IsMvccEnabled)
+            throw new EmbeddedSqlException("REINDEX is not supported in MVCC mode");
+        if (_queryOnly)
+            throw new EmbeddedSqlException("attempt to write a readonly database");
+
+        var local = statement.Target is null
+            ? statement
+            : statement with { TargetKind = ReindexTargetKind.Collation };
+
+        var changed = false;
+        var forceRewrite = false;
+        foreach (var database in EnumerateReindexDatabases())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            database.TransactionLock.ThrowIfReadBlocked(this, BusyTimeout);
+            var mutationReserved = ReserveTransactionMutation(database, local);
+            try
+            {
+                var state = GetTransactionState(database);
+                ExecutionResult result;
+                if (state is null)
+                {
+                    result = database.Execute(
+                        local,
+                        Array.Empty<SqlValue>(),
+                        _lastInsertRowId,
+                        _foreignKeys,
+                        _recursiveTriggers,
+                        _deferForeignKeys,
+                        inTransaction: false,
+                        cancellationToken);
+                }
+                else
+                {
+                    var catalog = state.Catalog.Clone();
+                    result = database.Execute(
+                        local,
+                        Array.Empty<SqlValue>(),
+                        catalog,
+                        _lastInsertRowId,
+                        _foreignKeys,
+                        _recursiveTriggers,
+                        _deferForeignKeys,
+                        inTransaction: true,
+                        cancellationToken);
+                    if (result.Changed || result.ForceFullCatalogRewrite)
+                    {
+                        state.Catalog = catalog;
+                        state.HasChanges = true;
+                        state.ForceFullCatalogRewrite |= result.ForceFullCatalogRewrite;
+                        if (!ReferenceEquals(database, _tempDatabase))
+                            _transactionWriteDatabase = database;
+                    }
+
+                    database.RecordChangeCounters(local, result);
+                }
+
+                changed |= result.Changed;
+                forceRewrite |= result.ForceFullCatalogRewrite;
+            }
+            finally
+            {
+                if (mutationReserved)
+                    ReleaseTransactionMutation(database);
+            }
+        }
+
+        return new ExecutionResult([], [], 0, changed, forceRewrite);
+    }
+
+    private IEnumerable<EmbeddedDatabase> EnumerateReindexDatabases()
+    {
+        // Turso order: temp, main, then attachments by attach sequence.
+        if (_tempInitialized)
+            yield return _tempDatabase;
+        yield return _database;
+        foreach (var attachment in _attachedDatabases.OrderBy(pair => pair.Value.Sequence))
+            yield return attachment.Value.Database;
+    }
+
     private RoutedStatement RouteExistingIndexMetadataStatement(
-        string objectName,
-        Func<string, ParsedStatement> rewrite)
+string objectName,
+Func<string, ParsedStatement> rewrite)
     {
         if (ManagedSchemaName.TrySplit(objectName, out var schema, out var localName))
             return RouteSchema(schema, localName, rewrite);
@@ -44402,13 +44585,26 @@ public sealed class EmbeddedConnection : IDisposable
         {
             var pieces = part.Split('=', 2);
             var name = Uri.UnescapeDataString(pieces[0]);
-            if (!name.Equals("mode", StringComparison.OrdinalIgnoreCase))
+            // Turso OpenOptions::parse recognizes mode/modeof/cache/immutable/vfs/cipher/hexkey
+            // and ignores unknown keys. Managed ATTACH applies mode; other known options are
+            // accepted as no-ops so Turso-compatible URIs attach cleanly.
+            if (name.Equals("mode", StringComparison.OrdinalIgnoreCase))
             {
-                throw new EmbeddedSqlException(
-                    $"Managed ATTACH URI option '{name}' is not supported.");
+                mode = pieces.Length == 2 ? Uri.UnescapeDataString(pieces[1]) : string.Empty;
+                continue;
             }
 
-            mode = pieces.Length == 2 ? Uri.UnescapeDataString(pieces[1]) : string.Empty;
+            if (name.Equals("modeof", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("cache", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("immutable", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("vfs", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("cipher", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("hexkey", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // Unknown options ignored (Turso `_ => {}`).
         }
 
         var readOnly = mode.Equals("ro", StringComparison.OrdinalIgnoreCase);
@@ -44501,7 +44697,11 @@ public sealed class EmbeddedConnection : IDisposable
                     snapshot.Version,
                     snapshot.PragmaHeader));
 
-                if (concurrent && database.MvStore is { } store)
+                // BEGIN CONCURRENT opens an MvStore tx on main only until attach+MVCC
+                // inheritance is complete. Attached schemas stay classic-catalog snapshots.
+                if (concurrent
+                    && ReferenceEquals(database, _database)
+                    && database.MvStore is { } store)
                 {
                     var tx = store.BeginTransaction();
                     mvccTxs.Add(database, tx.Id);
@@ -44597,6 +44797,16 @@ public sealed class EmbeddedConnection : IDisposable
             throw new EmbeddedSqlException(
                 "Managed connections do not support reentrant writes from SQL callbacks.");
         }
+
+        // BEGIN CONCURRENT currently scopes multi-writer MVCC to main only; attached
+        // and temp mutations would otherwise land as classic catalog edits without a
+        // matching version-store tx (bounded Ahtola scope until attach+MVCC inherits).
+        if (_transactionIsConcurrent && !ReferenceEquals(database, _database))
+        {
+            throw new EmbeddedSqlException(
+                "Concurrent transaction mode only supports mutations on the main database");
+        }
+
         if (ReferenceEquals(database, _tempDatabase))
             return;
         if (_transactionWriteDatabase is null
@@ -44712,9 +44922,10 @@ public sealed class EmbeddedConnection : IDisposable
     }
 
     /// <summary>
-    /// Mirrors concurrent INSERT into the version store with a process-wide rowid
-    /// allocation. DELETE/UPDATE are recorded per-row via
-    /// <see cref="EmbeddedDatabase.QueryContext.ReportRowChange"/> under concurrent scope.
+    /// Historical hook retained for call-site compatibility. Concurrent INSERT/DELETE/UPDATE
+    /// now mirror into the version store per-row via
+    /// <see cref="EmbeddedDatabase.QueryContext.ReportRowChange"/> (covers multi-row and
+    /// trigger-body inserts without double-recording).
     /// </summary>
     private void RecordConcurrentMvccMutation(
         EmbeddedDatabase database,
@@ -44722,39 +44933,10 @@ public sealed class EmbeddedConnection : IDisposable
         EmbeddedDatabase.SchemaCatalog catalog,
         ExecutionResult result)
     {
-        if (!_transactionIsConcurrent
-            || !_mvccTransactions.TryGetValue(database, out var txId)
-            || database.MvStore is not { } store)
-        {
-            return;
-        }
-
-        if (statement is not InsertStatement insert || result.LastInsertRowId is not { } rowId)
-            return;
-
-        if (!catalog.Tables.TryGetValue(insert.TableName, out var table))
-            return;
-        var index = table.RowIds.IndexOf(rowId);
-        if (index < 0 || index >= table.Rows.Count)
-            return;
-        var tableId = store.GetOrCreateTableId(insert.TableName);
-        // Concurrent catalogs may both pick the same local rowid; promote to a
-        // store-global id so first-committer-wins does not collapse two inserts.
-        var allocated = store.AllocateRowId(tableId, minimumExclusive: rowId - 1);
-        if (allocated != rowId)
-        {
-            table.RowIds[index] = allocated;
-            // INTEGER PRIMARY KEY alias lives in cells; keep it aligned when present.
-            var aliasIndex = table.RowidAliasColumnIndex;
-            if (aliasIndex >= 0 && aliasIndex < table.Rows[index].Length)
-                table.Rows[index][aliasIndex] = SqlValue.Integer(allocated);
-        }
-        else
-        {
-            store.ObserveRowId(tableId, rowId);
-        }
-
-        store.Insert(txId, new MvccRowId(tableId, allocated), table.Rows[index]);
+        _ = database;
+        _ = statement;
+        _ = catalog;
+        _ = result;
     }
 
     private bool TryGetConcurrentMvccScope(
@@ -45699,6 +45881,9 @@ public sealed class EmbeddedConnection : IDisposable
         if (_transactionDatabases is null)
             BeginTransaction(openedBySavepoint: true, TransactionMode.Deferred);
 
+        foreach (var (database, txId) in _mvccTransactions)
+            database.MvStore?.BeginNamedSavepoint(txId, name);
+
         _savepoints.Add(new SavepointEntry(
             name,
             _transactionDatabases!.ToDictionary(
@@ -45724,6 +45909,9 @@ public sealed class EmbeddedConnection : IDisposable
             CommitTransaction();
             return;
         }
+
+        foreach (var (database, txId) in _mvccTransactions)
+            database.MvStore?.ReleaseNamedSavepoint(txId, name);
 
         // RELEASE removes the named savepoint and every savepoint created after it,
         // keeping their changes in the enclosing scope.
@@ -45751,6 +45939,10 @@ public sealed class EmbeddedConnection : IDisposable
             state.PendingDeferredViolations.UnionWith(savedState.PendingDeferredViolations);
         }
         _transactionWriteDatabase = savepoint.WriteDatabase;
+
+        // Undo concurrent version-store ops after the named mark (Turso MVCC savepoints).
+        foreach (var (database, txId) in _mvccTransactions)
+            database.MvStore?.RollbackToNamedSavepoint(txId, name);
 
         // ROLLBACK TO keeps the named savepoint but cancels any created after it.
         if (index + 1 < _savepoints.Count)
