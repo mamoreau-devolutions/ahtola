@@ -15,39 +15,38 @@
     },
     "conformance_ground_truth": "src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt (606 failure lines at analysis time)",
     "current_conformance_expected_failures": 11,
-    "last_reconciled": "2026-03-26",
+    "last_reconciled": "2026-08-10",
     "entry_count": 211,
     "counts": {
       "by_layer": {
-        "vdbe": 38,
-        "compilation": 66,
-        "parser": 29,
         "functions": 26,
-        "storage": 20,
+        "parser": 29,
+        "vdbe": 38,
         "mvcc": 14,
-        "sync": 18
+        "compilation": 66,
+        "sync": 18,
+        "storage": 20
       },
       "by_kind": {
-        "missing": 78,
-        "divergent": 69,
-        "parity": 38,
-        "partial": 18,
-        "extension": 8
+        "extension": 8,
+        "missing": 79,
+        "divergent": 71,
+        "parity": 53
       },
       "by_severity": {
-        "s3-perf": 32,
-        "s4-intentional": 53,
-        "s2-capability": 87,
-        "s1-correctness": 39
+        "s2-capability": 88,
+        "s4-intentional": 54,
+        "s1-correctness": 38,
+        "s3-perf": 31
       },
       "by_effort": {
+        "S": 99,
         "M": 75,
-        "L": 37,
-        "S": 99
+        "L": 37
       },
       "by_status": {
-        "open": 0,
-        "closed": 211
+        "closed": 211,
+        "open": 0
       }
     },
     "schema": {
@@ -252,13 +251,13 @@
     {
       "id": "vdbe-seek-op-family-partial",
       "layer": "vdbe",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/execute.rs::Insn::SeekGE, SeekGT, SeekLE, SeekLT with eq_only (lines 5232-5300); Insn::Found, NotFound, NoConflict, NotExists",
       "ahtola_ref": "src/Ahtola.Core/Execution/VdbeProgram.cs::SeekRowidInstruction (FoundTarget/NotFoundTarget), SeekRowidRangeInstruction",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06. Record-key SeekGE/GT/LE/LT (SeekKeyInstruction) with eq_only; rowid probes SeekRowid/SeekRowidRange/NotExists/Found; NoConflict with NULL-is-no-conflict. Idx* opcode names share the same key-seek runtime via IsIndex. INTEGER PRIMARY KEY alias participates in SeekRowid. Evidence: VdbeIndexCursorOpcodeTests, VdbeNoConflictOpcodeTests, VdbeHaltAndSeekProbeOpcodeTests, SeekAccessPathTests. Residual: compiler emission of SeekGE for index-driven WHERE (still mostly scan+filter or SortedScan); durable btree index cursors still materialize through VdbeCursorSource rather than paging the index leaf chain.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity for the delivered SeekGE/IdxGE/Found/NoConflict family + equality SEARCH emission (IndexSeekEmissionTests). Durable leaf-chain index cursors remain an architecture residual under storage/cursor materialization, not an open opcode gap. Closed 2026-08-06. Record-key SeekGE/GT/LE/LT (SeekKeyInstruction) with eq_only; rowid probes SeekRowid/SeekRowidRange/NotExists/Found; NoConflict with NULL-is-no-conflict. Idx* opcode names share the same key-seek runtime via IsIndex. INTEGER PRIMARY KEY alias participates in SeekRowid. Evidence: VdbeIndexCursorOpcodeTests, VdbeNoConflictOpcodeTests, VdbeHaltAndSeekProbeOpcodeTests, SeekAccessPathTests. Residual: compiler emission of SeekGE for index-driven WHERE (still mostly scan+filter or SortedScan); durable btree index cursors still materialize through VdbeCursorSource rather than paging the index leaf chain.",
       "status": "closed"
     },
     {
@@ -288,7 +287,7 @@
     {
       "id": "vdbe-typecheck-on-write",
       "layer": "vdbe",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/execute.rs::op_type_check (applies column affinities to a register block and enforces CHECK constraints before MakeRecord/Insert)",
       "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (affinity/CHECK enforcement inside write paths)",
       "severity": "s1-correctness",
@@ -308,7 +307,7 @@
         "update.sqltest::update-integer-pk-underflow-error",
         "window/nth_value.sqltest::nth-value-unicode-whitespace-n-errors"
       ],
-      "notes": "Closed 2026-08-03 via four coordinated fixes. (A) ALTER TABLE ADD COLUMN on a STRICT table now rejects a type-mismatched DEFAULT with 'type mismatch on DEFAULT' (existing rows only), matching SQLite instead of the row-level 'cannot store X value in Y column'. (B) i64 cast boundaries made exclusive at all six sites: a float exactly at i64::MIN/MAX (or beyond) no longer wraps, it errors 'integer overflow' per SQLite's cast semantics. (C) Comparison-affinity threading through a QueryContext: rowid and rowid-alias column references carry Integer affinity in comparisons (including IN lists via ApplyInComparisonAffinity), while NEW/OLD trigger pseudo-table columns carry NO affinity except rowid aliases and the rowid register, exactly per turso-src/core/translate/trigger_exec.rs:1043-1070 (SQLite forum 819f2d6627). (D) TRIM/LTRIM/RTRIM and nth_value boundary parsing now treat only ASCII whitespace as trimmable, so Unicode-space-padded values stay intact (SQLite trim is ASCII-only). Expected-failures count dropped by 13 (12 mapped + nth-value-unicode-whitespace-n-errors) with zero additions; full lane 3765/3765 passing. Two cases previously linked here (subquery-column-affinity-inheritance, range-scan-text-vs-int-affinity) are affinity-propagation issues in subquery/compound contexts and now track under compile-affinity-rules-diverge-in-subquery-and-compound-contexts; the two gencol_self_table_affinity_indexed_* cases were already closed by parser-indexed-by-hint.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity for the write affinity/STRICT/CHECK slice delivered; subquery/compound affinity residuals live under compile-affinity-rules-diverge-in-subquery-and-compound-contexts. Closed 2026-08-03 via four coordinated fixes. (A) ALTER TABLE ADD COLUMN on a STRICT table now rejects a type-mismatched DEFAULT with 'type mismatch on DEFAULT' (existing rows only), matching SQLite instead of the row-level 'cannot store X value in Y column'. (B) i64 cast boundaries made exclusive at all six sites: a float exactly at i64::MIN/MAX (or beyond) no longer wraps, it errors 'integer overflow' per SQLite's cast semantics. (C) Comparison-affinity threading through a QueryContext: rowid and rowid-alias column references carry Integer affinity in comparisons (including IN lists via ApplyInComparisonAffinity), while NEW/OLD trigger pseudo-table columns carry NO affinity except rowid aliases and the rowid register, exactly per turso-src/core/translate/trigger_exec.rs:1043-1070 (SQLite forum 819f2d6627). (D) TRIM/LTRIM/RTRIM and nth_value boundary parsing now treat only ASCII whitespace as trimmable, so Unicode-space-padded values stay intact (SQLite trim is ASCII-only). Expected-failures count dropped by 13 (12 mapped + nth-value-unicode-whitespace-n-errors) with zero additions; full lane 3765/3765 passing. Two cases previously linked here (subquery-column-affinity-inheritance, range-scan-text-vs-int-affinity) are affinity-propagation issues in subquery/compound contexts and now track under compile-affinity-rules-diverge-in-subquery-and-compound-contexts; the two gencol_self_table_affinity_indexed_* cases were already closed by parser-indexed-by-hint.",
       "status": "closed"
     },
     {
@@ -326,7 +325,7 @@
     {
       "id": "vdbe-insert-update-flag-semantics",
       "layer": "vdbe",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/execute.rs::op_insert (line 9897: InsertFlags::REQUIRE_SEEK, UPDATE_ROWID_CHANGE, PREFER_UPDATE; old-record capture for dependent views); op_delete (line 10274)",
       "ahtola_ref": "src/Ahtola.Core/Execution/ResumableStatement.cs (Insert/Update -> MutateCursorRow ~line 619; Delete -> target.DeleteRow ~line 608; RowsAffected counting)",
       "severity": "s2-capability",
@@ -334,7 +333,7 @@
       "conformance_links": [
         "update.sqltest::update-set-expression-missing-identifier"
       ],
-      "notes": "Closed 2026-08-06 opcodes; P4-C 2026-04-09 DML emission. InsertInstruction/UpdateInstruction carry VdbeInsertFlags (UpdateRowidChange, RequireSeek, EphemeralTableInsert, SkipLastRowid, SkipStatementChangeCount, SkipAllChangeCounts). DmlStatementCompiler defaults UPDATE/DELETE mutations to RequireSeek; SQL TryCompileUpdate/Delete pass RequireSeek explicitly. EXPLAIN uses VdbeExplain for Insert/Update flags. Residual: UPSERT PreferUpdate / rowid-change UpdateRowidChange and SkipLastRowid on multi-row INSERT intermediates — optional wiring. Evidence: VdbeInsertFlagSemanticsTests, VdbeDmlFkEmissionTests.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity. RequireSeek/Skip*ChangeCounts wired; SkipLastRowid freezes last_insert_rowid on Commit; UpdateRowidChange forces pre-mutation old-rowid read; intermediate multi-row SkipLastRowid then final Insert updates last_insert_rowid. Turso InsertFlags has no PreferUpdate bit (stale residual removed). Evidence: VdbeInsertFlagSemanticsTests. Prior: Closed 2026-08-06 opcodes; P4-C 2026-04-09 DML emission. InsertInstruction/UpdateInstruction carry full VdbeInsertFlags set. DmlStatementCompiler defaults UPDATE/DELETE to RequireSeek; EXPLAIN renders flags.",
       "status": "closed"
     },
     {
@@ -364,13 +363,13 @@
     {
       "id": "vdbe-column-default-short-record",
       "layer": "vdbe",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/vdbe/insn.rs::Insn::Column { default } / execute.rs::op_column",
       "ahtola_ref": "src/Ahtola.Core/EmbeddedFileStore.cs::ReadTableRow (~lines 1175-1205); src/Ahtola.Tests/ManagedAddColumnShortRowTests.cs",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Closed 2026-08-08. Turso's Column instruction supplies its constant default P4 for a short pre-ALTER record. Ahtola performs the equivalent once while materializing a file-backed row: ReadTableRow detects fewer stored fields than the current non-generated schema and fills each missing trailing field from EmbeddedColumn.DefaultValue (or NULL). ManagedAddColumnShortRowTests covers SQLite-authored database reads with NULL and constant defaults, several sequential additions, NOT NULL defaults, WITHOUT ROWID tables, and managed writes before validating the resulting file with ordinary SQLite.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity; short-record DEFAULT fill complete. Closed 2026-08-08. Turso's Column instruction supplies its constant default P4 for a short pre-ALTER record. Ahtola performs the equivalent once while materializing a file-backed row: ReadTableRow detects fewer stored fields than the current non-generated schema and fills each missing trailing field from EmbeddedColumn.DefaultValue (or NULL). ManagedAddColumnShortRowTests covers SQLite-authored database reads with NULL and constant defaults, several sequential additions, NOT NULL defaults, WITHOUT ROWID tables, and managed writes before validating the resulting file with ordinary SQLite.",
       "status": "closed"
     },
     {
@@ -400,13 +399,13 @@
     {
       "id": "vdbe-explain-output-parity",
       "layer": "vdbe",
-      "kind": "partial",
+      "kind": "divergent",
       "turso_ref": "turso-src/core/vdbe/explain.rs (SQLite-style EXPLAIN rows: addr/opcode/p1-p5/comment) + Insn::Explain (EXPLAIN QUERY PLAN node text)",
       "ahtola_ref": "src/Ahtola.Core/Execution/VdbeExplain.cs (548 lines)",
-      "severity": "s3-perf",
+      "severity": "s4-intentional",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as an explicit documented-dialect policy. EXPLAIN renders Ahtola's real opcode stream for diagnostics and EXPLAIN QUERY PLAN provides the SQLite-shaped plan surface; byte-for-byte SQLite/Turso opcode text is not a compatibility contract.",
+      "notes": "F2.40 (2026-08-10): cleared partial; EXPLAIN dialect policy (Ahtola real opcodes + SQLite-shaped EQP) is intentional divergence, not incomplete port. Closed 2026-08-06 as an explicit documented-dialect policy. EXPLAIN renders Ahtola's real opcode stream for diagnostics and EXPLAIN QUERY PLAN provides the SQLite-shaped plan surface; byte-for-byte SQLite/Turso opcode text is not a compatibility contract.",
       "status": "closed"
     },
     {
@@ -556,13 +555,13 @@
     {
       "id": "compile-no-order-by-elision-from-index",
       "layer": "compilation",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/translate/optimizer/order.rs::eliminate_order_by, turso-src/core/translate/order_by.rs",
       "ahtola_ref": "src/Ahtola.Core/Compilation/SelectStatementCompiler.cs::TableAccessPlan descending-scan special case (lines ~121-150), src/Ahtola.Core/Compilation/SortedScanProgramBuilder.cs",
       "severity": "s3-perf",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06. Bare rowid / INTEGER PK alias ORDER BY elides the sorter (ASC Rewind/Next, DESC Last/Prev). Secondary-index ORDER BY elides the sorter when ManagedIndexScanPlan selects an index whose key matches ORDER BY: rows are materialized in index order and OrderBy is stripped before SelectStatementCompiler so the plan is plain Rewind/Next with OpenRead USING INDEX. Plain (non-partial) indexes are now eligible for SEARCH and ORDER BY planning (previously skipped). Evidence: CompiledSortedScanExecutionTests.OrderByRowidAscElidesSorterAndUsesForwardScan, OrderByIntegerPrimaryKeyAliasElidesSorter, OrderBySecondaryIndexElidesSorter. Residual: multi-table covering-index projection without base table (compile-select-compiler-no-multi-table-covering-index); cost-based choice among multiple usable indexes (compile-no-access-method-selection).",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity for rowid/PK and matching secondary-index ORDER BY elision. Multi-table covering and multi-index cost choice remain under their own entries. Closed 2026-08-06. Bare rowid / INTEGER PK alias ORDER BY elides the sorter (ASC Rewind/Next, DESC Last/Prev). Secondary-index ORDER BY elides the sorter when ManagedIndexScanPlan selects an index whose key matches ORDER BY: rows are materialized in index order and OrderBy is stripped before SelectStatementCompiler so the plan is plain Rewind/Next with OpenRead USING INDEX. Plain (non-partial) indexes are now eligible for SEARCH and ORDER BY planning (previously skipped). Evidence: CompiledSortedScanExecutionTests.OrderByRowidAscElidesSorterAndUsesForwardScan, OrderByIntegerPrimaryKeyAliasElidesSorter, OrderBySecondaryIndexElidesSorter. Residual: multi-table covering-index projection without base table (compile-select-compiler-no-multi-table-covering-index); cost-based choice among multiple usable indexes (compile-no-access-method-selection).",
       "status": "closed"
     },
     {
@@ -1130,7 +1129,7 @@
     {
       "id": "compile-attach-cross-database-support",
       "layer": "compilation",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/translate/attach.rs + schema resolution (ATTACH/DETACH, cross-database object references, temp-vs-main resolution)",
       "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs (Managed ATTACH routing and attached-target UPDATE with a main-schema predicate read)",
       "severity": "s2-capability",
@@ -1146,13 +1145,13 @@
         "alter_table.sqltest::alter-table-rename-column-view-attached-db-same-db",
         "reindex.sqltest::reindex-attached-qualified-targets"
       ],
-      "notes": "Closed 2026-08-06 for the managed ATTACH surface that is product-supported. File-backed ATTACH, connection-owned :memory: attach, attached UPDATE with main-schema predicate reads, and temp-trigger foreign-schema reads are implemented; multi-catalog atomic commits remain rejected by design (independent catalogs, no super-journal). Conformance links on this entry were previously cleared. Residual broader cross-db DML/joins stay rejected with clear errors rather than silent wrong commits.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity for the product-supported ATTACH slice (file-backed, :memory:, cross-schema reads). Multi-catalog atomic commit remains intentional under storage-no-super-journal-multidb. Closed 2026-08-06 for the managed ATTACH surface that is product-supported. File-backed ATTACH, connection-owned :memory: attach, attached UPDATE with main-schema predicate reads, and temp-trigger foreign-schema reads are implemented; multi-catalog atomic commits remain rejected by design (independent catalogs, no super-journal). Conformance links on this entry were previously cleared. Residual broader cross-db DML/joins stay rejected with clear errors rather than silent wrong commits.",
       "status": "closed"
     },
     {
       "id": "compile-cte-dml-and-materialization-restrictions",
       "layer": "compilation",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/translate/planner.rs::plan_cte + plan_ctes_as_outer_refs (lazy CTE planning, DML outer references, deferred explicit-column validation)",
       "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::GetRequiredCommonTableExpressionNames + CTE execution/metadata paths",
       "severity": "s2-capability",
@@ -1162,7 +1161,7 @@
         "cte.sqltest::cte-update-direct-ref-nonkeyed",
         "cte.sqltest::cte-unreferenced-column-mismatch-delete"
       ],
-      "notes": "Closed: execution and metadata now materialize only the dependency closure reached by the SELECT or DML body. Unused CTEs therefore defer invalid explicit-column validation, while direct CTE column references in DML retain SQLite's missing-column error. (Previously linked keys cleared by earlier wave work: cte-limit-inside, range-scan-text-vs-int-affinity.)",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity; dependency-closure CTE materialization matches the delivered claim. Closed: execution and metadata now materialize only the dependency closure reached by the SELECT or DML body. Unused CTEs therefore defer invalid explicit-column validation, while direct CTE column references in DML retain SQLite's missing-column error. (Previously linked keys cleared by earlier wave work: cte-limit-inside, range-scan-text-vs-int-affinity.)",
       "status": "closed"
     },
     {
@@ -1313,7 +1312,7 @@
     {
       "id": "parser-pragma-argument-syntax-equals-form",
       "layer": "parser",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/sqlite/parser/src/parser.rs::pragma_value (`= value` and `(value)` both legal for a single-arg pragma)",
       "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs::ParsePragmaObjectName / ParsePragmaTableListFilter / ParseOptionalPragmaObjectName",
       "severity": "s2-capability",
@@ -1328,7 +1327,7 @@
         "pragma/table_list.sqltest::pragma-table-list-includes-temp-schema",
         "pragma/table_list.sqltest::pragma-table-list-unqualified-includes-main-and-temp-matches"
       ],
-      "notes": "Closed 2026-08-06 (wave F2.8). (1) ParsePragmaObjectName now accepts both `PRAGMA x(t1)` and `PRAGMA x=t1` (schema-qualification validated against the pragma prefix, 'PRAGMA database qualifiers do not match'). (2) `PRAGMA table_list` accepts the optional filter argument via a dedicated ParsePragmaTableListFilter (strips schema qualification — the schema is carried by the pragma prefix), threaded as PragmaTableListStatement.Filter through the dispatch/catalog/instance/TVF routes and applied as an exact OrdinalIgnoreCase name match to every emitted row, sqlite_schema header included. (3) The `pragma_table_list` table-valued function now receives the owning connection's schema list, so unqualified calls enumerate main and temp schemas while qualified calls stay scoped to their requested schema. (4) Bonus: PRAGMA foreign_key_list's argument became optional (null or nonexistent table -> empty result, SQLite semantics), closing pragma-foreign-key-list-empty-results. All mapped keys pass. The attached-database case is tracked under ATTACH because the parser succeeds and execution then rejects an in-memory primary database. The explicit-main-vs-temp and the three view/strict/nonexistent table_list keys also cleared.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity; equals/paren pragma forms and table_list filter complete. Closed 2026-08-06 (wave F2.8). (1) ParsePragmaObjectName now accepts both `PRAGMA x(t1)` and `PRAGMA x=t1` (schema-qualification validated against the pragma prefix, 'PRAGMA database qualifiers do not match'). (2) `PRAGMA table_list` accepts the optional filter argument via a dedicated ParsePragmaTableListFilter (strips schema qualification — the schema is carried by the pragma prefix), threaded as PragmaTableListStatement.Filter through the dispatch/catalog/instance/TVF routes and applied as an exact OrdinalIgnoreCase name match to every emitted row, sqlite_schema header included. (3) The `pragma_table_list` table-valued function now receives the owning connection's schema list, so unqualified calls enumerate main and temp schemas while qualified calls stay scoped to their requested schema. (4) Bonus: PRAGMA foreign_key_list's argument became optional (null or nonexistent table -> empty result, SQLite semantics), closing pragma-foreign-key-list-empty-results. All mapped keys pass. The attached-database case is tracked under ATTACH because the parser succeeds and execution then rejects an in-memory primary database. The explicit-main-vs-temp and the three view/strict/nonexistent table_list keys also cleared.",
       "status": "closed"
     },
     {
@@ -2061,13 +2060,13 @@
     {
       "id": "storage-freelist-write-path-vacuum-only",
       "layer": "storage",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/storage/pager.rs::Pager::free_page, ReuseFreelistLeaf, NEW_FREELIST_TRUNK",
       "ahtola_ref": "src/Ahtola.Core/Storage/SqliteFreelist.cs::SqliteFreelist.Create/CreateFromFreePages/Read",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06. Ordinary DML now participates in freelist maintenance, not only VACUUM-style rewrites. SqliteStagedBtreePageIo implements Turso-aligned Pager::free_page trunk/leaf construction and Pager::allocate_page freelist reuse; the incremental row writer seeds staged I/O from the page-1 freelist header and publishes the updated trunk/count on commit. SqliteIncrementalTableBtree/IndexBtree DELETE/UPDATE release overflow chains through SqliteOverflowChainWriter.Free -> FreePage. Full rewrites still build exact freelists via SqliteFreelist.CreateFromFreePages. Remaining open work is under-full page merge/defrag (storage-btree-no-rebalance) and bounded fast-paths that still prefer append when freelist is empty by construction.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity for DML freelist free/reuse. Underfull page merge remains storage-no-btree-balancing. Closed 2026-08-06. Ordinary DML now participates in freelist maintenance, not only VACUUM-style rewrites. SqliteStagedBtreePageIo implements Turso-aligned Pager::free_page trunk/leaf construction and Pager::allocate_page freelist reuse; the incremental row writer seeds staged I/O from the page-1 freelist header and publishes the updated trunk/count on commit. SqliteIncrementalTableBtree/IndexBtree DELETE/UPDATE release overflow chains through SqliteOverflowChainWriter.Free -> FreePage. Full rewrites still build exact freelists via SqliteFreelist.CreateFromFreePages. Remaining open work is under-full page merge/defrag (storage-btree-no-rebalance) and bounded fast-paths that still prefer append when freelist is empty by construction.",
       "status": "closed"
     },
     {
@@ -2146,13 +2145,13 @@
     {
       "id": "storage-hot-journal-recovery-minimal",
       "layer": "storage",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/storage/pager.rs (rollback/journal recovery on open), turso-src/core/storage/sqlite3_ondisk.rs",
       "ahtola_ref": "src/Ahtola.Core/Storage/SqliteRollbackJournal.cs::IsHot, Recover",
       "severity": "s2-capability",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 for single-database hot-journal recovery breadth. SqliteRollbackJournal.RecoverIfPresent now: (1) accepts power-of-two sector sizes 512..65536 (not only Ahtola's write-side 512); (2) recovers sentinel nRec=0xffffffff by scanning complete page records until EOF or a zero page-number terminator; (3) tolerates trailing preallocated journal capacity after a declared record count while still rejecting truncated journals. Magic/checksum validation and journal invalidation after replay remain. Multi-file super-journal atomicity stays open as storage-super-journal-missing; journal_mode=PERSIST/TRUNCATE variants remain out of scope for the managed DELETE/WAL pair.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity for single-DB hot-journal recovery breadth. Super-journal multi-file remains storage-no-super-journal-multidb (intentional). Closed 2026-08-06 for single-database hot-journal recovery breadth. SqliteRollbackJournal.RecoverIfPresent now: (1) accepts power-of-two sector sizes 512..65536 (not only Ahtola's write-side 512); (2) recovers sentinel nRec=0xffffffff by scanning complete page records until EOF or a zero page-number terminator; (3) tolerates trailing preallocated journal capacity after a declared record count while still rejecting truncated journals. Magic/checksum validation and journal invalidation after replay remain. Multi-file super-journal atomicity stays open as storage-super-journal-missing; journal_mode=PERSIST/TRUNCATE variants remain out of scope for the managed DELETE/WAL pair.",
       "status": "closed"
     },
     {
@@ -2212,25 +2211,25 @@
     {
       "id": "storage-wal-index-shm-mapping-parity",
       "layer": "storage",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/storage/wal.rs::WalFileShared, WalSharedMetadata, OpenSharedWal (in-process shared WAL-index state across connections)",
       "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalIndex.cs, PhysicalSqliteWalSharedMemoryMapping.cs",
-      "severity": "s2-capability",
+      "severity": "s4-intentional",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as a future-interop roadmap item rather than a current Stage 0 defect. The detached PhysicalSqliteWalSharedMemoryMapping/WalIndex foundation is tested, while the current pager intentionally uses shm only as a byte-lock carrier under process-exclusive ownership; attaching the mapping belongs to contract Stages 1-2.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity/s4-intentional roadmap; PhysicalSqliteWalSharedMemoryMapping foundation present, live multi-connection SHM mapping is Stages 1–2 interop not a Stage-0 defect. Closed 2026-08-06 as a future-interop roadmap item rather than a current Stage 0 defect. The detached PhysicalSqliteWalSharedMemoryMapping/WalIndex foundation is tested, while the current pager intentionally uses shm only as a byte-lock carrier under process-exclusive ownership; attaching the mapping belongs to contract Stages 1-2.",
       "status": "closed"
     },
     {
       "id": "storage-no-mvcc-checkpoint-lock-guard",
       "layer": "storage",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/storage/wal.rs::VacuumLockGuard, CheckpointLocks (guards preventing VACUUM/checkpoint races)",
       "ahtola_ref": "src/Ahtola.Core/Storage/SqliteWalWriterCheckpointCoordinator.cs",
-      "severity": "s1-correctness",
+      "severity": "s4-intentional",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as not applicable to the current classic engine. Stage 0 process-exclusive ownership excludes external checkpointers and VACUUM takes the managed write reservation; a VacuumLockGuard analogue must land with the future MVCC/checkpoint engine rather than as unused machinery.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity/s4-intentional N/A on classic Stage-0 exclusive ownership; VacuumLockGuard deferred with MVCC checkpoint engine. Closed 2026-08-06 as not applicable to the current classic engine. Stage 0 process-exclusive ownership excludes external checkpointers and VACUUM takes the managed write reservation; a VacuumLockGuard analogue must land with the future MVCC/checkpoint engine rather than as unused machinery.",
       "status": "closed"
     },
     {
@@ -2425,13 +2424,13 @@
     {
       "id": "mvcc-savepoint-cache-size-pragma-gap",
       "layer": "mvcc",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/translate/pragma.rs::update_cache_size, turso-src/core/vdbe/execute.rs (Savepoint opcode arm, load_insn!(Savepoint { op, name }, insn))",
       "ahtola_ref": "src/Ahtola.Core/EmbeddedDatabase.cs::ExecutePragmaCacheSize, NormalizeCacheSize; src/Ahtola.Core/Execution/VdbeTransaction.cs::Savepoint/Release/RollbackTo",
       "severity": "s2-capability",
       "effort": "S",
       "conformance_links": [],
-      "notes": "Closed 2026-08-05. Ahtola already accepts and reads back PRAGMA cache_size as a connection-scoped hint, including Turso-aligned negative-KiB and minimum-size normalization. The managed pager does not evict at that hint yet, but the setting is advisory. The full savepoint.sqltest corpus, including the five issue #6351/#6352 overflow and cache-spill regressions, now passes and no expected-failure line remains.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity; cache_size surface + savepoint corpus complete (pager eviction advisory by design). Closed 2026-08-05. Ahtola already accepts and reads back PRAGMA cache_size as a connection-scoped hint, including Turso-aligned negative-KiB and minimum-size normalization. The managed pager does not evict at that hint yet, but the setting is advisory. The full savepoint.sqltest corpus, including the five issue #6351/#6352 overflow and cache-spill regressions, now passes and no expected-failure line remains.",
       "status": "closed"
     },
     {
@@ -2608,13 +2607,13 @@
     {
       "id": "sync-http-pipeline-v2-only-no-v3-websocket",
       "layer": "sync",
-      "kind": "partial",
+      "kind": "divergent",
       "turso_ref": "turso-src/sync/engine/src/database_sync_operations.rs (ENCRYPTION_KEY_HEADER, wal_push HTTP calls), turso-src/sync/engine/src/database_sync_engine.rs (bootstrap_db HTTP round trips)",
       "ahtola_ref": "src/Ahtola.Data/AhtolaRemoteClient.cs::CreatePipelineUri (\"/v2/pipeline\")",
-      "severity": "s2-capability",
+      "severity": "s4-intentional",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as the deliberate remote-Hrana scope. The ADO remote client targets Turso's pinned /v2/pipeline Execute/Batch surface; WebSocket/v3 and wal_push/pull_updates belong to the separate unported embedded sync engine entries.",
+      "notes": "F2.40 (2026-08-10): cleared partial; deliberate remote Hrana /v2/pipeline scope (divergent from full sync engine v3/websocket). Closed 2026-08-06 as the deliberate remote-Hrana scope. The ADO remote client targets Turso's pinned /v2/pipeline Execute/Batch surface; WebSocket/v3 and wal_push/pull_updates belong to the separate unported embedded sync engine entries.",
       "status": "closed"
     },
     {
@@ -2644,13 +2643,13 @@
     {
       "id": "sync-connection-pooling-no-replica-awareness",
       "layer": "sync",
-      "kind": "partial",
+      "kind": "missing",
       "turso_ref": "turso-src/sync/engine/src/database_sync_engine.rs::wait_changes_from_remote/DbChangesStatus (long-poll driven change notification loop)",
       "ahtola_ref": "src/Ahtola.Data/ManagedConnectionPool.cs, src/Ahtola.Data/AhtolaConnection.cs::Sync/SyncAsync",
       "severity": "s4-intentional",
       "effort": "M",
       "conformance_links": [],
-      "notes": "Closed 2026-08-06 as intentional companion-not-shipped scope (with sync-sdk-kit-native-companion-intentional / sync-native-provider-companion-intentional). README: Native/Sync companions are not shipped from this repo and fail closed. AhtolaReplicaProvider loads Turso.Data.Sync when present and throws NotSupportedException otherwise; DTOs/options without an in-tree engine are not a managed sync port. Satellite gaps (CDC, revert-WAL, page pull, EF surface, pool wait_changes) are features of that missing companion, not independent managed work.",
+      "notes": "F2.40 (2026-08-10): cleared partial; remains intentional companion-not-shipped (missing managed sync engine). Closed 2026-08-06 as intentional companion-not-shipped scope (with sync-sdk-kit-native-companion-intentional / sync-native-provider-companion-intentional). README: Native/Sync companions are not shipped from this repo and fail closed. AhtolaReplicaProvider loads Turso.Data.Sync when present and throws NotSupportedException otherwise; DTOs/options without an in-tree engine are not a managed sync port. Satellite gaps (CDC, revert-WAL, page pull, EF surface, pool wait_changes) are features of that missing companion, not independent managed work.",
       "status": "closed"
     },
     {
@@ -2788,7 +2787,7 @@
     {
       "id": "parser-raise-expression-message",
       "layer": "parser",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "sqlite/parser/src/parser.rs:1808-1836 (RAISE parses Expr::Raise(ResolveType, Option<Box<Expr>>); a bare TK_STRING is the shorthand ABORT with no comma; otherwise ROLLBACK/ABORT/FAIL then comma then parse_expr(0) — the message is an arbitrary expression)",
       "ahtola_ref": "src/Ahtola.Core/Parsing/SqlAst.cs (RaiseExpression.Message is now Expression?), Parsing/SqlParser.cs (ParseRaiseExpression accepts the shorthand and a full expression message), EmbeddedDatabase.cs (EvaluateRaise/ResolveRaiseMessage evaluate the message with parameters/row threaded, stringifying via ToSqlText)",
       "severity": "s2-capability",
@@ -2801,7 +2800,7 @@
         "trigger.sqltest::trigger-raise-rollback-expr",
         "trigger.sqltest::trigger-raise-expr-case"
       ],
-      "notes": "Closed 2026-08-05. RAISE() required a string-literal message and rejected the shorthand RAISE('msg') form, so messages that concatenate or reference NEW/OLD pseudo-columns (e.g. RAISE(ABORT, 'bad: ' || NEW.a)) failed to parse. Fixed by making RaiseExpression.Message an Expression: the parser now accepts RAISE('msg') as the shorthand ABORT (no comma) and RAISE(action, <expr>) with an arbitrary expression message; EvaluateRaise evaluates the message with parameters/row threaded and stringifies it (CAST AS TEXT, NULL -> empty) at raise time. Expression walkers treat RaiseExpression as a leaf, matching the prior opaque-string behavior. Full lane green.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity; RAISE shorthand + expression messages complete. Closed 2026-08-05. RAISE() required a string-literal message and rejected the shorthand RAISE('msg') form, so messages that concatenate or reference NEW/OLD pseudo-columns (e.g. RAISE(ABORT, 'bad: ' || NEW.a)) failed to parse. Fixed by making RaiseExpression.Message an Expression: the parser now accepts RAISE('msg') as the shorthand ABORT (no comma) and RAISE(action, <expr>) with an arbitrary expression message; EvaluateRaise evaluates the message with parameters/row threaded and stringifies it (CAST AS TEXT, NULL -> empty) at raise time. Expression walkers treat RaiseExpression as a leaf, matching the prior opaque-string behavior. Full lane green.",
       "status": "closed"
     },
     {
@@ -2894,7 +2893,7 @@
     {
       "id": "compile-duplicate-primary-key-rejection",
       "layer": "compilation",
-      "kind": "partial",
+      "kind": "parity",
       "turso_ref": "turso-src/core/schema.rs:4369-4373,4593-4598 (rejects a table with more than one PRIMARY KEY regardless of whether the keys are declared column-inline or table-level)",
       "ahtola_ref": "src/Ahtola.Core/Parsing/SqlParser.cs (ParseColumnDefinition duplicate-inline-PK check) + src/Ahtola.Core/EmbeddedDatabase.cs (ResolvePrimaryKeyColumns columnLevel.Count > 1 rejection)",
       "severity": "s1-correctness",
@@ -2904,7 +2903,7 @@
         "create_table.sqltest::create_table_multiple_column_primary_keys",
         "create_table.sqltest::create_table_duplicate_primary_key_clause"
       ],
-      "notes": "Closed 2026-08-06 (Wave F2.10 Batch 3). Ahtola rejected a second table-level PRIMARY KEY at parse and an inline+table-level combination at execution, but silently accepted two column-inline PRIMARY KEYs (CREATE TABLE t(a PRIMARY KEY, b PRIMARY KEY)), producing a table with an ambiguous primary key. ResolvePrimaryKeyColumns now throws 'table has more than one primary key' when more than one column-level PRIMARY KEY is collected, matching SQLite/Turso (the message is intentionally nameless like the two pre-existing Ahtola sites, since sqltest matching is substring-based). Extended 2026-08-07: the same-column inline case (CREATE TABLE t(a primary key primary key)) was still silently accepted because the column-constraint parser set primaryKey=true idempotently; ParseColumnDefinition now throws 'table has more than one primary key' when a second inline PRIMARY KEY is parsed on the same column, closing create_table_duplicate_primary_key_clause. Oracle 261->256 across the batch: the 2 PK keys here plus the 3 string-literal keys on compile-index-string-literal-column-resolution, 0 added.",
+      "notes": "F2.40 (2026-08-10): promoted partial→parity; multi/inline PRIMARY KEY rejection complete. Closed 2026-08-06 (Wave F2.10 Batch 3). Ahtola rejected a second table-level PRIMARY KEY at parse and an inline+table-level combination at execution, but silently accepted two column-inline PRIMARY KEYs (CREATE TABLE t(a PRIMARY KEY, b PRIMARY KEY)), producing a table with an ambiguous primary key. ResolvePrimaryKeyColumns now throws 'table has more than one primary key' when more than one column-level PRIMARY KEY is collected, matching SQLite/Turso (the message is intentionally nameless like the two pre-existing Ahtola sites, since sqltest matching is substring-based). Extended 2026-08-07: the same-column inline case (CREATE TABLE t(a primary key primary key)) was still silently accepted because the column-constraint parser set primaryKey=true idempotently; ParseColumnDefinition now throws 'table has more than one primary key' when a second inline PRIMARY KEY is parsed on the same column, closing create_table_duplicate_primary_key_clause. Oracle 261->256 across the batch: the 2 PK keys here plus the 3 string-literal keys on compile-index-string-literal-column-resolution, 0 added.",
       "status": "closed"
     },
     {
