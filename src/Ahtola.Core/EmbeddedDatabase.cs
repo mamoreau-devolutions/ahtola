@@ -28553,9 +28553,9 @@ out bool hasReturning)
     // can be re-read after the surrounding statement moves on. Row values are preserved
     // exactly (no JSON-subtype stripping); only the lazy wrapper is forced.
     private static ExecutionResult MaterializeSubqueryResult(ExecutionResult result)
-            => result.Rows is StreamingProjectionRows
-                ? result with { Rows = result.Rows.ToArray() }
-                : result;
+        => result.Rows is StreamingProjectionRows
+            ? result with { Rows = result.Rows.ToArray() }
+            : result;
 
     private static long ComputeSubqueryRevisionFingerprint(QueryContext context)
     {
