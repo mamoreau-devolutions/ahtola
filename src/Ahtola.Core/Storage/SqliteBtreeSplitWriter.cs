@@ -197,7 +197,7 @@ public sealed class SqliteBtreeSplitWriter
             header.UsableSpace,
             isFirstPage: leafPageNumber == 1);
         var split = SqliteTableLeafSplit.Create(leaf, leftCellCount);
-        var reservations = new AppendOnlyReservation(_allocator, sourcePageCount);
+        var reservations = new AppendOnlyReservation(_allocator, sourcePageCount, _pager.PageSize);
 
         if (parentPageNumber is null)
         {
@@ -311,7 +311,8 @@ public sealed class SqliteBtreeSplitWriter
         }
 
         ValidateExistingPageNumber(rootPageNumber, sourcePageCount, nameof(rootPageNumber));
-        var expectedTargetPageCount = checked(sourcePageCount + 3);
+        var reservations = new AppendOnlyReservation(_allocator, sourcePageCount, _pager.PageSize);
+        var expectedTargetPageCount = reservations.Peek(2);
         var targetHeader = SqliteDatabaseHeader.Parse(finalPageOne);
         if (targetHeader.PageSize != _pager.PageSize
             || targetHeader.DatabaseSizeInPages != expectedTargetPageCount)
@@ -411,9 +412,9 @@ public sealed class SqliteBtreeSplitWriter
                 "SQLite table-interior root promotion requires an overflowing right-most leaf that can split.");
         }
 
-        var appendedRightLeafPageNumber = checked(sourcePageCount + 1);
-        var appendedLeftInteriorPageNumber = checked(sourcePageCount + 2);
-        var appendedRightInteriorPageNumber = checked(sourcePageCount + 3);
+        var appendedRightLeafPageNumber = reservations.Peek(0);
+        var appendedLeftInteriorPageNumber = reservations.Peek(1);
+        var appendedRightInteriorPageNumber = reservations.Peek(2);
         replacementChildren[^1] = new TableTreeChild(
             root.Header.RightMostChildPage,
             separatorRowId);
@@ -443,7 +444,6 @@ public sealed class SqliteBtreeSplitWriter
                 "SQLite table-interior root cannot be partitioned into two non-empty child pages.");
         }
 
-        var reservations = new AppendOnlyReservation(_allocator, sourcePageCount);
         var appendedRightLeafPage = reservations.Reserve();
         var appendedLeftInteriorPage = reservations.Reserve();
         var appendedRightInteriorPage = reservations.Reserve();
@@ -494,12 +494,12 @@ public sealed class SqliteBtreeSplitWriter
             overflowReader: overflowReader);
         var split = SqliteIndexLeafSplit.Create(leaf, leftCellCount);
         var separatorRecord = split.GetSeparatorRecord();
-        var reservations = new AppendOnlyReservation(_allocator, sourcePageCount);
+        var reservations = new AppendOnlyReservation(_allocator, sourcePageCount, _pager.PageSize);
 
         if (parentPageNumber is null)
         {
-            var rootLeftPageNumber = reservations.NextPageNumber;
-            var rootRightPageNumber = checked(rootLeftPageNumber + 1);
+            var rootLeftPageNumber = reservations.Peek(0);
+            var rootRightPageNumber = reservations.Peek(1);
             _ = BuildIndexRootPage(
                 leafImage,
                 header.UsableSpace,
@@ -510,7 +510,7 @@ public sealed class SqliteBtreeSplitWriter
                     rootLeftPageNumber,
                     separatorRecord,
                     header.UsableSpace,
-                    checked(rootRightPageNumber + 1)),
+                    reservations.Peek(2)),
                 separatorRecord);
 
             var rootLeftPage = reservations.Reserve();
@@ -967,7 +967,7 @@ public sealed class SqliteBtreeSplitWriter
             checked((ulong)separatorRecord.Length),
             usableSpace);
         var firstOverflowPage = layout.UsesOverflow
-            ? checked(reservations.NextPageNumber + 1)
+            ? reservations.Peek(1)
             : 1U;
         return CreateIndexSeparatorCell(
             leftChildPage,
@@ -1117,24 +1117,32 @@ public sealed class SqliteBtreeSplitWriter
     private sealed class AppendOnlyReservation
     {
         private readonly ISqlitePageAllocator _allocator;
+        private readonly uint _pendingBytePage;
 
-        public AppendOnlyReservation(ISqlitePageAllocator allocator, uint sourcePageCount)
+        public AppendOnlyReservation(ISqlitePageAllocator allocator, uint sourcePageCount, int pageSize)
         {
             _allocator = allocator;
+            _pendingBytePage = SqlitePageLimits.PendingBytePage(pageSize);
             TargetPageCount = sourcePageCount;
         }
 
         public uint TargetPageCount { get; private set; }
 
-        public uint NextPageNumber
-        {
-            get
-            {
-                if (TargetPageCount == uint.MaxValue)
-                    throw new InvalidOperationException("SQLite cannot append a page beyond UInt32.MaxValue.");
+        public uint NextPageNumber => Peek(0);
 
-                return TargetPageCount + 1;
-            }
+        /// <summary>
+        /// The page number produced <paramref name="ahead"/> reservations after the
+        /// next one, skipping the unusable pending-byte page exactly like
+        /// <see cref="SqliteAppendOnlyPageAllocator"/>. <c>Peek(0)</c> is the next
+        /// page number.
+        /// </summary>
+        public uint Peek(uint ahead)
+        {
+            var pageNumber = TargetPageCount;
+            for (var index = 0u; index <= ahead; index++)
+                pageNumber = Advance(pageNumber);
+
+            return pageNumber;
         }
 
         public SqlitePageAllocation Reserve()
@@ -1150,6 +1158,15 @@ public sealed class SqliteBtreeSplitWriter
 
             TargetPageCount = expectedPageNumber;
             return allocation;
+        }
+
+        private uint Advance(uint pageNumber)
+        {
+            if (pageNumber >= uint.MaxValue - 1)
+                throw new InvalidOperationException("SQLite cannot append a page beyond UInt32.MaxValue.");
+
+            var next = pageNumber + 1;
+            return next == _pendingBytePage ? next + 1 : next;
         }
     }
 }

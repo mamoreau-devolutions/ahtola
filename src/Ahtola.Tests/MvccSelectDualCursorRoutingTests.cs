@@ -137,6 +137,30 @@ public sealed class MvccSelectDualCursorRoutingTests
         Convert.ToInt64(Scalar(a, "SELECT v FROM t;")).Should().Be(200L);
     }
 
+    [TestCase("CREATE TABLE other(value INTEGER);")]
+    [TestCase("CREATE TABLE other AS SELECT v FROM t;")]
+    [TestCase("DROP TABLE t;")]
+    [TestCase("ALTER TABLE t ADD COLUMN other INTEGER;")]
+    [TestCase("CREATE INDEX ix_t_v ON t(v);")]
+    [TestCase("CREATE VIEW t_view AS SELECT v FROM t;")]
+    [TestCase("CREATE TRIGGER t_insert AFTER INSERT ON t BEGIN SELECT new.v; END;")]
+    public void ConcurrentSchemaChangesFailClosed(string sql)
+    {
+        using var db = new RoutingFileDatabase();
+        using var connection = db.Connect();
+
+        connection.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        connection.ExecuteNonQuery("BEGIN CONCURRENT;");
+
+        var error = Capture(() => connection.ExecuteNonQuery(sql));
+        error.Should().NotBeNull();
+        error!.Message.Should().ContainEquivalentOf("schema changes");
+
+        connection.ExecuteNonQuery("INSERT INTO t VALUES (1);");
+        connection.ExecuteNonQuery("COMMIT;");
+        Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM t;")).Should().Be(1L);
+    }
+
     private static object? Scalar(SqliteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();

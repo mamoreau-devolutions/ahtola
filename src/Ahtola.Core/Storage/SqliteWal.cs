@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 
 namespace Ahtola.Core.Storage;
 
@@ -35,6 +36,14 @@ public static class SqliteWalChecksum
     {
         if (source.Length % 8 != 0)
             throw new ArgumentException("SQLite WAL checksum input must be a multiple of eight bytes.", nameof(source));
+        if (byteOrder is not SqliteWalChecksumByteOrder.LittleEndian
+            and not SqliteWalChecksumByteOrder.BigEndian)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(byteOrder),
+                byteOrder,
+                "Unsupported SQLite WAL checksum byte order.");
+        }
 
         var firstChecksum = first;
         var secondChecksum = second;
@@ -147,8 +156,13 @@ public sealed class SqliteWalHeader
             Second);
     }
 
-    internal SqliteWalHeader WithCheckpointSequence(uint checkpointSequence)
-        => Create(PageSize, Salt1, Salt2, checkpointSequence, ChecksumByteOrder);
+    internal SqliteWalHeader Restart(uint salt2)
+        => Create(
+            PageSize,
+            unchecked(Salt1 + 1),
+            salt2,
+            unchecked(CheckpointSequence + 1),
+            ChecksumByteOrder);
 
     /// <summary>Parses and validates exactly one SQLite WAL header.</summary>
     public static SqliteWalHeader Parse(ReadOnlySpan<byte> source)
@@ -225,7 +239,7 @@ public sealed class SqliteWalHeader
                 ? BigEndianChecksumMagic
                 : LittleEndianChecksumMagic);
         BinaryPrimitives.WriteUInt32BigEndian(destination[4..], CurrentFormatVersion);
-        BinaryPrimitives.WriteUInt32BigEndian(destination[8..], pageSize == SqlitePageSize.Maximum ? 0 : checked((uint)pageSize));
+        BinaryPrimitives.WriteUInt32BigEndian(destination[8..], checked((uint)pageSize));
         BinaryPrimitives.WriteUInt32BigEndian(destination[12..], checkpointSequence);
         BinaryPrimitives.WriteUInt32BigEndian(destination[16..], salt1);
         BinaryPrimitives.WriteUInt32BigEndian(destination[20..], salt2);
@@ -234,7 +248,7 @@ public sealed class SqliteWalHeader
     private static int DecodePageSize(uint encodedPageSize)
     {
         if (encodedPageSize == 0)
-            return SqlitePageSize.Maximum;
+            throw new InvalidDataException("SQLite WAL page size zero is not a persistent on-disk page size.");
         if (encodedPageSize > int.MaxValue)
             throw new InvalidDataException($"Invalid SQLite WAL page size {encodedPageSize}.");
 
@@ -304,7 +318,6 @@ public readonly record struct SqliteWalFrameHeader(
         var pageNumber = BinaryPrimitives.ReadUInt32BigEndian(source);
         if (pageNumber == 0)
             throw new InvalidDataException("SQLite WAL frame page number must be non-zero.");
-
         return new SqliteWalFrameHeader(
             pageNumber,
             BinaryPrimitives.ReadUInt32BigEndian(source[4..]),
@@ -325,7 +338,6 @@ public readonly record struct SqliteWalFrameHeader(
         }
         if (PageNumber == 0)
             throw new InvalidOperationException("SQLite WAL frame page number must be non-zero.");
-
         BinaryPrimitives.WriteUInt32BigEndian(destination, PageNumber);
         BinaryPrimitives.WriteUInt32BigEndian(destination[4..], DatabaseSizeInPages);
         BinaryPrimitives.WriteUInt32BigEndian(destination[8..], Salt1);
@@ -394,22 +406,28 @@ public sealed record SqliteWalRecoveryInfo(
 /// </summary>
 public sealed class SqliteWalFile : IDisposable
 {
-    // The WAL header is retained after a successful checkpoint reset. This value
-    // records that its empty frame region follows a pager-verified checkpoint.
-    // It is deliberately distinct from ordinary checkpoint sequence values.
+    // Ahtola's pager uses this durable sequence marker to distinguish an empty WAL
+    // produced by a completed checkpoint from a newly-created empty WAL. Ordinary
+    // restarts still use SQLite/Turso's incrementing checkpoint sequence.
     private const uint PagerCheckpointedRecoverySequence = 0xA5C3_5A3C;
 
     private readonly IFile _file;
     private readonly AhtolaPageEncryption? _encryption;
     private SqliteWalHeader _header;
+    private bool _hasCheckpointedRecoveryMarker;
     private bool _truncatedAfterCheckpoint;
     private bool _disposed;
 
-    private SqliteWalFile(IFile file, SqliteWalHeader header, AhtolaPageEncryption? encryption)
+    private SqliteWalFile(
+        IFile file,
+        SqliteWalHeader header,
+        AhtolaPageEncryption? encryption,
+        bool hasCheckpointedRecoveryMarker = false)
     {
         _file = file;
         _header = header;
         _encryption = encryption;
+        _hasCheckpointedRecoveryMarker = hasCheckpointedRecoveryMarker;
     }
 
     /// <summary>The validated WAL header.</summary>
@@ -460,7 +478,8 @@ public sealed class SqliteWalFile : IDisposable
         get
         {
             ThrowIfDisposed();
-            return _header.CheckpointSequence == PagerCheckpointedRecoverySequence;
+            return _hasCheckpointedRecoveryMarker
+                || _header.CheckpointSequence == PagerCheckpointedRecoverySequence;
         }
     }
 
@@ -735,16 +754,18 @@ public sealed class SqliteWalFile : IDisposable
         if (_file.Length != SqliteWalHeader.Size)
             throw new InvalidDataException("SQLite WAL reset did not reach its header boundary.");
 
+        var salt2 = CreateRandomSalt();
         var replacementHeader = publishCheckpointedRecoveryMarker
-            ? _header.WithCheckpointSequence(PagerCheckpointedRecoverySequence)
-            : HasCheckpointedRecoveryMarker
-                ? _header.WithCheckpointSequence(checkpointSequence: 0)
-                : _header;
-        if (replacementHeader.CheckpointSequence != _header.CheckpointSequence)
-        {
-            _file.Write(0, replacementHeader.ToArray());
-            _header = replacementHeader;
-        }
+            ? SqliteWalHeader.Create(
+                _header.PageSize,
+                unchecked(_header.Salt1 + 1),
+                salt2,
+                PagerCheckpointedRecoverySequence,
+                _header.ChecksumByteOrder)
+            : _header.Restart(salt2);
+        _file.Write(0, replacementHeader.ToArray());
+        _header = replacementHeader;
+        _hasCheckpointedRecoveryMarker = publishCheckpointedRecoveryMarker;
 
         _file.FlushToDisk();
     }
@@ -803,20 +824,20 @@ public sealed class SqliteWalFile : IDisposable
                 (Header.Checksum1, Header.Checksum2));
         }
 
-            // Peer engine materialised a real WAL header into a file we opened as
-            // truncated (zero-length -wal under a live stock SQLite hold). Drop the
-            // synthetic header and parse the on-disk one before scanning frames.
-            if (_truncatedAfterCheckpoint && length >= SqliteWalHeader.Size)
+        // Peer engine materialised a real WAL header into a file we opened as
+        // truncated (zero-length -wal under a live stock SQLite hold). Drop the
+        // synthetic header and parse the on-disk one before scanning frames.
+        if (_truncatedAfterCheckpoint && length >= SqliteWalHeader.Size)
+        {
+            var headerBytes = new byte[SqliteWalHeader.Size];
+            if (_file.Read(0, headerBytes) == headerBytes.Length)
             {
-                var headerBytes = new byte[SqliteWalHeader.Size];
-                if (_file.Read(0, headerBytes) == headerBytes.Length)
-                {
-                    _header = SqliteWalHeader.Parse(headerBytes);
-                    _truncatedAfterCheckpoint = false;
-                }
+                _header = SqliteWalHeader.Parse(headerBytes);
+                _truncatedAfterCheckpoint = false;
             }
+        }
 
-            var fullFrameCount = CompleteFrameCount(length);
+        var fullFrameCount = CompleteFrameCount(length);
         var hasPartialFrame = (length - SqliteWalHeader.Size) % FrameSize != 0;
         var previousChecksum = (Header.Checksum1, Header.Checksum2);
         var lastValidFrameNumber = 0L;
@@ -1000,6 +1021,13 @@ public sealed class SqliteWalFile : IDisposable
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+
+    private static uint CreateRandomSalt()
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        RandomNumberGenerator.Fill(bytes);
+        return BinaryPrimitives.ReadUInt32BigEndian(bytes);
+    }
 
     private readonly record struct ScanState(
         SqliteWalRecoveryInfo Info,

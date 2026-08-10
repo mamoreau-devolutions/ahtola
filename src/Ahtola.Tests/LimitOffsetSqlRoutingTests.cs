@@ -481,7 +481,7 @@ public class LimitOffsetSqlRoutingTests
     }
 
     [Test]
-    public void DistinctLimitFallsBackToTheEvaluator()
+    public void DistinctLimitNowLowersThroughARowGate()
     {
         using var connection = new EmbeddedDatabase().Connect();
         Execute(connection, "CREATE TABLE t(value INTEGER);");
@@ -489,21 +489,24 @@ public class LimitOffsetSqlRoutingTests
 
         ReadRows(connection, "SELECT DISTINCT value FROM t LIMIT 2;")
             .Select(row => row[0]).Should().Equal(SqlValue.Integer(1), SqlValue.Integer(2));
-        Assert.Throws<EmbeddedSqlException>(
-            () => ReadRows(connection, "EXPLAIN SELECT DISTINCT value FROM t LIMIT 2;"));
+
+        // De-duplication used to be fused into DistinctResultRow, which the gate could not sit in
+        // front of. It is now a standalone RowGate so duplicates never charge against the limit.
+        Opcodes(ReadRows(connection, "EXPLAIN SELECT DISTINCT value FROM t LIMIT 2;"))
+            .Should().ContainInOrder("RowGate", "LimitGate", "ResultRow");
     }
 
     [Test]
-    public void CompoundLimitFallsBackToTheEvaluator()
+    public void CompoundLimitNowLowersToBytecode()
     {
         using var connection = new EmbeddedDatabase().Connect();
 
-        // The parser attaches LIMIT to the compound, whose sequenced stream the gate cannot bound
-        // exactly, so it stays on the evaluator.
+        // The parser attaches LIMIT to the compound; the gate is now applied to the assembled
+        // compound program rather than refusing it.
         ReadRows(connection, "SELECT 1 UNION ALL SELECT 2 LIMIT 1;")
             .Select(row => row[0]).Should().Equal(SqlValue.Integer(1));
-        Assert.Throws<EmbeddedSqlException>(
-            () => ReadRows(connection, "EXPLAIN SELECT 1 UNION ALL SELECT 2 LIMIT 1;"));
+        Opcodes(ReadRows(connection, "EXPLAIN SELECT 1 UNION ALL SELECT 2 LIMIT 1;"))
+            .Should().ContainInOrder("LimitGate", "ResultRow");
     }
 
     [Test]

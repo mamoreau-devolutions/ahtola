@@ -27,17 +27,19 @@ namespace Ahtola.Core.Compilation;
 ///     unchanged — a faithful no-op lowering.</item>
 /// </list>
 /// <para>
-/// Composition: because a shared pair of counters gates <em>every</em> <c>ResultRow</c> in the program,
-/// this composes with any program whose output is emitted through unconditional <c>ResultRow</c> opcodes —
-/// direct table scans, sorted scans, joins, aggregations, constant and source-less scalar-function
-/// projections, row-aware aggregates whose <see cref="DistinctGateInstruction"/> has already skipped
-/// duplicate candidates, and <c>UNION ALL</c> compounds (whose per-term <c>ResultRow</c>s share the
-/// counters, so LIMIT/OFFSET spans the concatenated stream). Programs that combine de-duplication and
-/// emission in conditional primitives (<see cref="DistinctResultRowInstruction"/>,
-/// <see cref="CompoundResultRowInstruction"/>, <see cref="RowSetInsertInstruction"/> — i.e. direct
-/// <c>DISTINCT</c>/<c>UNION</c>, <c>INTERSECT</c>, <c>EXCEPT</c>) are rejected with
-/// <see cref="StatementCompilationException"/>, because a pre-emit gate counts candidates rather than
-/// emitted rows and so cannot bound those streams exactly.
+/// Composition: because a shared pair of counters gates <em>every</em> row emission in the program, this
+/// composes with any result-streaming program — direct table scans, sorted scans, joins, aggregations,
+/// constant and source-less scalar-function projections, row-aware aggregates whose
+/// <see cref="DistinctGateInstruction"/> has already skipped duplicate candidates, and <c>UNION ALL</c>
+/// compounds (whose per-term <c>ResultRow</c>s share the counters, so LIMIT/OFFSET spans the concatenated
+/// stream). Programs that fold de-duplication or membership testing into the emit opcode itself
+/// (<see cref="DistinctResultRowInstruction"/>, <see cref="CompoundResultRowInstruction"/>,
+/// <see cref="GuardedRowInstruction"/> — i.e. <c>DISTINCT</c>, <c>UNION</c>, <c>INTERSECT</c>,
+/// <c>EXCEPT</c>) are split into a <see cref="RowGateInstruction"/> carrying those guards followed by a
+/// plain <c>ResultRow</c>, so the counters sit between the two and observe only surviving rows. Opcodes
+/// that populate a probe set without producing a row (<see cref="RowSetInsertInstruction"/>, and a
+/// <see cref="GuardedRowInstruction"/> directed at a <see cref="RowSetDestination"/>) stream past the
+/// gates untouched, because they are not part of the caller-visible row stream that LIMIT bounds.
 /// </para>
 /// <para>
 /// The transform owns only control flow; it never inspects row values, so LIMIT/OFFSET semantics stay
@@ -75,21 +77,25 @@ public static class LimitOffsetProgramBuilder
         var count = instructions.Count;
 
         // A pre-emit gate counts every candidate that reaches it, which equals the emitted-row count only
-        // when the emission is unconditional. Reject conditional/compound emitters rather than lower them
-        // inexactly, and reject an already-gated program rather than nest gates.
-        var resultRowCount = 0;
+        // when nothing between the gate and the emission can suppress the row. Conditional emitters fold the
+        // suppression test into the emit opcode itself, so they are split here into a RowGate (the guards)
+        // followed by a plain ResultRow (the emission); the counters then sit between the two and see only
+        // surviving rows. Reject an already-gated program rather than nest gates.
+        var emitterCount = 0;
         foreach (var instruction in instructions)
         {
             switch (instruction)
             {
                 case ResultRowInstruction:
-                    resultRowCount++;
-                    break;
                 case DistinctResultRowInstruction:
                 case CompoundResultRowInstruction:
-                case RowSetInsertInstruction:
-                    throw new StatementCompilationException(
-                        "LIMIT/OFFSET lowering supports only unconditional ResultRow emissions; a program that emits through DistinctResultRow, CompoundResultRow, or RowSetInsert (UNION/DISTINCT, INTERSECT, EXCEPT) cannot be gated exactly.");
+                    emitterCount++;
+                    break;
+                case GuardedRowInstruction guarded:
+                    if (guarded.Destination is ResultRowDestination)
+                        emitterCount++;
+
+                    break;
                 case OffsetGateInstruction:
                 case LimitGateInstruction:
                     throw new StatementCompilationException(
@@ -97,14 +103,13 @@ public static class LimitOffsetProgramBuilder
             }
         }
 
-        if (resultRowCount == 0)
+        if (emitterCount == 0)
         {
             throw new StatementCompilationException(
                 "LIMIT/OFFSET lowering requires a program that emits at least one result row.");
         }
 
         var prologueLength = (needOffset ? 1 : 0) + (needLimit ? 1 : 0);
-        var gatesPerResult = prologueLength;
 
         // New counter registers are appended after the program's existing registers, so no register index
         // in the copied instructions changes — only jump targets shift.
@@ -112,23 +117,22 @@ public static class LimitOffsetProgramBuilder
         var limitCounter = new Register(program.RegisterCount + (needOffset ? 1 : 0));
         var registerCount = program.RegisterCount + prologueLength;
 
-        // blockStart[i] is the new address of old instruction i's emitted block (its inserted gates, if
-        // any, followed by the instruction itself). Each ResultRow inserts `gatesPerResult` instructions
-        // before itself, so the address shift accumulates as ResultRows are passed. blockStart[count] is
-        // the total instruction count of the lowered program.
+        // blockStart[i] is the new address of old instruction i's emitted block: the instructions inserted
+        // before it (a RowGate for a conditional emitter, then the offset/limit gates) followed by the
+        // instruction itself. Jump targets resolve to the block start, so a branch into an emitter can never
+        // bypass its guards or its gates. blockStart[count] is the lowered instruction count.
         var blockStart = new int[count + 1];
-        var resultsSeen = 0;
+        var shift = prologueLength;
         for (var i = 0; i < count; i++)
         {
-            blockStart[i] = prologueLength + i + (resultsSeen * gatesPerResult);
-            if (instructions[i] is ResultRowInstruction)
-                resultsSeen++;
+            blockStart[i] = shift + i;
+            shift += LeadLength(instructions[i]);
         }
 
-        blockStart[count] = prologueLength + count + (resultsSeen * gatesPerResult);
+        blockStart[count] = shift + count;
 
         // The limit gate's done target is the program's terminating Halt (validated to be the last
-        // instruction, hence never a ResultRow, so its block start is the Halt itself).
+        // instruction, hence never an emitter, so its block start is the Halt itself).
         var doneTarget = new ProgramCounter(blockStart[count - 1]);
 
         var lowered = new List<VdbeInstruction>(blockStart[count]);
@@ -143,21 +147,28 @@ public static class LimitOffsetProgramBuilder
         for (var i = 0; i < count; i++)
         {
             var instruction = instructions[i];
-            if (instruction is ResultRowInstruction resultRow)
-            {
-                // Gate order matters: OFFSET first (skips to the loop-advance after this ResultRow without
-                // counting against LIMIT), then LIMIT (stops the stream once the allowance is spent).
-                if (needOffset)
-                    lowered.Add(new OffsetGateInstruction(offsetCounter, new ProgramCounter(blockStart[i + 1])));
-                if (needLimit)
-                    lowered.Add(new LimitGateInstruction(limitCounter, doneTarget));
-
-                lowered.Add(new ResultRowInstruction(resultRow.Values));
-            }
-            else
+            var values = EmittedValues(instruction);
+            if (values is null)
             {
                 lowered.Add(RemapTargets(instruction, blockStart));
+                continue;
             }
+
+            // A candidate rejected by its guards skips the whole block, so it is never charged against
+            // OFFSET or LIMIT — exactly how the evaluator de-duplicates before trimming.
+            var reject = new ProgramCounter(blockStart[i + 1]);
+            var guards = EmitterGuards(instruction);
+            if (guards is not null)
+                lowered.Add(new RowGateInstruction(values.Value, guards, reject));
+
+            // Gate order matters: OFFSET first (skips to the loop-advance after this block without counting
+            // against LIMIT), then LIMIT (stops the stream once the allowance is spent).
+            if (needOffset)
+                lowered.Add(new OffsetGateInstruction(offsetCounter, reject));
+            if (needLimit)
+                lowered.Add(new LimitGateInstruction(limitCounter, doneTarget));
+
+            lowered.Add(new ResultRowInstruction(values.Value));
         }
 
         return new VdbeProgram(
@@ -169,7 +180,39 @@ public static class LimitOffsetProgramBuilder
             program.DistinctSetCount,
             program.ParameterSlotCount,
             windowBufferCount: program.WindowBufferCount);
+
+        int LeadLength(VdbeInstruction instruction) =>
+            EmittedValues(instruction) is null
+                ? 0
+                : (EmitterGuards(instruction) is null ? 0 : 1) + prologueLength;
     }
+
+    // The registers a row-producing instruction emits, or null when the instruction produces no row (and so
+    // needs no gating). RowSetInsert and a row-set-directed GuardedRow feed later terms rather than the
+    // caller, so they stream past the gates untouched.
+    private static RegisterRange? EmittedValues(VdbeInstruction instruction) => instruction switch
+    {
+        ResultRowInstruction x => x.Values,
+        DistinctResultRowInstruction x => x.Values,
+        CompoundResultRowInstruction x => x.Values,
+        GuardedRowInstruction { Destination: ResultRowDestination } x => x.Values,
+        _ => null,
+    };
+
+    // The guards folded into a conditional emitter, hoisted so they run before the counters. A plain
+    // ResultRow has none, so it is gated directly.
+    private static IReadOnlyList<VdbeRowGuard>? EmitterGuards(VdbeInstruction instruction) => instruction switch
+    {
+        DistinctResultRowInstruction x =>
+            [new DistinctRowGuard(x.Equality, x.DistinctSetIndex)],
+        CompoundResultRowInstruction x =>
+        [
+            new MembershipRowGuard(x.Equality, x.MembershipSetIndices, x.Mode),
+            new DistinctRowGuard(x.Equality, x.OutputSetIndex),
+        ],
+        GuardedRowInstruction { Destination: ResultRowDestination } x => x.Guards,
+        _ => null,
+    };
 
     /// <summary>
     /// Applies <see cref="Apply(VdbeProgram, long, long?)"/> to a compiled <see cref="CompoundTerm"/>,
@@ -184,10 +227,10 @@ public static class LimitOffsetProgramBuilder
         return ReferenceEquals(gated, term.Program) ? term : term with { Program = gated };
     }
 
-    // Rebuilds one non-ResultRow instruction with its jump targets remapped through the block-start table.
+    // Rebuilds one non-emitting instruction with its jump targets remapped through the block-start table.
     // Registers, cursors, sorters, accumulators, and distinct sets are unchanged because the transform only
-    // appends new registers; opcodes without jump targets are returned as-is. The emit family is never seen
-    // here: ResultRow is handled by the caller, and the conditional emitters were rejected up front.
+    // appends new registers; opcodes without jump targets are returned as-is. The row-producing family is
+    // never seen here: every emitter is rewritten by the caller into a gated block.
     private static VdbeInstruction RemapTargets(VdbeInstruction instruction, int[] blockStart)
     {
         ProgramCounter Pc(ProgramCounter counter) => new(blockStart[counter.Offset]);
@@ -203,6 +246,20 @@ public static class LimitOffsetProgramBuilder
                 x.Equality,
                 x.DistinctSetIndex,
                 Pc(x.DuplicateTarget)),
+            RowGateInstruction x => new RowGateInstruction(x.Values, x.Guards, Pc(x.RejectTarget)),
+            RowSetRewindInstruction x => new RowSetRewindInstruction(
+                x.RowSetIndex,
+                x.Destination,
+                Pc(x.EmptyTarget)),
+            RowSetNextInstruction x => new RowSetNextInstruction(
+                x.RowSetIndex,
+                x.Destination,
+                Pc(x.LoopTarget)),
+            RowSetTestInstruction x => new RowSetTestInstruction(
+                x.RowSetRegister,
+                Pc(x.FoundTarget),
+                x.ValueRegister,
+                x.Batch),
             NextInstruction x => new NextInstruction(x.Cursor, Pc(x.LoopTarget)),
             SorterSortInstruction x => new SorterSortInstruction(x.Sorter, Pc(x.EmptyTarget)),
             SorterNextInstruction x => new SorterNextInstruction(x.Sorter, Pc(x.LoopTarget)),
@@ -241,6 +298,8 @@ public static class LimitOffsetProgramBuilder
                 or CompareInstruction
                 or CastInstruction
                 or GroupKeyInstruction
+                or RowSetInsertInstruction
+                or GuardedRowInstruction
                 or YieldInstruction
                 or HaltInstruction
                 or OpenEphemeralInstruction

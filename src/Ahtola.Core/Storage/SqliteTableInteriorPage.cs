@@ -272,7 +272,7 @@ public sealed class SqliteTableInteriorPageView
         bool isFirstPage = false)
     {
         var snapshot = page.ToArray();
-        var header = SqliteBtreePageHeader.Parse(snapshot, isFirstPage);
+        var header = SqliteBtreePageHeader.Parse(snapshot, isFirstPage, usableSpace);
         if (header.PageType != SqliteBtreePageType.TableInterior)
             throw new InvalidDataException("SQLite page is not a table-interior b-tree page.");
         if (header.RightMostChildPage == 0)
@@ -316,6 +316,7 @@ public sealed class SqliteTableInteriorPageView
         SqliteBtreePageValidation.ValidateCellsDoNotOverlapFreeblocks(
             snapshot,
             header,
+            usableSpace,
             ranges,
             "table-interior");
         return new SqliteTableInteriorPageView(page.Length, usableSpace, header, pointers, cells);

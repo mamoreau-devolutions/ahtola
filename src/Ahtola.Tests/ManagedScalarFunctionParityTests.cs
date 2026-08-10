@@ -56,6 +56,53 @@ public sealed class ManagedScalarFunctionParityTests
         ReadValue(connection, sql).Should().Be(SqlValue.Integer(expected));
     }
 
+    [TestCase("SELECT boolean_to_int('yes');", 1L)]
+    [TestCase("SELECT boolean_to_int('off');", 0L)]
+    [TestCase("SELECT boolean_to_int(1);", 1L)]
+    [TestCase("SELECT boolean_to_int(0);", 0L)]
+    public void ManagedEngineEvaluatesTursoBooleanConversion(string sql, long expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Integer(expected));
+    }
+
+    [TestCase("SELECT int_to_boolean(0);", "false")]
+    [TestCase("SELECT int_to_boolean(2);", "true")]
+    [TestCase("SELECT validate_ipaddr('127.0.0.1');", "127.0.0.1")]
+    [TestCase("SELECT validate_ipaddr('2001:db8::1');", "2001:db8::1")]
+    public void ManagedEngineEvaluatesTursoTypeSupportTextFunctions(string sql, string expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Text(expected));
+    }
+
+    [TestCase("SELECT boolean_to_int(NULL);")]
+    [TestCase("SELECT int_to_boolean(NULL);")]
+    [TestCase("SELECT validate_ipaddr(NULL);")]
+    public void ManagedEnginePropagatesNullThroughTursoTypeSupportFunctions(string sql)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadValue(connection, sql).Should().Be(SqlValue.Null);
+    }
+
+    [TestCase("SELECT boolean_to_int('maybe');", "invalid input for type boolean")]
+    [TestCase("SELECT boolean_to_int(2);", "invalid input for type boolean")]
+    [TestCase("SELECT validate_ipaddr('999.1.1.1');", "invalid input for type inet")]
+    public void ManagedEngineRejectsInvalidTursoTypeSupportValues(string sql, string expected)
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        Assert.Throws<EmbeddedSqlException>(() => ReadValue(connection, sql))!
+            .Message.Should().Contain(expected);
+    }
+
     [TestCase("SELECT ceil(1);", 1L)]
     [TestCase("SELECT ceiling(1);", 1L)]
     [TestCase("SELECT floor(1);", 1L)]

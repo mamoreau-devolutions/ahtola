@@ -122,6 +122,23 @@ public sealed class ManagedAttachDetachRuntimeSliceTests
     }
 
     [Test]
+    public void FileBackedPrimaryCanAttachConnectionOwnedMemoryDatabase()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using var main = EmbeddedDatabase.OpenFile("attach-memory-main.db", fileSystem);
+        using var connection = main.Connect();
+
+        Execute(connection, "ATTACH DATABASE ':memory:' AS aux;");
+        Execute(connection, "CREATE TABLE aux.items(value TEXT);");
+        Execute(connection, "INSERT INTO aux.items VALUES ('memory');");
+
+        ReadRows(connection, "SELECT value FROM aux.items;")
+            .Should().ContainSingle()
+            .Which.Should().Equal(SqlValue.Text("memory"));
+        fileSystem.FileExists(":memory:").Should().BeFalse();
+    }
+
+    [Test]
     public void AttachedWithoutRowidCatalogCommitsRollsBackAndReopens()
     {
         var fileSystem = new InMemoryFileSystem();
@@ -266,8 +283,8 @@ public sealed class ManagedAttachDetachRuntimeSliceTests
         using var main = EmbeddedDatabase.OpenFile("attach-errors-main.db", fileSystem);
         using var connection = main.Connect();
 
-        var memory = () => Execute(connection, "ATTACH DATABASE ':memory:' AS aux;");
-        memory.Should().Throw<EmbeddedSqlException>().WithMessage("*memory databases*not supported*");
+        Execute(connection, "ATTACH DATABASE ':memory:' AS memory;");
+        Execute(connection, "DETACH DATABASE memory;");
 
         var key = () => Execute(connection, "ATTACH DATABASE 'attach-errors-key.db' AS encrypted KEY '00';");
         key.Should().Throw<EmbeddedSqlException>().WithMessage("*encrypted primary database*");
@@ -487,14 +504,85 @@ public sealed class ManagedAttachDetachRuntimeSliceTests
         write.Should().Throw<EmbeddedSqlException>().WithMessage("attempt to write a readonly database");
         Execute(connection, "DETACH aux;");
 
-        var unsupportedOption = () => Execute(
+        // Turso-known URI options beyond mode are accepted as no-ops (OpenOptions::parse).
+        Execute(connection, "ATTACH DATABASE 'file:attach-expression-secondary.db?cache=shared' AS aux;");
+        ReadRows(connection, "SELECT id FROM aux.items;")
+            .Should().ContainSingle().Which.Should().Equal(SqlValue.Integer(1));
+        Execute(connection, "DETACH aux;");
+        Execute(
             connection,
-            "ATTACH DATABASE 'file:attach-expression-secondary.db?cache=shared' AS aux;");
-        unsupportedOption.Should().Throw<EmbeddedSqlException>().WithMessage("*URI option 'cache'*not supported*");
+            "ATTACH DATABASE 'file:attach-expression-secondary.db?immutable=1&vfs=unix&modeof=.' AS aux;");
+        ReadRows(connection, "SELECT id FROM aux.items;")
+            .Should().ContainSingle().Which.Should().Equal(SqlValue.Integer(1));
+        Execute(connection, "DETACH aux;");
 
         Execute(connection, "ATTACH DATABASE 'attach-case.db' AS lower_case;");
         Execute(connection, "ATTACH DATABASE 'ATTACH-CASE.db' AS upper_case;");
         ReadRows(connection, "PRAGMA database_list;").Should().HaveCount(3);
+    }
+
+    [Test]
+    public void FreshAttachInheritsMainPageSizeAndInitializedMismatchIsRejected()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using (var seed = EmbeddedDatabase.OpenFile(
+                   "attach-page-seed.db",
+                   fileSystem,
+                   initialPageSize: 8192))
+        using (var seedConnection = seed.Connect())
+        {
+            Execute(seedConnection, "CREATE TABLE items(id INTEGER PRIMARY KEY);");
+            Execute(seedConnection, "INSERT INTO items VALUES (1);");
+        }
+
+        using var main = EmbeddedDatabase.OpenFile(
+            "attach-page-main.db",
+            fileSystem,
+            initialPageSize: 4096);
+        using var connection = main.Connect();
+        Execute(connection, "CREATE TABLE main_items(id INTEGER PRIMARY KEY);");
+
+        Execute(connection, "ATTACH DATABASE 'attach-page-fresh.db' AS fresh;");
+        ReadInteger(connection, "PRAGMA fresh.page_size;").Should().Be(4096);
+        Execute(connection, "CREATE TABLE fresh.items(id INTEGER PRIMARY KEY);");
+        Execute(connection, "DETACH fresh;");
+
+        var mismatch = () => Execute(connection, "ATTACH DATABASE 'attach-page-seed.db' AS bad;");
+        mismatch.Should().Throw<EmbeddedSqlException>()
+            .WithMessage("*page size mismatch*");
+    }
+
+    [Test]
+    public void ExplainAndExplainQueryPlanAcceptAttachedSchemaQualification()
+    {
+        var fileSystem = new InMemoryFileSystem();
+        using var main = EmbeddedDatabase.OpenFile("attach-explain-main.db", fileSystem);
+        using var connection = main.Connect();
+        Execute(connection, "ATTACH DATABASE 'attach-explain-aux.db' AS aux;");
+        Execute(connection, "CREATE TABLE aux.items(id INTEGER PRIMARY KEY, value TEXT);");
+        Execute(connection, "INSERT INTO aux.items VALUES (1, 'one');");
+
+        var eqp = ReadRows(connection, "EXPLAIN QUERY PLAN SELECT value FROM aux.items WHERE id = 1;");
+        eqp.Should().NotBeEmpty();
+
+        // EXPLAIN may still refuse evaluator-only shapes; routing must not reject schema.
+        Action explain = () => ReadRows(connection, "EXPLAIN SELECT value FROM aux.items WHERE id = 1;");
+        try
+        {
+            explain();
+        }
+        catch (EmbeddedSqlException ex)
+        {
+            ex.Message.Should().NotContain("schema-qualified");
+            ex.Message.Should().NotContain("not supported by managed ATTACH");
+        }
+    }
+
+    private static long ReadInteger(EmbeddedConnection connection, string sql)
+    {
+        var rows = ReadRows(connection, sql);
+        rows.Should().ContainSingle();
+        return rows[0][0].AsInteger();
     }
 
     [Test]

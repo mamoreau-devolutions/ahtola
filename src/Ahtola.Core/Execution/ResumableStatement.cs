@@ -38,6 +38,7 @@ public sealed class ResumableStatement : IDisposable
     private readonly SqlValue[] _registers;
     private readonly bool[] _openCursors;
     private readonly int[] _cursorPositions;
+    private readonly bool[] _skipLastInsertRowId;
     private readonly SqlValue[]?[] _materializedRows;
     private readonly long[] _materializedRowIds;
     private readonly JoinCursorState?[] _joinCursorStates;
@@ -93,6 +94,7 @@ public sealed class ResumableStatement : IDisposable
         _registers = new SqlValue[program.RegisterCount];
         _openCursors = new bool[program.CursorCount];
         _cursorPositions = new int[program.CursorCount];
+        _skipLastInsertRowId = new bool[program.CursorCount];
         _materializedRows = new SqlValue[program.CursorCount][];
         _materializedRowIds = new long[program.CursorCount];
         _joinCursorStates = new JoinCursorState?[program.CursorCount];
@@ -771,7 +773,10 @@ public sealed class ResumableStatement : IDisposable
                         try
                         {
                             var target = RequireWriteTarget(commit.Cursor);
-                            LastInsertRowId = target.Commit();
+                            var committedRowId = target.Commit();
+                            // Turso InsertFlags::SKIP_LAST_ROWID: keep last_insert_rowid() unchanged.
+                            if (!_skipLastInsertRowId[commit.Cursor.Index])
+                                LastInsertRowId = committedRowId;
                             AdvanceInstructionPointer();
                         }
                         catch
@@ -1095,42 +1100,7 @@ public sealed class ResumableStatement : IDisposable
                 case GuardedRowInstruction guardedRow:
                     {
                         var candidate = ReadRegisters(guardedRow.Values);
-                        var accepted = true;
-                        foreach (var guard in guardedRow.Guards)
-                        {
-                            switch (guard)
-                            {
-                                case DistinctRowGuard distinctGuard:
-                                    accepted = TryInsertRowSet(
-                                        distinctGuard.RowSetIndex,
-                                        candidate,
-                                        distinctGuard.Equality);
-                                    break;
-                                case MembershipRowGuard membershipGuard:
-                                    foreach (var rowSetIndex in membershipGuard.RowSetIndices)
-                                    {
-                                        var contained = RowSetContains(
-                                            rowSetIndex,
-                                            candidate,
-                                            membershipGuard.Equality);
-                                        var required =
-                                            membershipGuard.Mode == CompoundMembershipMode.PresentInAll;
-                                        if (contained != required)
-                                        {
-                                            accepted = false;
-                                            break;
-                                        }
-                                    }
-
-                                    break;
-                                default:
-                                    throw new InvalidOperationException(
-                                        $"Validated guarded row contains unsupported guard {guard.GetType().Name}.");
-                            }
-
-                            if (!accepted)
-                                break;
-                        }
+                        var accepted = EvaluateRowGuards(guardedRow.Guards, candidate);
 
                         AdvanceInstructionPointer();
                         if (!accepted)
@@ -1149,6 +1119,19 @@ public sealed class ResumableStatement : IDisposable
                                 throw new InvalidOperationException(
                                     $"Validated guarded row contains unsupported destination {guardedRow.Destination.GetType().Name}.");
                         }
+
+                        break;
+                    }
+                case RowGateInstruction rowGate:
+                    {
+                        // Same guard pipeline as GuardedRow, but emission is left to the plain ResultRow that
+                        // follows. A rejected candidate jumps past the whole emit block, so it never reaches
+                        // the offset/limit counters and is not charged against them.
+                        var candidate = ReadRegisters(rowGate.Values);
+                        if (EvaluateRowGuards(rowGate.Guards, candidate))
+                            AdvanceInstructionPointer();
+                        else
+                            _instructionPointer = rowGate.RejectTarget;
 
                         break;
                     }
@@ -1364,6 +1347,7 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_registers);
         Array.Clear(_openCursors);
         Array.Clear(_cursorPositions);
+        Array.Clear(_skipLastInsertRowId);
         Array.Clear(_materializedRows);
         Array.Clear(_materializedRowIds);
         DisposeAllJoinCursors();
@@ -1708,31 +1692,50 @@ public sealed class ResumableStatement : IDisposable
         var mutate = target.MutateRow
             ?? throw new InvalidOperationException(
                 $"Cursor {cursor.Index} has no mutation action bound.");
+
+        // Capture pre-mutation rowid when UPDATE changes the row's rowid (Turso UPDATE_ROWID_CHANGE).
+        // Forces a positioned read of the old key before the write mutates the cursor.
+        if ((flags & VdbeInsertFlags.UpdateRowidChange) != 0
+            && IsCursorPositioned(cursor))
+        {
+            _ = CurrentCursorRowId(cursor);
+        }
+
         var mutation = mutate(_cursorPositions[cursor.Index]);
         _materializedRows[cursor.Index] = mutation.Row;
         _materializedRowIds[cursor.Index] = mutation.RowId;
 
-        // SkipLastRowid is honored at Commit time via the write-target contract; the
-        // mutation still records the rowid for in-program Column/RowId reads.
+        // Track whether last_insert_rowid() must stay frozen across Commit for this cursor.
+        // Intermediate multi-row INSERT steps set SkipLastRowid; only the final write clears it.
+        if ((flags & VdbeInsertFlags.SkipLastRowid) != 0)
+            _skipLastInsertRowId[cursor.Index] = true;
+        else if (target.Commit is not null)
+            _skipLastInsertRowId[cursor.Index] = false;
+
+        // SkipLastRowid is honored at Commit; mutation still records the rowid for Column/RowId.
         if ((flags & (VdbeInsertFlags.SkipStatementChangeCount | VdbeInsertFlags.SkipAllChangeCounts)) == 0)
             RowsAffected = checked(RowsAffected + 1);
     }
 
     private void EnsureCursorPositioned(Cursor cursor)
     {
-        if (_materializedRows[cursor.Index] is not null)
+        if (IsCursorPositioned(cursor))
             return;
+
+        throw new InvalidOperationException(
+            $"Cursor {cursor.Index} requires a prior seek before this write (VdbeInsertFlags.RequireSeek).");
+    }
+
+    private bool IsCursorPositioned(Cursor cursor)
+    {
+        if (_materializedRows[cursor.Index] is not null)
+            return true;
 
         if (_joinCursorStates[cursor.Index] is { CurrentRow: not null })
-            return;
+            return true;
 
         var position = _cursorPositions[cursor.Index];
-        var count = CursorRowCount(cursor);
-        if (position < 0 || position >= count)
-        {
-            throw new InvalidOperationException(
-                $"Cursor {cursor.Index} requires a prior seek before this write (VdbeInsertFlags.RequireSeek).");
-        }
+        return position >= 0 && position < CursorRowCount(cursor);
     }
 
     private SqlValue[] CurrentCursorRow(Cursor cursor)
@@ -1817,6 +1820,40 @@ public sealed class ResumableStatement : IDisposable
     // Whether the candidate is present in the row set under the supplied equality. An unpopulated set
     // (null) holds no rows, so membership is false — INTERSECT against an empty term yields nothing and
     // EXCEPT against an empty term keeps every candidate.
+    // Runs a guard list over one candidate tuple, in order, with the same accept/insert semantics for both
+    // GuardedRow (which emits or row-set-inserts inline) and RowGate (which defers emission to a following
+    // ResultRow). A DistinctRowGuard inserts on accept, so a tuple later discarded by OFFSET still counts as
+    // seen — matching the evaluator, which de-duplicates before applying OFFSET.
+    private bool EvaluateRowGuards(IReadOnlyList<VdbeRowGuard> guards, SqlValue[] candidate)
+    {
+        foreach (var guard in guards)
+        {
+            switch (guard)
+            {
+                case DistinctRowGuard distinctGuard:
+                    if (!TryInsertRowSet(distinctGuard.RowSetIndex, candidate, distinctGuard.Equality))
+                        return false;
+
+                    break;
+                case MembershipRowGuard membershipGuard:
+                    foreach (var rowSetIndex in membershipGuard.RowSetIndices)
+                    {
+                        var contained = RowSetContains(rowSetIndex, candidate, membershipGuard.Equality);
+                        var required = membershipGuard.Mode == CompoundMembershipMode.PresentInAll;
+                        if (contained != required)
+                            return false;
+                    }
+
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        $"Validated row guard list contains unsupported guard {guard.GetType().Name}.");
+            }
+        }
+
+        return true;
+    }
+
     private bool RowSetContains(int rowSetIndex, SqlValue[] candidate, VdbeRowEquality equality)
     {
         var set = _distinctSets[rowSetIndex];

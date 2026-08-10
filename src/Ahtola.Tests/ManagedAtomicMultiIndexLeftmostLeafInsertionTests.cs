@@ -59,7 +59,7 @@ public sealed class ManagedAtomicMultiIndexLeftmostLeafInsertionTests
         {
             var writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(connection, InsertStatement(target.RowId));
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(10);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(11);
         }
 
         AssertBoundedLeftmostInsertion(before, ReadTopology(fileSystem, path), target);

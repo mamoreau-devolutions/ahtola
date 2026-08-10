@@ -485,11 +485,106 @@ public class ManagedTransactionModeLockingTests
         Convert.ToInt64(command.ExecuteScalar()).Should().Be(2L);
     }
 
+    [Test]
+    public void ConcurrentMultiRowInsertAndTriggerInsertsAreVisibleAfterCommit()
+    {
+        using var db = new ManagedFileDatabase();
+        using var writer = db.Connect();
+        using var reader = db.Connect();
+
+        writer.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        writer.ExecuteNonQuery("CREATE TABLE audit(v INTEGER);");
+        writer.ExecuteNonQuery(
+            """
+                    CREATE TRIGGER t_ai AFTER INSERT ON t
+                    BEGIN
+                      INSERT INTO audit VALUES (new.v);
+                    END;
+                    """);
+
+        writer.ExecuteNonQuery("BEGIN CONCURRENT;");
+        writer.ExecuteNonQuery("INSERT INTO t VALUES (1), (2), (3);");
+        writer.ExecuteNonQuery("COMMIT;");
+
+        Convert.ToInt64(Scalar(reader, "SELECT COUNT(*) FROM t;")).Should().Be(3L);
+        Convert.ToInt64(Scalar(reader, "SELECT COUNT(*) FROM audit;")).Should().Be(3L);
+        Convert.ToInt64(Scalar(reader, "SELECT SUM(v) FROM t;")).Should().Be(6L);
+        Convert.ToInt64(Scalar(reader, "SELECT SUM(v) FROM audit;")).Should().Be(6L);
+    }
+
+    [Test]
+    public void ConcurrentNamedSavepointRollbackUndoesVersionStoreInserts()
+    {
+        using var db = new ManagedFileDatabase();
+        using var connection = db.Connect();
+
+        connection.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        connection.ExecuteNonQuery("BEGIN CONCURRENT;");
+        connection.ExecuteNonQuery("INSERT INTO t VALUES (1);");
+        connection.ExecuteNonQuery("SAVEPOINT sp1;");
+        connection.ExecuteNonQuery("INSERT INTO t VALUES (2);");
+        connection.ExecuteNonQuery("INSERT INTO t VALUES (3);");
+        connection.ExecuteNonQuery("ROLLBACK TO sp1;");
+        connection.ExecuteNonQuery("INSERT INTO t VALUES (4);");
+        connection.ExecuteNonQuery("RELEASE sp1;");
+        connection.ExecuteNonQuery("COMMIT;");
+
+        Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM t;")).Should().Be(2L);
+        Convert.ToInt64(Scalar(connection, "SELECT SUM(v) FROM t;")).Should().Be(5L);
+    }
+
+    [Test]
+    public void ConcurrentModeRejectsAttachedDatabaseMutations()
+    {
+        using var db = new ManagedFileDatabase();
+        using var connection = db.Connect();
+        var auxPath = Path.Combine(Path.GetTempPath(), $"mvcc-attach-{Guid.NewGuid():N}.db");
+        try
+        {
+            connection.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+            connection.ExecuteNonQuery($"ATTACH DATABASE '{auxPath}' AS aux;");
+            connection.ExecuteNonQuery("CREATE TABLE aux.items(v INTEGER);");
+            connection.ExecuteNonQuery("BEGIN CONCURRENT;");
+            connection.ExecuteNonQuery("INSERT INTO t VALUES (1);");
+            var attachedWrite = Capture(() => connection.ExecuteNonQuery("INSERT INTO aux.items VALUES (2);"));
+            attachedWrite.Should().NotBeNull();
+            attachedWrite!.Message.Should().Contain("only supports mutations on the main database");
+            connection.ExecuteNonQuery("COMMIT;");
+            Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM t;")).Should().Be(1L);
+            Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM aux.items;")).Should().Be(0L);
+        }
+        finally
+        {
+            try { File.Delete(auxPath); } catch { /* best effort */ }
+            try { File.Delete(auxPath + "-wal"); } catch { /* best effort */ }
+            try { File.Delete(auxPath + "-shm"); } catch { /* best effort */ }
+        }
+    }
+
+    [Test]
+    public void ReindexIsRejectedWhileMvccIsEnabled()
+    {
+        using var db = new ManagedFileDatabase();
+        using var connection = db.Connect();
+        connection.ExecuteNonQuery("PRAGMA journal_mode=mvcc;");
+        connection.ExecuteNonQuery("CREATE INDEX t_v ON t(v);");
+        var error = Capture(() => connection.ExecuteNonQuery("REINDEX;"));
+        error.Should().NotBeNull();
+        error!.Message.Should().Contain("REINDEX is not supported in MVCC mode");
+    }
+
     private static string ReadValue(SqliteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToString(command.ExecuteScalar()) ?? string.Empty;
+    }
+
+    private static object? Scalar(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return command.ExecuteScalar();
     }
 
     [Test]

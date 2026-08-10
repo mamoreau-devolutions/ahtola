@@ -33,6 +33,10 @@ Pinned submodule: `turso-src/` @ **v0.7.2** (`046e9cbf6`).
    (single write reservation, WAL snapshots).
 6. **Upstream anomaly TODOs.** Do not claim protection against phantoms, cursor
    lost updates, read skew, or write skew beyond Turso v0.7.2.
+7. **Concurrent DDL fails closed.** Turso versions `sqlite_schema` rows through
+   MVCC. Ahtola does not yet version schema rows, so schema-changing statements
+   inside `BEGIN CONCURRENT` are rejected rather than appearing to succeed and
+   then being discarded by the committed-row merge.
 
 ## Phase map
 
@@ -44,7 +48,7 @@ Pinned submodule: `turso-src/` @ **v0.7.2** (`046e9cbf6`).
 | **3** | Header version **255** via pager `SwitchJournalMode(Mvcc)`; cold open restores `MvStore`; `MvccDualCursor` merge primitive; **shared `MvStore`/log per path** (`EmbeddedMvStoreRegistry`) so pooled multi-connection concurrent writers share one version store + rowid allocator; concurrent commit reloads durable catalog then merges store snapshots |
 | **3.5** | **SQL dual-cursor routing:** under `BEGIN CONCURRENT`, `GetNamedTableRows` merges base catalog + store via `MvccDualCursor.MergeVisibleRows`; DML records versions via `ReportRowChange` → `DeleteOrTombstoneBase` / `UpdateIncludingBase` (DELETE/UPDATE) and connection `RecordConcurrentMvccMutation` (INSERT + global rowid); peer uncommitted writes invisible; SI after peer commit; same-row WW on SQL path |
 | **3.6 (current)** | **Checkpoint SM skeleton:** `PRAGMA wal_checkpoint` in MVCC mode runs `RunMvccCheckpoint` — AcquireLock → Collect/Materialize (reuse `MergeConcurrentCatalogFromStoreLocked`) → Persist catalog → Truncate logical log (TRUNCATE/RESTART/FULL) → `GarbageCollectAfterCheckpoint` (clear store when no active txs; else prune past reader LWM). Active concurrent txs → busy=1, no truncate. Not a full Turso cooperative btree page walk. |
-| **Open** | Schema generation cookie polish; full per-page btree checkpoint SM / WAL TRUNCATE interleave parity with Turso if product requires it |
+| **Open** | MVCC-versioned schema rows (concurrent DDL currently fails closed); schema generation cookie polish; full per-page btree checkpoint SM / WAL TRUNCATE interleave parity with Turso if product requires it |
 
 ## Dual-cursor SQL routing notes
 

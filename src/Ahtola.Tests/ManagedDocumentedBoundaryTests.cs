@@ -16,14 +16,8 @@ public sealed class ManagedDocumentedBoundaryTests
     // The remaining pragma cluster (synchronous, locking_mode, busy_timeout,
     // wal_checkpoint, wal_autocheckpoint, auto_vacuum, max_page_count, temp_store,
     // mmap_size) is now accepted: busy_timeout / wal_checkpoint / max_page_count /
-    // temp_store are fully executed and the rest follow SQLite's silent no-op
-    // behavior for unrecognized pragmas. function_list and module_list stay
-    // documented-unsupported because they would have to return registry rows.
-    private static readonly string[] UnsupportedPragmas =
-    [
-        "PRAGMA function_list",
-        "PRAGMA module_list",
-    ];
+    // temp_store, synchronous, locking_mode, auto_vacuum, function_list, and
+    // module_list are executed; the remainder follow SQLite's silent no-op behavior.
 
     private static readonly string[] UnsupportedStatements =
     [
@@ -42,47 +36,38 @@ public sealed class ManagedDocumentedBoundaryTests
         Execute(connection, "COMMIT");
     }
 
-        /// <summary>
-        /// P5-D: auto_vacuum / incremental_vacuum stay silent no-ops (Turso v0.7.2 also rejects
-        /// Incremental auto-vacuum). Must not throw and must not claim ptrmap reclaim.
-        /// </summary>
-        [Test]
-        [TestCase("PRAGMA auto_vacuum")]
-        [TestCase("PRAGMA auto_vacuum=NONE")]
-        [TestCase("PRAGMA auto_vacuum=FULL")]
-        [TestCase("PRAGMA auto_vacuum=INCREMENTAL")]
-        [TestCase("PRAGMA incremental_vacuum")]
-        [TestCase("PRAGMA incremental_vacuum(10)")]
-        public void AutoVacuumFamilyIsAcceptedNoOp(string sql)
-        {
-            using var connection = Open();
-            Execute(connection, "INSERT INTO t VALUES (1, 'a');");
-            Execute(connection, sql);
-            ExecuteScalarLong(connection, "SELECT COUNT(*) FROM t;").Should().Be(1L);
-        }
-
-        /// <summary>
-        /// P5-C: cache_spill round-trips as a surface flag; managed cache is clean-page only so
-        /// there is no dirty-page spill counterpart (inventory storage-no-page-cache-spill).
-        /// </summary>
-        [Test]
-        public void CacheSpillPragmaRoundTripsWithoutError()
-        {
-            using var connection = Open();
-            Execute(connection, "PRAGMA cache_spill=OFF;");
-            Execute(connection, "PRAGMA cache_spill=ON;");
-            Execute(connection, "PRAGMA cache_size=-2000;");
-            Execute(connection, "INSERT INTO t VALUES (42, 'x');");
-            ExecuteScalarLong(connection, "SELECT a FROM t;").Should().Be(42L);
-        }
-
+    /// <summary>
+    /// P5-D: auto_vacuum / incremental_vacuum stay silent no-ops (Turso v0.7.2 also rejects
+    /// Incremental auto-vacuum). Must not throw and must not claim ptrmap reclaim.
+    /// </summary>
     [Test]
-    [TestCaseSource(nameof(UnsupportedPragmas))]
-    public void ADocumentedUnsupportedPragmaIsRejected(string sql)
+    [TestCase("PRAGMA auto_vacuum")]
+    [TestCase("PRAGMA auto_vacuum=NONE")]
+    [TestCase("PRAGMA auto_vacuum=FULL")]
+    [TestCase("PRAGMA auto_vacuum=INCREMENTAL")]
+    [TestCase("PRAGMA incremental_vacuum")]
+    [TestCase("PRAGMA incremental_vacuum(10)")]
+    public void AutoVacuumFamilyIsAcceptedNoOp(string sql)
     {
         using var connection = Open();
-        var error = Assert.Throws<SqliteException>(() => Execute(connection, sql));
-        error!.Message.Should().Contain("Unsupported PRAGMA");
+        Execute(connection, "INSERT INTO t VALUES (1, 'a');");
+        Execute(connection, sql);
+        ExecuteScalarLong(connection, "SELECT COUNT(*) FROM t;").Should().Be(1L);
+    }
+
+    /// <summary>
+    /// P5-C: cache_spill round-trips as a surface flag; managed cache is clean-page only so
+    /// there is no dirty-page spill counterpart (inventory storage-no-page-cache-spill).
+    /// </summary>
+    [Test]
+    public void CacheSpillPragmaRoundTripsWithoutError()
+    {
+        using var connection = Open();
+        Execute(connection, "PRAGMA cache_spill=OFF;");
+        Execute(connection, "PRAGMA cache_spill=ON;");
+        Execute(connection, "PRAGMA cache_size=-2000;");
+        Execute(connection, "INSERT INTO t VALUES (42, 'x');");
+        ExecuteScalarLong(connection, "SELECT a FROM t;").Should().Be(42L);
     }
 
     [Test]
@@ -315,11 +300,11 @@ public sealed class ManagedDocumentedBoundaryTests
         }
     }
 
-        private static long ExecuteScalarLong(SqliteConnection connection, string sql)
-        {
-            using var command = connection.CreateCommand();
-            command.CommandText = sql;
-            var value = command.ExecuteScalar();
-            return Convert.ToInt64(value);
-        }
+    private static long ExecuteScalarLong(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        var value = command.ExecuteScalar();
+        return Convert.ToInt64(value);
     }
+}

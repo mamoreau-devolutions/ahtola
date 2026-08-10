@@ -12,8 +12,9 @@ public sealed class StatementCompilationException : InvalidOperationException
 
 /// <summary>
 /// Lowers source-less projections and single-table scans into executable VDBE programs. Projection
-/// expressions support constants, late-bound parameters, columns/rowid, nested arithmetic, and supported
-/// scalar functions; unsupported expression families cause the whole statement to remain on the evaluator.
+/// expressions support constants, late-bound parameters, columns/rowid, comparisons, logical/range/list
+/// operators, concatenation, nested arithmetic, CASE, and supported scalar functions; unsupported expression
+/// families cause the whole statement to remain on the evaluator.
 /// </summary>
 internal sealed class SelectStatementCompiler
 {
@@ -137,37 +138,37 @@ internal sealed class SelectStatementCompiler
         compiled = null!;
 
         // ORDER BY elision (Turso order.rs eliminate_order_by subset):
-                // Bare rowid / INTEGER PK alias:
-                //   ASC  → plain Rewind/Next (physical rowid order)
-                //   DESC → Last/Prev reverse scan
-                // Secondary-index ORDER BY is elided by the caller stripping OrderBy after
-                // materializing rows in index order (see TryCompileManagedIndexSelect).
-                // WHERE/GROUP BY/HAVING/LIMIT/OFFSET/DISTINCT still block the plain scan path
-                // except WHERE which is handled below as usual.
-                if (TryGetBareRowidOrderBy(statement, out var rowidOrderTarget, out var rowidOrderDescending))
-                {
-                    if (rowidOrderDescending)
-                        return TryCompileReverseRowidScan(statement, rowidOrderTarget, out compiled);
+        // Bare rowid / INTEGER PK alias:
+        //   ASC  → plain Rewind/Next (physical rowid order)
+        //   DESC → Last/Prev reverse scan
+        // Secondary-index ORDER BY is elided by the caller stripping OrderBy after
+        // materializing rows in index order (see TryCompileManagedIndexSelect).
+        // WHERE/GROUP BY/HAVING/LIMIT/OFFSET/DISTINCT still block the plain scan path
+        // except WHERE which is handled below as usual.
+        if (TryGetBareRowidOrderBy(statement, out var rowidOrderTarget, out var rowidOrderDescending))
+        {
+            if (rowidOrderDescending)
+                return TryCompileReverseRowidScan(statement, rowidOrderTarget, out compiled);
 
-                    // ASC: fall through into the forward-scan compiler with OrderBy elided.
-                }
-                else
-                {
-                    rowidOrderTarget = null;
-                    rowidOrderDescending = false;
-                }
+            // ASC: fall through into the forward-scan compiler with OrderBy elided.
+        }
+        else
+        {
+            rowidOrderTarget = null;
+            rowidOrderDescending = false;
+        }
 
-                var elideOrderBy = rowidOrderTarget is not null && !rowidOrderDescending;
+        var elideOrderBy = rowidOrderTarget is not null && !rowidOrderDescending;
 
-                if (statement.Having is not null
-                    || statement.GroupBy.Count != 0
-                    || (statement.OrderBy.Count != 0 && !elideOrderBy)
-                    || statement.Limit is not null
-                    || statement.Offset is not null
-                    || statement.Projections.Count == 0)
-                {
-                    return false;
-                }
+        if (statement.Having is not null
+            || statement.GroupBy.Count != 0
+            || (statement.OrderBy.Count != 0 && !elideOrderBy)
+            || statement.Limit is not null
+            || statement.Offset is not null
+            || statement.Projections.Count == 0)
+        {
+            return false;
+        }
 
         var target = _resolveScanTarget(statement.Source!);
         if (target is null)
@@ -184,23 +185,23 @@ internal sealed class SelectStatementCompiler
         if (!TryExpandProjections(statement.Projections, target, out var projections))
             return false;
 
-                // P4-B: WHERE col IN (lit/param…) materializes the RHS into OpenEphemeral and
-                // probes with NoConflict (Turso in_seek OpenEphemeral + membership).
-                if (TryCompileInListMembership(statement, target, projections, distinctEquality, out compiled))
-                    return true;
+        // P4-B: WHERE col IN (lit/param…) materializes the RHS into OpenEphemeral and
+        // probes with NoConflict (Turso in_seek OpenEphemeral + membership).
+        if (TryCompileInListMembership(statement, target, projections, distinctEquality, out compiled))
+            return true;
 
-                // Step 2: rowid-equality seek. When WHERE is `rowid = <int literal>` (bare rowid
-                // or table-qualified, integer literal), emit a SeekRowid point-lookup instead of
-                // a full scan + FilterRowId. Parameters (runtime-typed — a text-bound @p would
-                // diverge: SeekRowid jumps NotFound while the scan coerces via affinity), rowid-
-                // ALIAS equality (`id = N` on INTEGER PRIMARY KEY — IsTargetRowIdReference returns
-                // false for declared columns), and range predicates (`>`, `BETWEEN` — Step 3)
-                // stay on the scan path: still correct, just not seek-optimized. Distinct is gated
-                // out (would need DistinctResultRow + a distinct set); the top-of-method guards
-                // already exclude GroupBy/Having/OrderBy/Limit/Offset.
-                if (!statement.Distinct
-                    && TryGetRowIdSeekOperand(statement.Where, target, out var rowIdValue))
-                {
+        // Step 2: rowid-equality seek. When WHERE is `rowid = <int literal>` (bare rowid
+        // or table-qualified, integer literal), emit a SeekRowid point-lookup instead of
+        // a full scan + FilterRowId. Parameters (runtime-typed — a text-bound @p would
+        // diverge: SeekRowid jumps NotFound while the scan coerces via affinity), rowid-
+        // ALIAS equality (`id = N` on INTEGER PRIMARY KEY — IsTargetRowIdReference returns
+        // false for declared columns), and range predicates (`>`, `BETWEEN` — Step 3)
+        // stay on the scan path: still correct, just not seek-optimized. Distinct is gated
+        // out (would need DistinctResultRow + a distinct set); the top-of-method guards
+        // already exclude GroupBy/Having/OrderBy/Limit/Offset.
+        if (!statement.Distinct
+            && TryGetRowIdSeekOperand(statement.Where, target, out var rowIdValue))
+        {
             var seekCursor = new Cursor(0);
             var seekBody = new List<VdbeInstruction>();
             // OpenRead(0), rhsLoad(1), SeekRowid(2), projections(3..), ResultRow, Close, Halt.
@@ -264,28 +265,28 @@ internal sealed class SelectStatementCompiler
         }
 
         // Step 2b: index equality SEARCH prefix. When the planner attached IndexSeek
-                // (leading equality on a usable index), emit Load + SeekGE/IdxGE then residual
-                // WHERE Filter + Next — not Rewind over the whole index-ordered cursor.
-                if (!statement.Distinct
-                    && target.IndexSeek is { Bounds.Count: > 0 } indexSeek
-                    && indexSeek.KeyColumns.Count == indexSeek.Bounds.Count
-                    && statement.Where is not null)
-                {
-                    if (TryCompileIndexEqualitySeek(statement, target, indexSeek, projections, out compiled))
-                        return true;
-                }
+        // (leading equality on a usable index), emit Load + SeekGE/IdxGE then residual
+        // WHERE Filter + Next — not Rewind over the whole index-ordered cursor.
+        if (!statement.Distinct
+            && target.IndexSeek is { Bounds.Count: > 0 } indexSeek
+            && indexSeek.KeyColumns.Count == indexSeek.Bounds.Count
+            && statement.Where is not null)
+        {
+            if (TryCompileIndexEqualitySeek(statement, target, indexSeek, projections, out compiled))
+                return true;
+        }
 
-                // Step 3: rowid-range seek. When WHERE is `rowid >|>=|<|<= <int literal>` (or the
-                // swapped form) or `rowid BETWEEN <int literal> AND <int literal>` (non-negated),
-                // emit a SeekRowidRange that lands on the first row whose rowid satisfies the start
-                // predicate, followed by a FilterRowId enforcing the full WHERE over the matching
-                // range, then the projection loop. Bounds must be integer literals (a text literal
-                // '2' coerces via affinity on the scan path, so seeking on it would diverge; a
-                // late-bound parameter is runtime-typed for the same reason). The same Distinct /
-                // GroupBy / Having / OrderBy / Limit / Offset gates as Step 2 apply.
-                if (!statement.Distinct
-                    && TryGetRowIdRangeSeekOperand(statement.Where, target, out var startBound, out var startOp, out var endBound, out var endOp))
-                {
+        // Step 3: rowid-range seek. When WHERE is `rowid >|>=|<|<= <int literal>` (or the
+        // swapped form) or `rowid BETWEEN <int literal> AND <int literal>` (non-negated),
+        // emit a SeekRowidRange that lands on the first row whose rowid satisfies the start
+        // predicate, followed by a FilterRowId enforcing the full WHERE over the matching
+        // range, then the projection loop. Bounds must be integer literals (a text literal
+        // '2' coerces via affinity on the scan path, so seeking on it would diverge; a
+        // late-bound parameter is runtime-typed for the same reason). The same Distinct /
+        // GroupBy / Having / OrderBy / Limit / Offset gates as Step 2 apply.
+        if (!statement.Distinct
+            && TryGetRowIdRangeSeekOperand(statement.Where, target, out var startBound, out var startOp, out var endBound, out var endOp))
+        {
             var seekCursor = new Cursor(0);
             var seekBody = new List<VdbeInstruction>();
             // OpenRead(0), LoadConstant(start)(1), [LoadConstant(end)(2)], SeekRowidRange,
@@ -546,302 +547,302 @@ internal sealed class SelectStatementCompiler
     }
 
     /// <summary>
-        /// WHERE &lt;col|rowid&gt; IN (literal/parameter…) → OpenEphemeral RHS + table scan with
-        /// NoConflict membership (fall-through = member). NOT IN and mixed RHS shapes stay
-        /// on the delegate/Filter path. DISTINCT uses DistinctResultRow after membership.
-        /// </summary>
-        private bool TryCompileInListMembership(
-            SelectStatement statement,
-            ScanTarget target,
-            IReadOnlyList<ProjectionSource> projections,
-            VdbeRowEquality? distinctEquality,
-            out CompiledSelect compiled)
+    /// WHERE &lt;col|rowid&gt; IN (literal/parameter…) → OpenEphemeral RHS + table scan with
+    /// NoConflict membership (fall-through = member). NOT IN and mixed RHS shapes stay
+    /// on the delegate/Filter path. DISTINCT uses DistinctResultRow after membership.
+    /// </summary>
+    private bool TryCompileInListMembership(
+        SelectStatement statement,
+        ScanTarget target,
+        IReadOnlyList<ProjectionSource> projections,
+        VdbeRowEquality? distinctEquality,
+        out CompiledSelect compiled)
+    {
+        compiled = null!;
+        if (statement.Where is not InExpression inExpr || inExpr.Negated || inExpr.Values.Count == 0)
+            return false;
+
+        var probeIsRowId = false;
+        int? probeColumnIndex = null;
+        switch (inExpr.Value)
         {
-            compiled = null!;
-            if (statement.Where is not InExpression inExpr || inExpr.Negated || inExpr.Values.Count == 0)
+            case ColumnExpression column when IsTargetRowIdReference(column, target):
+                probeIsRowId = true;
+                break;
+            case ColumnExpression column when target.ResolveColumnIndex(column.Name) is { } colIdx:
+                probeColumnIndex = colIdx;
+                break;
+            default:
                 return false;
-
-            var probeIsRowId = false;
-            int? probeColumnIndex = null;
-            switch (inExpr.Value)
-            {
-                case ColumnExpression column when IsTargetRowIdReference(column, target):
-                    probeIsRowId = true;
-                    break;
-                case ColumnExpression column when target.ResolveColumnIndex(column.Name) is { } colIdx:
-                    probeColumnIndex = colIdx;
-                    break;
-                default:
-                    return false;
-            }
-
-            foreach (var value in inExpr.Values)
-            {
-                if (value is not (LiteralExpression or ParameterExpression))
-                    return false;
-            }
-
-            if (statement.Distinct && distinctEquality is null)
-                return false;
-
-            var tableCursor = new Cursor(0);
-            var ephCursor = new Cursor(1);
-            var probeRegister = new Register(projections.Count);
-            var registerFloor = projections.Count + 1;
-            var insertRange = new RegisterRange(probeRegister, 1);
-
-            // One shared instruction list + emitter so RHS and projection parameters share slots
-            // and programCounterBase 0 tracks absolute PCs for any expression-internal jumps.
-            var instructions = new List<VdbeInstruction>();
-            var emitter = CreateEmitter(target, tableCursor, registerFloor, instructions, programCounterBase: 0);
-
-            instructions.Add(new OpenEphemeralInstruction(ephCursor, ColumnCount: 1));
-            foreach (var value in inExpr.Values)
-            {
-                if (!emitter.TryEmit(value, probeRegister))
-                    return false;
-                instructions.Add(new EphemeralInsertInstruction(ephCursor, insertRange));
-            }
-
-            instructions.Add(
-                new OpenReadCursorInstruction(
-                    tableCursor,
-                    FormatOpenReadTable(target),
-                    target.Columns.Length));
-
-            var rewindIndex = instructions.Count;
-            instructions.Add(new HaltInstruction()); // patched to Rewind
-
-            var loopStart = instructions.Count;
-            if (probeIsRowId)
-                instructions.Add(new RowIdInstruction(tableCursor, probeRegister));
-            else
-                instructions.Add(new ColumnInstruction(tableCursor, probeColumnIndex!.Value, probeRegister));
-
-            var noConflictIndex = instructions.Count;
-            instructions.Add(new HaltInstruction()); // patched to NoConflict
-
-            for (var index = 0; index < projections.Count; index++)
-            {
-                var projection = projections[index];
-                if (projection.ColumnIndex is { } columnIndex)
-                    instructions.Add(new ColumnInstruction(tableCursor, columnIndex, new Register(index)));
-                else if (!emitter.TryEmit(projection.Expression!, new Register(index)))
-                    return false;
-            }
-
-            var output = new RegisterRange(new Register(0), projections.Count);
-            if (statement.Distinct)
-            {
-                instructions.Add(
-                    new DistinctResultRowInstruction(
-                        output,
-                        distinctEquality!,
-                        DistinctSetIndex: 0));
-            }
-            else
-            {
-                instructions.Add(new ResultRowInstruction(output));
-            }
-
-            var nextIndex = instructions.Count;
-            instructions.Add(new NextInstruction(tableCursor, new ProgramCounter(loopStart)));
-            var closeTableIndex = instructions.Count;
-            instructions.Add(new CloseCursorInstruction(tableCursor));
-            instructions.Add(new CloseCursorInstruction(ephCursor));
-            instructions.Add(new HaltInstruction());
-
-            instructions[rewindIndex] = new RewindCursorInstruction(
-                tableCursor,
-                new ProgramCounter(closeTableIndex));
-            instructions[noConflictIndex] = new NoConflictInstruction(
-                ephCursor,
-                insertRange,
-                new ProgramCounter(nextIndex),
-                $"skip non-member, goto {nextIndex}");
-
-            compiled = new CompiledSelect(
-                new VdbeProgram(
-                    emitter.RegisterCount,
-                    cursorCount: 2,
-                    instructions,
-                    distinctSetCount: statement.Distinct ? 1 : 0,
-                    parameterSlotCount: emitter.ParameterIndices.Count),
-                [
-                    target.CreateCursorSource(),
-                    // Ephemeral cursor is runtime-owned; empty placeholder keeps sources aligned.
-                    new VdbeCursorSource([]),
-                ],
-                emitter.ParameterIndices);
-            return true;
         }
 
-        /// <summary>
-            /// SEARCH equality prefix: OpenRead USING INDEX, load bounds, IdxGE/SeekGE, residual
-            /// WHERE Filter, projections, Next. KeyColumns remap seeks onto table-row ordinals when
-            /// the cursor holds full table rows ordered by a non-leading index key.
-            /// </summary>
-            private bool TryCompileIndexEqualitySeek(
-            SelectStatement statement,
-            ScanTarget target,
-            IndexSeekPrefix indexSeek,
-            IReadOnlyList<ProjectionSource> projections,
-            out CompiledSelect compiled)
+        foreach (var value in inExpr.Values)
         {
-            compiled = null!;
-            var keyWidth = indexSeek.Bounds.Count;
-            if (keyWidth <= 0 || indexSeek.KeyColumns.Count != keyWidth)
+            if (value is not (LiteralExpression or ParameterExpression))
                 return false;
+        }
 
-            var cursor = new Cursor(0);
-            var keyStartRegister = projections.Count;
+        if (statement.Distinct && distinctEquality is null)
+            return false;
 
-            // Key loads + projection body share one emitter so parameter slots stay coherent.
-            // programCounterBase is only needed for projection-internal jumps; key loads are
-            // relocated to the program head, so use the post-seek Filter address as base.
-            // Layout: OpenRead | keyLoads×W | SeekKey | Filter | body… | ResultRow | Next | Close | Halt
-            var filterAddr = 2 + keyWidth;
-            var body = new List<VdbeInstruction>();
-            var emitter = CreateEmitter(
-                target,
-                cursor,
-                projections.Count + keyWidth,
-                body,
-                programCounterBase: filterAddr + 1);
+        var tableCursor = new Cursor(0);
+        var ephCursor = new Cursor(1);
+        var probeRegister = new Register(projections.Count);
+        var registerFloor = projections.Count + 1;
+        var insertRange = new RegisterRange(probeRegister, 1);
 
-            var keyLoadInstructions = new List<VdbeInstruction>(keyWidth);
-            for (var i = 0; i < keyWidth; i++)
-            {
-                var before = body.Count;
-                if (!emitter.TryEmit(indexSeek.Bounds[i], new Register(keyStartRegister + i)))
-                    return false;
-                var emitted = body.Count - before;
-                if (emitted <= 0)
-                    return false;
-                for (var j = before; j < body.Count; j++)
-                    keyLoadInstructions.Add(body[j]);
-                body.RemoveRange(before, emitted);
-            }
+        // One shared instruction list + emitter so RHS and projection parameters share slots
+        // and programCounterBase 0 tracks absolute PCs for any expression-internal jumps.
+        var instructions = new List<VdbeInstruction>();
+        var emitter = CreateEmitter(target, tableCursor, registerFloor, instructions, programCounterBase: 0);
 
-            var predicate = _compilePredicate(statement.Where!, target);
-            VdbeRowIdPredicate? rowIdPredicate = null;
-            if (predicate is null)
-                rowIdPredicate = _compileRowIdPredicate(statement.Where!, target);
-            if (predicate is null && rowIdPredicate is null)
+        instructions.Add(new OpenEphemeralInstruction(ephCursor, ColumnCount: 1));
+        foreach (var value in inExpr.Values)
+        {
+            if (!emitter.TryEmit(value, probeRegister))
                 return false;
+            instructions.Add(new EphemeralInsertInstruction(ephCursor, insertRange));
+        }
 
-            for (var index = 0; index < projections.Count; index++)
-            {
-                var projection = projections[index];
-                if (projection.ColumnIndex is { } columnIndex)
-                    body.Add(new ColumnInstruction(cursor, columnIndex, new Register(index)));
-                else if (!emitter.TryEmit(projection.Expression!, new Register(index)))
-                    return false;
-            }
+        instructions.Add(
+            new OpenReadCursorInstruction(
+                tableCursor,
+                FormatOpenReadTable(target),
+                target.Columns.Length));
 
-            var isIndex = target.IndexName is not null;
-            var keyColumns = indexSeek.KeyColumns as int[] ?? indexSeek.KeyColumns.ToArray();
-            var keyRange = new RegisterRange(new Register(keyStartRegister), keyWidth);
+        var rewindIndex = instructions.Count;
+        instructions.Add(new HaltInstruction()); // patched to Rewind
 
-            var instructions = new List<VdbeInstruction>(8 + keyLoadInstructions.Count + body.Count)
+        var loopStart = instructions.Count;
+        if (probeIsRowId)
+            instructions.Add(new RowIdInstruction(tableCursor, probeRegister));
+        else
+            instructions.Add(new ColumnInstruction(tableCursor, probeColumnIndex!.Value, probeRegister));
+
+        var noConflictIndex = instructions.Count;
+        instructions.Add(new HaltInstruction()); // patched to NoConflict
+
+        for (var index = 0; index < projections.Count; index++)
+        {
+            var projection = projections[index];
+            if (projection.ColumnIndex is { } columnIndex)
+                instructions.Add(new ColumnInstruction(tableCursor, columnIndex, new Register(index)));
+            else if (!emitter.TryEmit(projection.Expression!, new Register(index)))
+                return false;
+        }
+
+        var output = new RegisterRange(new Register(0), projections.Count);
+        if (statement.Distinct)
+        {
+            instructions.Add(
+                new DistinctResultRowInstruction(
+                    output,
+                    distinctEquality!,
+                    DistinctSetIndex: 0));
+        }
+        else
+        {
+            instructions.Add(new ResultRowInstruction(output));
+        }
+
+        var nextIndex = instructions.Count;
+        instructions.Add(new NextInstruction(tableCursor, new ProgramCounter(loopStart)));
+        var closeTableIndex = instructions.Count;
+        instructions.Add(new CloseCursorInstruction(tableCursor));
+        instructions.Add(new CloseCursorInstruction(ephCursor));
+        instructions.Add(new HaltInstruction());
+
+        instructions[rewindIndex] = new RewindCursorInstruction(
+            tableCursor,
+            new ProgramCounter(closeTableIndex));
+        instructions[noConflictIndex] = new NoConflictInstruction(
+            ephCursor,
+            insertRange,
+            new ProgramCounter(nextIndex),
+            $"skip non-member, goto {nextIndex}");
+
+        compiled = new CompiledSelect(
+            new VdbeProgram(
+                emitter.RegisterCount,
+                cursorCount: 2,
+                instructions,
+                distinctSetCount: statement.Distinct ? 1 : 0,
+                parameterSlotCount: emitter.ParameterIndices.Count),
+            [
+                target.CreateCursorSource(),
+                    // Ephemeral cursor is runtime-owned; empty placeholder keeps sources aligned.
+                    new VdbeCursorSource([]),
+            ],
+            emitter.ParameterIndices);
+        return true;
+    }
+
+    /// <summary>
+    /// SEARCH equality prefix: OpenRead USING INDEX, load bounds, IdxGE/SeekGE, residual
+    /// WHERE Filter, projections, Next. KeyColumns remap seeks onto table-row ordinals when
+    /// the cursor holds full table rows ordered by a non-leading index key.
+    /// </summary>
+    private bool TryCompileIndexEqualitySeek(
+    SelectStatement statement,
+    ScanTarget target,
+    IndexSeekPrefix indexSeek,
+    IReadOnlyList<ProjectionSource> projections,
+    out CompiledSelect compiled)
+    {
+        compiled = null!;
+        var keyWidth = indexSeek.Bounds.Count;
+        if (keyWidth <= 0 || indexSeek.KeyColumns.Count != keyWidth)
+            return false;
+
+        var cursor = new Cursor(0);
+        var keyStartRegister = projections.Count;
+
+        // Key loads + projection body share one emitter so parameter slots stay coherent.
+        // programCounterBase is only needed for projection-internal jumps; key loads are
+        // relocated to the program head, so use the post-seek Filter address as base.
+        // Layout: OpenRead | keyLoads×W | SeekKey | Filter | body… | ResultRow | Next | Close | Halt
+        var filterAddr = 2 + keyWidth;
+        var body = new List<VdbeInstruction>();
+        var emitter = CreateEmitter(
+            target,
+            cursor,
+            projections.Count + keyWidth,
+            body,
+            programCounterBase: filterAddr + 1);
+
+        var keyLoadInstructions = new List<VdbeInstruction>(keyWidth);
+        for (var i = 0; i < keyWidth; i++)
+        {
+            var before = body.Count;
+            if (!emitter.TryEmit(indexSeek.Bounds[i], new Register(keyStartRegister + i)))
+                return false;
+            var emitted = body.Count - before;
+            if (emitted <= 0)
+                return false;
+            for (var j = before; j < body.Count; j++)
+                keyLoadInstructions.Add(body[j]);
+            body.RemoveRange(before, emitted);
+        }
+
+        var predicate = _compilePredicate(statement.Where!, target);
+        VdbeRowIdPredicate? rowIdPredicate = null;
+        if (predicate is null)
+            rowIdPredicate = _compileRowIdPredicate(statement.Where!, target);
+        if (predicate is null && rowIdPredicate is null)
+            return false;
+
+        for (var index = 0; index < projections.Count; index++)
+        {
+            var projection = projections[index];
+            if (projection.ColumnIndex is { } columnIndex)
+                body.Add(new ColumnInstruction(cursor, columnIndex, new Register(index)));
+            else if (!emitter.TryEmit(projection.Expression!, new Register(index)))
+                return false;
+        }
+
+        var isIndex = target.IndexName is not null;
+        var keyColumns = indexSeek.KeyColumns as int[] ?? indexSeek.KeyColumns.ToArray();
+        var keyRange = new RegisterRange(new Register(keyStartRegister), keyWidth);
+
+        var instructions = new List<VdbeInstruction>(8 + keyLoadInstructions.Count + body.Count)
             {
                 new OpenReadCursorInstruction(
                     cursor,
                     FormatOpenReadTable(target),
                     target.Columns.Length),
             };
-            instructions.AddRange(keyLoadInstructions);
+        instructions.AddRange(keyLoadInstructions);
 
-            var seekIndex = instructions.Count;
-            instructions.Add(new SeekKeyInstruction(
+        var seekIndex = instructions.Count;
+        instructions.Add(new SeekKeyInstruction(
+            cursor,
+            keyRange,
+            VdbeKeySeekOperator.GreaterThanOrEqual,
+            EqOnly: false,
+            IsIndex: isIndex,
+            NotFoundTarget: new ProgramCounter(0),
+            Description: "seek",
+            KeyColumns: keyColumns));
+
+        var filterIndex = instructions.Count;
+        if (predicate is not null)
+        {
+            instructions.Add(new FilterInstruction(
                 cursor,
-                keyRange,
-                VdbeKeySeekOperator.GreaterThanOrEqual,
-                EqOnly: false,
-                IsIndex: isIndex,
-                NotFoundTarget: new ProgramCounter(0),
-                Description: "seek",
-                KeyColumns: keyColumns));
-
-            var filterIndex = instructions.Count;
-            if (predicate is not null)
-            {
-                instructions.Add(new FilterInstruction(
-                    cursor,
-                    predicate,
-                    new ProgramCounter(0),
-                    "skip row when WHERE is false"));
-            }
-            else
-            {
-                instructions.Add(new FilterRowIdInstruction(
-                    cursor,
-                    rowIdPredicate!,
-                    new ProgramCounter(0),
-                    "skip row when WHERE is false"));
-            }
-
-            var loopTarget = filterIndex;
-            instructions.AddRange(body);
-            instructions.Add(new ResultRowInstruction(new RegisterRange(new Register(0), projections.Count)));
-            var nextIndex = instructions.Count;
-            instructions.Add(new NextInstruction(cursor, new ProgramCounter(loopTarget)));
-            var closeIndex = instructions.Count;
-            instructions.Add(new CloseCursorInstruction(cursor));
-            instructions.Add(new HaltInstruction());
-
-            instructions[seekIndex] = ((SeekKeyInstruction)instructions[seekIndex]) with
-            {
-                NotFoundTarget = new ProgramCounter(closeIndex),
-                Description =
-                    $"seek {(isIndex ? "idx" : "key")} c[{cursor.Index}] ge r[{keyStartRegister}] width {keyWidth}, goto {closeIndex} if not found",
-            };
-
-            instructions[filterIndex] = instructions[filterIndex] switch
-            {
-                FilterInstruction f => f with
-                {
-                    FalseTarget = new ProgramCounter(nextIndex),
-                    Description = $"skip row when WHERE is false, goto {nextIndex}",
-                },
-                FilterRowIdInstruction f => f with
-                {
-                    FalseTarget = new ProgramCounter(nextIndex),
-                    Description = $"skip row when WHERE is false, goto {nextIndex}",
-                },
-                _ => instructions[filterIndex],
-            };
-
-            compiled = new CompiledSelect(
-                new VdbeProgram(
-                    Math.Max(emitter.RegisterCount, keyStartRegister + keyWidth),
-                    cursorCount: 1,
-                    instructions,
-                    parameterSlotCount: emitter.ParameterIndices.Count),
-                [target.CreateCursorSource()],
-                emitter.ParameterIndices);
-            return true;
+                predicate,
+                new ProgramCounter(0),
+                "skip row when WHERE is false"));
+        }
+        else
+        {
+            instructions.Add(new FilterRowIdInstruction(
+                cursor,
+                rowIdPredicate!,
+                new ProgramCounter(0),
+                "skip row when WHERE is false"));
         }
 
-        private ExpressionEmitter CreateEmitter(
-            ScanTarget? target,
-            Cursor? cursor,
-            int outputCount,
-            List<VdbeInstruction> instructions,
-            int programCounterBase)
-            => new(
-                target,
-                cursor,
-                outputCount,
+        var loopTarget = filterIndex;
+        instructions.AddRange(body);
+        instructions.Add(new ResultRowInstruction(new RegisterRange(new Register(0), projections.Count)));
+        var nextIndex = instructions.Count;
+        instructions.Add(new NextInstruction(cursor, new ProgramCounter(loopTarget)));
+        var closeIndex = instructions.Count;
+        instructions.Add(new CloseCursorInstruction(cursor));
+        instructions.Add(new HaltInstruction());
+
+        instructions[seekIndex] = ((SeekKeyInstruction)instructions[seekIndex]) with
+        {
+            NotFoundTarget = new ProgramCounter(closeIndex),
+            Description =
+                $"seek {(isIndex ? "idx" : "key")} c[{cursor.Index}] ge r[{keyStartRegister}] width {keyWidth}, goto {closeIndex} if not found",
+        };
+
+        instructions[filterIndex] = instructions[filterIndex] switch
+        {
+            FilterInstruction f => f with
+            {
+                FalseTarget = new ProgramCounter(nextIndex),
+                Description = $"skip row when WHERE is false, goto {nextIndex}",
+            },
+            FilterRowIdInstruction f => f with
+            {
+                FalseTarget = new ProgramCounter(nextIndex),
+                Description = $"skip row when WHERE is false, goto {nextIndex}",
+            },
+            _ => instructions[filterIndex],
+        };
+
+        compiled = new CompiledSelect(
+            new VdbeProgram(
+                Math.Max(emitter.RegisterCount, keyStartRegister + keyWidth),
+                cursorCount: 1,
                 instructions,
-                programCounterBase,
-                allowControlFlow: true,
-                _isConstant,
-                _fold,
-                _compileScalarFunction,
-                _numericAffinity,
-                _moduloAffinity,
-            _integerAffinity);
+                parameterSlotCount: emitter.ParameterIndices.Count),
+            [target.CreateCursorSource()],
+            emitter.ParameterIndices);
+        return true;
+    }
+
+    private ExpressionEmitter CreateEmitter(
+        ScanTarget? target,
+        Cursor? cursor,
+        int outputCount,
+        List<VdbeInstruction> instructions,
+        int programCounterBase)
+        => new(
+            target,
+            cursor,
+            outputCount,
+            instructions,
+            programCounterBase,
+            allowControlFlow: true,
+            _isConstant,
+            _fold,
+            _compileScalarFunction,
+            _numericAffinity,
+            _moduloAffinity,
+        _integerAffinity);
 
     internal static bool TryExpandProjections(
         IReadOnlyList<Projection> source,
@@ -1147,6 +1148,49 @@ internal sealed class SelectStatementCompiler
 
     internal sealed class ExpressionEmitter
     {
+        // These fixed value leaves intentionally reuse Function: it already snapshots register arguments,
+        // validates arity, and exposes the operation name to EXPLAIN without widening the opcode contract.
+        private static readonly VdbeScalarFunction NotOperation = new()
+        {
+            Name = "not",
+            Arity = 1,
+            Invoke = values => VdbeValueOperations.Not(values[0]),
+        };
+        private static readonly VdbeScalarFunction IsTrueOperation = TruthOperation(
+            "is_true",
+            nullValue: false,
+            invert: false);
+        private static readonly VdbeScalarFunction IsFalseOperation = TruthOperation(
+            "is_false",
+            nullValue: false,
+            invert: true);
+        private static readonly VdbeScalarFunction IsNotTrueOperation = TruthOperation(
+            "is_not_true",
+            nullValue: true,
+            invert: true);
+        private static readonly VdbeScalarFunction IsNotFalseOperation = TruthOperation(
+            "is_not_false",
+            nullValue: true,
+            invert: false);
+        private static readonly VdbeScalarFunction ConcatOperation = new()
+        {
+            Name = "concat",
+            Arity = 2,
+            Invoke = values => VdbeValueOperations.Concat(values[0], values[1]),
+        };
+        private static readonly VdbeScalarFunction AndOperation = new()
+        {
+            Name = "and",
+            Arity = 2,
+            Invoke = values => VdbeValueOperations.And(values[0], values[1]),
+        };
+        private static readonly VdbeScalarFunction OrOperation = new()
+        {
+            Name = "or",
+            Arity = 2,
+            Invoke = values => VdbeValueOperations.Or(values[0], values[1]),
+        };
+
         private readonly ScanTarget? _target;
         private readonly Cursor? _cursor;
         private readonly List<VdbeInstruction> _instructions;
@@ -1251,6 +1295,23 @@ internal sealed class SelectStatementCompiler
                         affinity));
                     _instructions.Add(new ArithmeticInstruction(destination, arithmetic, operands));
                     return true;
+                case BinaryExpression binary when TryMapComparisonOperator(binary.Operator, out _):
+                    return TryEmitComparison(binary, destination);
+                case BinaryExpression { Operator: BinaryOperator.Concatenate } concat:
+                    var concatOperands = Allocate(2);
+                    if (!TryEmit(concat.Left, concatOperands.Start)
+                        || !TryEmit(concat.Right, new Register(concatOperands.Start.Index + 1)))
+                    {
+                        return false;
+                    }
+
+                    _instructions.Add(new FunctionInstruction(destination, ConcatOperation, concatOperands));
+                    return true;
+                case BinaryExpression
+                {
+                    Operator: BinaryOperator.And or BinaryOperator.Or,
+                } logical:
+                    return TryEmitLogical(logical, destination);
                 case UnaryExpression unary when TryMapArithmeticOperator(unary.Operator, out var unaryArithmetic):
                     var operand = Allocate(1);
                     if (!TryEmit(unary.Operand, operand.Start))
@@ -1260,6 +1321,24 @@ internal sealed class SelectStatementCompiler
                         _instructions.Add(new NumericAffinityInstruction(operand.Start, GetAffinity(unaryArithmetic)));
                     _instructions.Add(new ArithmeticInstruction(destination, unaryArithmetic, operand));
                     return true;
+                case UnaryExpression { Operator: UnaryOperator.Not } not:
+                    var notOperand = Allocate(1).Start;
+                    if (!TryEmit(not.Operand, notOperand))
+                        return false;
+
+                    _instructions.Add(new FunctionInstruction(
+                        destination,
+                        NotOperation,
+                        new RegisterRange(notOperand, 1)));
+                    return true;
+                case BetweenExpression between:
+                    return TryEmitBetween(between, destination);
+                case InExpression @in:
+                    return TryEmitInList(@in, destination);
+                case LikeExpression like:
+                    return TryEmitLike(like, destination);
+                case GlobExpression glob:
+                    return TryEmitGlob(glob, destination);
                 case CastExpression cast:
                     if (!TryEmit(cast.Expression, destination))
                         return false;
@@ -1301,6 +1380,20 @@ internal sealed class SelectStatementCompiler
                 return false;
             }
 
+            if (TryGetTruthTest(binary, out var expected))
+            {
+                var operand = Allocate(1).Start;
+                if (!TryEmit(binary.Left, operand))
+                    return false;
+
+                var isNot = binary.Operator == BinaryOperator.IsNot;
+                _instructions.Add(new FunctionInstruction(
+                    destination,
+                    GetTruthOperation(expected, isNot),
+                    new RegisterRange(operand, 1)));
+                return true;
+            }
+
             var operands = Allocate(2);
             if (!TryEmit(binary.Left, operands.Start)
                 || !TryEmit(binary.Right, new Register(operands.Start.Index + 1)))
@@ -1318,6 +1411,268 @@ internal sealed class SelectStatementCompiler
                 comparison.Collation));
             return true;
         }
+
+        private bool TryEmitLogical(BinaryExpression expression, Register destination)
+        {
+            if (!_allowControlFlow)
+                return false;
+
+            var operands = Allocate(2);
+            var left = operands.Start;
+            if (!TryEmit(expression.Left, left))
+                return false;
+
+            var shortCircuit = Allocate(1).Start;
+            var isAnd = expression.Operator == BinaryOperator.And;
+            _instructions.Add(new FunctionInstruction(
+                shortCircuit,
+                isAnd ? IsFalseOperation : IsTrueOperation,
+                new RegisterRange(left, 1)));
+            var shortCircuitJump = _instructions.Count;
+            _instructions.Add(new JumpIfInstruction(shortCircuit, new ProgramCounter(0)));
+
+            var right = new Register(left.Index + 1);
+            _constantFoldingSuppression++;
+            try
+            {
+                if (!TryEmit(expression.Right, right))
+                    return false;
+            }
+            finally
+            {
+                _constantFoldingSuppression--;
+            }
+
+            _instructions.Add(new FunctionInstruction(
+                destination,
+                isAnd ? AndOperation : OrOperation,
+                operands));
+            var endJump = _instructions.Count;
+            _instructions.Add(new GotoInstruction(new ProgramCounter(0)));
+
+            _instructions[shortCircuitJump] = new JumpIfInstruction(shortCircuit, CurrentProgramCounter());
+            _instructions.Add(new LoadConstantInstruction(
+                destination,
+                SqlValue.Integer(isAnd ? 0 : 1)));
+            _instructions[endJump] = new GotoInstruction(CurrentProgramCounter());
+            return true;
+        }
+
+        private bool TryEmitBetween(BetweenExpression expression, Register destination)
+        {
+            var lowerComparison = new BinaryExpression(
+                expression.Value,
+                BinaryOperator.GreaterThanOrEqual,
+                expression.Lower);
+            var upperComparison = new BinaryExpression(
+                expression.Value,
+                BinaryOperator.LessThanOrEqual,
+                expression.Upper);
+            if (!TryGetComparisonMetadata(lowerComparison, out var lowerMetadata)
+                || !TryGetComparisonMetadata(upperComparison, out var upperMetadata))
+            {
+                return false;
+            }
+
+            var operands = Allocate(3);
+            var value = operands.Start;
+            var lower = new Register(value.Index + 1);
+            var upper = new Register(value.Index + 2);
+            if (!TryEmit(expression.Value, value)
+                || !TryEmit(expression.Lower, lower)
+                || !TryEmit(expression.Upper, upper))
+            {
+                return false;
+            }
+
+            var comparisons = Allocate(2);
+            var lowerResult = comparisons.Start;
+            var upperResult = new Register(lowerResult.Index + 1);
+            _instructions.Add(CreateComparison(lowerResult, value, lower, lowerMetadata));
+            _instructions.Add(CreateComparison(upperResult, value, upper, upperMetadata));
+            _instructions.Add(new FunctionInstruction(destination, AndOperation, comparisons));
+            if (expression.Negated)
+            {
+                _instructions.Add(new FunctionInstruction(
+                    destination,
+                    NotOperation,
+                    new RegisterRange(destination, 1)));
+            }
+            return true;
+        }
+
+        private bool TryEmitInList(InExpression expression, Register destination)
+        {
+            if (expression.Values.Count == 0)
+            {
+                _instructions.Add(new LoadConstantInstruction(
+                    destination,
+                    SqlValue.Integer(expression.Negated ? 1 : 0)));
+                return true;
+            }
+            if (!_allowControlFlow)
+                return false;
+
+            var collation = GetExplicitCollation(expression.Value)
+                ?? GetDeclaredCollation(expression.Value);
+            if (!SqliteIndexRecordComparer.IsSupportedCollation(collation))
+                return false;
+
+            var value = Allocate(1).Start;
+            if (!TryEmit(expression.Value, value))
+                return false;
+
+            _instructions.Add(new LoadConstantInstruction(destination, SqlValue.Integer(0)));
+            var matchJumps = new List<int>(expression.Values.Count);
+            _constantFoldingSuppression++;
+            try
+            {
+                foreach (var candidateExpression in expression.Values)
+                {
+                    var candidate = Allocate(1).Start;
+                    var comparison = Allocate(1).Start;
+                    if (!TryEmit(candidateExpression, candidate))
+                        return false;
+
+                    _instructions.Add(new CompareInstruction(
+                        comparison,
+                        VdbeComparisonOperator.Equal,
+                        value,
+                        candidate,
+                        GetDeclaredAffinity(expression.Value),
+                        RightAffinity: null,
+                        collation));
+                    var logicalOperands = Allocate(2);
+                    _instructions.Add(new CopyInstruction(destination, logicalOperands.Start));
+                    _instructions.Add(new CopyInstruction(
+                        comparison,
+                        new Register(logicalOperands.Start.Index + 1)));
+                    _instructions.Add(new FunctionInstruction(destination, OrOperation, logicalOperands));
+                    matchJumps.Add(_instructions.Count);
+                    _instructions.Add(new JumpIfInstruction(destination, new ProgramCounter(0)));
+                }
+            }
+            finally
+            {
+                _constantFoldingSuppression--;
+            }
+
+            var matchTarget = CurrentProgramCounter();
+            foreach (var jump in matchJumps)
+                _instructions[jump] = new JumpIfInstruction(destination, matchTarget);
+            if (expression.Negated)
+            {
+                _instructions.Add(new FunctionInstruction(
+                    destination,
+                    NotOperation,
+                    new RegisterRange(destination, 1)));
+            }
+            return true;
+        }
+
+        private bool TryEmitLike(LikeExpression expression, Register destination)
+        {
+            var argumentCount = expression.Escape is null ? 2 : 3;
+            var arguments = Allocate(argumentCount);
+            if (!TryEmit(expression.Value, arguments.Start)
+                || !TryEmit(expression.Pattern, new Register(arguments.Start.Index + 1))
+                || (expression.Escape is not null
+                    && !TryEmit(expression.Escape, new Register(arguments.Start.Index + 2))))
+            {
+                return false;
+            }
+
+            var fold = _fold;
+            var negated = expression.Negated;
+            _instructions.Add(new FunctionInstruction(
+                destination,
+                new VdbeScalarFunction
+                {
+                    Name = negated ? "not_like" : "like",
+                    Arity = argumentCount,
+                    Invoke = values => fold(new LikeExpression(
+                        new LiteralExpression(values[0]),
+                        new LiteralExpression(values[1]),
+                        values.Length == 3 ? new LiteralExpression(values[2]) : null,
+                        negated)),
+                },
+                arguments));
+            return true;
+        }
+
+        private bool TryEmitGlob(GlobExpression expression, Register destination)
+        {
+            var arguments = Allocate(2);
+            if (!TryEmit(expression.Value, arguments.Start)
+                || !TryEmit(expression.Pattern, new Register(arguments.Start.Index + 1)))
+            {
+                return false;
+            }
+
+            var fold = _fold;
+            var negated = expression.Negated;
+            _instructions.Add(new FunctionInstruction(
+                destination,
+                new VdbeScalarFunction
+                {
+                    Name = negated ? "not_glob" : "glob",
+                    Arity = 2,
+                    Invoke = values => fold(new GlobExpression(
+                        new LiteralExpression(values[0]),
+                        new LiteralExpression(values[1]),
+                        negated)),
+                },
+                arguments));
+            return true;
+        }
+
+        private static VdbeScalarFunction GetTruthOperation(bool expected, bool isNot)
+            => (expected, isNot) switch
+            {
+                (true, false) => IsTrueOperation,
+                (false, false) => IsFalseOperation,
+                (true, true) => IsNotTrueOperation,
+                (false, true) => IsNotFalseOperation,
+            };
+
+        private static VdbeScalarFunction TruthOperation(string name, bool nullValue, bool invert)
+            => new()
+            {
+                Name = name,
+                Arity = 1,
+                Invoke = values => VdbeValueOperations.IsTrue(values[0], nullValue, invert),
+            };
+
+        private bool TryGetTruthTest(BinaryExpression expression, out bool expected)
+        {
+            if (expression.Operator is BinaryOperator.Is or BinaryOperator.IsNot
+                && UnwrapCollation(expression.Right) is ColumnExpression
+                {
+                    BooleanKeyword: { } keyword,
+                } column
+                && (_target is null || _target.ResolveColumnIndex(column.Name) is null))
+            {
+                expected = keyword;
+                return true;
+            }
+
+            expected = false;
+            return false;
+        }
+
+        private static CompareInstruction CreateComparison(
+            Register destination,
+            Register left,
+            Register right,
+            VdbeComparisonMetadata metadata)
+            => new(
+                destination,
+                metadata.Operator,
+                left,
+                right,
+                metadata.LeftAffinity,
+                metadata.RightAffinity,
+                metadata.Collation);
 
         private bool TryEmitCase(CaseExpression expression, Register destination)
             => expression.Operand is null
@@ -1369,13 +1724,8 @@ internal sealed class SelectStatementCompiler
 
         private bool TryEmitSimpleCase(CaseExpression expression, Register destination)
         {
-            if (expression.Operand is null
-                || expression.Clauses.Count == 0
-                || !IsSimpleCaseComparisonValue(expression.Operand)
-                || expression.Clauses.Any(clause => !IsSimpleCaseComparisonValue(clause.When)))
-            {
+            if (expression.Operand is null || expression.Clauses.Count == 0)
                 return false;
-            }
 
             var endJumps = new List<int>(expression.Clauses.Count);
             _constantFoldingSuppression++;
@@ -1387,19 +1737,19 @@ internal sealed class SelectStatementCompiler
 
                 foreach (var clause in expression.Clauses)
                 {
+                    var comparisonExpression = new BinaryExpression(
+                        expression.Operand,
+                        BinaryOperator.Equal,
+                        clause.When);
+                    if (!TryGetComparisonMetadata(comparisonExpression, out var comparisonMetadata))
+                        return false;
+
                     var when = Allocate(1).Start;
                     var condition = Allocate(1).Start;
                     if (!TryEmit(clause.When, when))
                         return false;
 
-                    _instructions.Add(new CompareInstruction(
-                        condition,
-                        VdbeComparisonOperator.Equal,
-                        operand,
-                        when,
-                        LeftAffinity: null,
-                        RightAffinity: null,
-                        Collation: null));
+                    _instructions.Add(CreateComparison(condition, operand, when, comparisonMetadata));
                     var skipThenIndex = _instructions.Count;
                     _instructions.Add(new JumpIfNotTrueInstruction(condition, new ProgramCounter(0)));
                     if (!TryEmit(clause.Then, destination))
@@ -1427,9 +1777,6 @@ internal sealed class SelectStatementCompiler
                 _constantFoldingSuppression--;
             }
         }
-
-        private static bool IsSimpleCaseComparisonValue(Expression expression)
-            => expression is LiteralExpression or ParameterExpression;
 
         private ProgramCounter CurrentProgramCounter()
             => new(_programCounterBase + _instructions.Count);

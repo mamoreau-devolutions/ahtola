@@ -278,6 +278,8 @@ public enum VdbeOpcode
     IdxInsert = 95,
     /// <summary>Delete the current index entry (Turso <c>IdxDelete</c>).</summary>
     IdxDelete = 96,
+    /// <summary>Reject a candidate row that fails its de-duplication/membership guards, without emitting it.</summary>
+    RowGate = 97,
 }
 
 /// <summary>Key-order seek comparison used by SeekGE/GT/LE/LT and IdxGE/GT/LE/LT.</summary>
@@ -619,6 +621,54 @@ internal static class VdbeValueOperations
 
     public static SqlValue Cast(SqlValue value, string typeName)
         => EmbeddedDatabase.CastValue(value, typeName);
+
+    public static SqlValue Not(SqlValue value)
+        => value.Kind == SqlValueKind.Null
+            ? SqlValue.Null
+            : SqlValue.Integer(EmbeddedDatabase.IsTrue(value) ? 0 : 1);
+
+    public static SqlValue IsTrue(SqlValue value, bool nullValue, bool invert)
+    {
+        if (value.Kind == SqlValueKind.Null)
+            return SqlValue.Integer(nullValue ? 1 : 0);
+
+        var truth = EmbeddedDatabase.IsTrue(value);
+        return SqlValue.Integer(truth ^ invert ? 1 : 0);
+    }
+
+    public static SqlValue Concat(SqlValue left, SqlValue right)
+    {
+        if (left.Kind == SqlValueKind.Null || right.Kind == SqlValueKind.Null)
+            return SqlValue.Null;
+
+        return SqlValue.Text(EmbeddedDatabase.ToSqlText(left) + EmbeddedDatabase.ToSqlText(right));
+    }
+
+    public static SqlValue And(SqlValue left, SqlValue right)
+    {
+        if (left.Kind != SqlValueKind.Null && !EmbeddedDatabase.IsTrue(left)
+            || right.Kind != SqlValueKind.Null && !EmbeddedDatabase.IsTrue(right))
+        {
+            return SqlValue.Integer(0);
+        }
+
+        return left.Kind == SqlValueKind.Null || right.Kind == SqlValueKind.Null
+            ? SqlValue.Null
+            : SqlValue.Integer(1);
+    }
+
+    public static SqlValue Or(SqlValue left, SqlValue right)
+    {
+        if (left.Kind != SqlValueKind.Null && EmbeddedDatabase.IsTrue(left)
+            || right.Kind != SqlValueKind.Null && EmbeddedDatabase.IsTrue(right))
+        {
+            return SqlValue.Integer(1);
+        }
+
+        return left.Kind == SqlValueKind.Null || right.Kind == SqlValueKind.Null
+            ? SqlValue.Null
+            : SqlValue.Integer(0);
+    }
 
     private static void ApplyComparisonAffinities(
         ref SqlValue left,
@@ -2029,8 +2079,27 @@ public sealed record GuardedRowInstruction(
     public override VdbeOpcode Opcode => VdbeOpcode.GuardedRow;
 }
 
-public abstract record VdbeRowGuard;
+/// <summary>
+/// Splits de-duplication/membership testing away from row emission so a conditional emitter composes with
+/// the LIMIT/OFFSET gate family. Guards run in order over <paramref name="Values"/> exactly as they do for
+/// <see cref="GuardedRowInstruction"/>: a <see cref="DistinctRowGuard"/> accepts only a tuple that is novel
+/// to its row set (inserting it), and a <see cref="MembershipRowGuard"/> accepts only a tuple satisfying its
+/// <see cref="CompoundMembershipMode"/> against every probe set. A candidate that fails any guard jumps to
+/// <paramref name="RejectTarget"/> — the instruction after the emit block — so it is discarded silently; a
+/// candidate that passes falls through to the gates and the plain <see cref="ResultRowInstruction"/> that
+/// follow. Because rejection happens before the offset/limit counters are touched, a duplicate or excluded
+/// tuple is never charged against OFFSET or LIMIT, which is what makes <c>DISTINCT</c>, <c>UNION</c>,
+/// <c>INTERSECT</c>, and <c>EXCEPT</c> streams gateable exactly.
+/// </summary>
+public sealed record RowGateInstruction(
+    RegisterRange Values,
+    IReadOnlyList<VdbeRowGuard> Guards,
+    ProgramCounter RejectTarget) : VdbeInstruction
+{
+    public override VdbeOpcode Opcode => VdbeOpcode.RowGate;
+}
 
+public abstract record VdbeRowGuard;
 public sealed record DistinctRowGuard(
     VdbeRowEquality Equality,
     int RowSetIndex) : VdbeRowGuard;
@@ -2980,32 +3049,32 @@ public sealed class VdbeProgram
                             $"VDBE instruction {instructionIndex} SeekKey requires a positive key width.");
                     }
 
-                                    if (seekKey.KeyColumns is not null)
+                    if (seekKey.KeyColumns is not null)
                     {
-                                        if (seekKey.KeyColumns.Count != seekKey.Key.Count)
-                                        {
-                                            throw new VdbeProgramValidationException(
-                                                $"VDBE instruction {instructionIndex} SeekKey KeyColumns length must match key width.");
-                                        }
+                        if (seekKey.KeyColumns.Count != seekKey.Key.Count)
+                        {
+                            throw new VdbeProgramValidationException(
+                                $"VDBE instruction {instructionIndex} SeekKey KeyColumns length must match key width.");
+                        }
 
-                                        for (var i = 0; i < seekKey.KeyColumns.Count; i++)
-                                        {
-                                            if (seekKey.KeyColumns[i] < 0)
-                                            {
-                                                throw new VdbeProgramValidationException(
-                                                    $"VDBE instruction {instructionIndex} SeekKey KeyColumns[{i}] is negative.");
-                                            }
-                                        }
-                                    }
+                        for (var i = 0; i < seekKey.KeyColumns.Count; i++)
+                        {
+                            if (seekKey.KeyColumns[i] < 0)
+                            {
+                                throw new VdbeProgramValidationException(
+                                    $"VDBE instruction {instructionIndex} SeekKey KeyColumns[{i}] is negative.");
+                            }
+                        }
+                    }
 
-                                    if (!Enum.IsDefined(seekKey.Operator))
-                                    {
-                                        throw new VdbeProgramValidationException(
-                                            $"VDBE instruction {instructionIndex} has an undefined SeekKey operator.");
-                                    }
+                    if (!Enum.IsDefined(seekKey.Operator))
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has an undefined SeekKey operator.");
+                    }
 
-                                    ValidateJumpTarget(seekKey.NotFoundTarget, instructionIndex);
-                                    break;
+                    ValidateJumpTarget(seekKey.NotFoundTarget, instructionIndex);
+                    break;
                 case IdxRowIdInstruction idxRowId:
                     ValidateOpenCursor(idxRowId.Cursor, openCursors, instructionIndex);
                     ValidateRegister(idxRowId.Destination, instructionIndex);
@@ -3314,49 +3383,7 @@ public sealed class VdbeProgram
                             $"VDBE instruction {instructionIndex} has a null guarded-row condition list.");
                     }
 
-                    foreach (var guard in guardedRow.Guards)
-                    {
-                        switch (guard)
-                        {
-                            case DistinctRowGuard distinctGuard:
-                                if (distinctGuard.Equality is null)
-                                {
-                                    throw new VdbeProgramValidationException(
-                                        $"VDBE instruction {instructionIndex} has a distinct row guard with a null equality.");
-                                }
-
-                                ValidateDistinctSet(distinctGuard.RowSetIndex, instructionIndex);
-                                break;
-                            case MembershipRowGuard membershipGuard:
-                                if (membershipGuard.Equality is null)
-                                {
-                                    throw new VdbeProgramValidationException(
-                                        $"VDBE instruction {instructionIndex} has a membership row guard with a null equality.");
-                                }
-
-                                if (membershipGuard.RowSetIndices is null)
-                                {
-                                    throw new VdbeProgramValidationException(
-                                        $"VDBE instruction {instructionIndex} has a null membership row-set list.");
-                                }
-
-                                if (!Enum.IsDefined(membershipGuard.Mode))
-                                {
-                                    throw new VdbeProgramValidationException(
-                                        $"VDBE instruction {instructionIndex} has an undefined membership mode.");
-                                }
-
-                                foreach (var rowSetIndex in membershipGuard.RowSetIndices)
-                                    ValidateDistinctSet(rowSetIndex, instructionIndex);
-                                break;
-                            case null:
-                                throw new VdbeProgramValidationException(
-                                    $"VDBE instruction {instructionIndex} has a null row guard.");
-                            default:
-                                throw new VdbeProgramValidationException(
-                                    $"VDBE instruction {instructionIndex} has unsupported row guard {guard.GetType().Name}.");
-                        }
-                    }
+                    ValidateRowGuards(guardedRow.Guards, instructionIndex);
 
                     switch (guardedRow.Destination)
                     {
@@ -3379,6 +3406,23 @@ public sealed class VdbeProgram
                                 $"VDBE instruction {instructionIndex} has unsupported row destination {guardedRow.Destination.GetType().Name}.");
                     }
 
+                    break;
+                case RowGateInstruction rowGate:
+                    ValidateRegisterRange(rowGate.Values, instructionIndex);
+                    ValidateJumpTarget(rowGate.RejectTarget, instructionIndex);
+                    if (rowGate.Guards is null)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has a null row-gate condition list.");
+                    }
+
+                    if (rowGate.Guards.Count == 0)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has an empty row-gate condition list.");
+                    }
+
+                    ValidateRowGuards(rowGate.Guards, instructionIndex);
                     break;
                 case OffsetGateInstruction offsetGate:
                     ValidateRegister(offsetGate.Counter, instructionIndex);
@@ -3764,6 +3808,55 @@ public sealed class VdbeProgram
         {
             throw new VdbeProgramValidationException(
                 $"VDBE instruction {instructionIndex} moves {range.Count} registers for window buffer {buffer.Index}, whose {shape} is {expectedWidth} columns wide.");
+        }
+    }
+
+    // Shared by GuardedRow and RowGate: both drive the same guard pipeline, so they must agree on which
+    // guard shapes the executor may see.
+    private void ValidateRowGuards(IReadOnlyList<VdbeRowGuard> guards, int instructionIndex)
+    {
+        foreach (var guard in guards)
+        {
+            switch (guard)
+            {
+                case DistinctRowGuard distinctGuard:
+                    if (distinctGuard.Equality is null)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has a distinct row guard with a null equality.");
+                    }
+
+                    ValidateDistinctSet(distinctGuard.RowSetIndex, instructionIndex);
+                    break;
+                case MembershipRowGuard membershipGuard:
+                    if (membershipGuard.Equality is null)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has a membership row guard with a null equality.");
+                    }
+
+                    if (membershipGuard.RowSetIndices is null)
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has a null membership row-set list.");
+                    }
+
+                    if (!Enum.IsDefined(membershipGuard.Mode))
+                    {
+                        throw new VdbeProgramValidationException(
+                            $"VDBE instruction {instructionIndex} has an undefined membership mode.");
+                    }
+
+                    foreach (var rowSetIndex in membershipGuard.RowSetIndices)
+                        ValidateDistinctSet(rowSetIndex, instructionIndex);
+                    break;
+                case null:
+                    throw new VdbeProgramValidationException(
+                        $"VDBE instruction {instructionIndex} has a null row guard.");
+                default:
+                    throw new VdbeProgramValidationException(
+                        $"VDBE instruction {instructionIndex} has unsupported row guard {guard.GetType().Name}.");
+            }
         }
     }
 

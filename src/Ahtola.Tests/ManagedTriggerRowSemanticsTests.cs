@@ -8,6 +8,33 @@ namespace Ahtola.Tests;
 public sealed class ManagedTriggerRowSemanticsTests
 {
     [Test]
+    public void DistinctTriggerChainsFireForInsertUpdateAndDelete()
+    {
+        AssertMatchesSqlite(
+            [
+                "CREATE TABLE source(id INTEGER PRIMARY KEY, value TEXT)",
+                "CREATE TABLE middle(id INTEGER PRIMARY KEY, value TEXT)",
+                "CREATE TABLE audit(event TEXT, value TEXT)",
+                "CREATE TRIGGER source_insert AFTER INSERT ON source BEGIN "
+                    + "INSERT INTO middle VALUES (NEW.id, NEW.value); END",
+                "CREATE TRIGGER middle_insert AFTER INSERT ON middle BEGIN "
+                    + "INSERT INTO audit VALUES ('insert', NEW.value); END",
+                "CREATE TRIGGER source_update AFTER UPDATE ON source BEGIN "
+                    + "UPDATE middle SET value = NEW.value WHERE id = NEW.id; END",
+                "CREATE TRIGGER middle_update AFTER UPDATE ON middle BEGIN "
+                    + "INSERT INTO audit VALUES ('update', NEW.value); END",
+                "CREATE TRIGGER source_delete AFTER DELETE ON source BEGIN "
+                    + "DELETE FROM middle WHERE id = OLD.id; END",
+                "CREATE TRIGGER middle_delete AFTER DELETE ON middle BEGIN "
+                    + "INSERT INTO audit VALUES ('delete', OLD.value); END",
+                "INSERT INTO source VALUES (1, 'one')",
+                "UPDATE source SET value = 'two' WHERE id = 1",
+                "DELETE FROM source WHERE id = 1",
+            ],
+            "SELECT event, value FROM audit ORDER BY rowid");
+    }
+
+    [Test]
     public void TimingWhenUpdateOfAndRowImagesMatchSqlite()
     {
         AssertMatchesSqlite(

@@ -234,7 +234,7 @@ public sealed class ManagedSecondaryIndexLeafDeletionReclamationTests
         {
             var writesBefore = faults.GetOperationCount(FileSystemOperation.Write);
             Execute(connection, $"DELETE FROM target WHERE id = {target.RowId};");
-            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(10);
+            (faults.GetOperationCount(FileSystemOperation.Write) - writesBefore).Should().Be(11);
         }
 
         using var reopened = EmbeddedDatabase.OpenFile(path, fileSystem);

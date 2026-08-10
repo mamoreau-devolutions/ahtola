@@ -22,11 +22,23 @@ public sealed class TursoStringFunctionParityTests
     [TestCase("SELECT rpad(12, 4, 0);", "1200")]
     [TestCase("SELECT lpad('abc', 10, '');", "abc")]
     [TestCase("SELECT rpad('abc', 10, '');", "abc")]
+    [TestCase("SELECT chr(65, 66);", "AB")]
+    [TestCase("SELECT if(1, 'yes', 'no');", "yes")]
     public void StringFunctionsMatchTursoCharacterAndCoercionSemantics(string sql, string expected)
     {
         using var connection = new EmbeddedDatabase().Connect();
 
         Scalar(connection, sql).Should().Be(SqlValue.Text(expected));
+    }
+
+    [TestCase("SELECT char_length('a😀b');", 3L)]
+    [TestCase("SELECT character_length('a😀b');", 3L)]
+    [TestCase("SELECT strpos('alphabet', 'pha');", 3L)]
+    public void StringFunctionAliasesMatchTursoIntegerResults(string sql, long expected)
+    {
+        using var connection = new EmbeddedDatabase().Connect();
+
+        Scalar(connection, sql).Should().Be(SqlValue.Integer(expected));
     }
 
     [TestCase("SELECT repeat(NULL, 3);")]

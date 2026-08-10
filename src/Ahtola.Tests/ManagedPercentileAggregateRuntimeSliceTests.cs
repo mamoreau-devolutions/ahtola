@@ -29,6 +29,101 @@ public class ManagedPercentileAggregateRuntimeSliceTests
     }
 
     [Test]
+    public void OrderedSetAggregatesRewriteWithinGroupArgumentsAndModeBreaksTiesBySmallestValue()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE valueset(value);");
+        Execute(connection, "INSERT INTO valueset VALUES (3), (1), (3), (1), (2), (NULL);");
+
+        ReadRows(
+            connection,
+            """
+            SELECT
+                mode() WITHIN GROUP (ORDER BY value),
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY value),
+                percentile_disc(0.5) WITHIN GROUP (ORDER BY value)
+            FROM valueset;
+            """)[0].Should().Equal(
+                SqlValue.Integer(1),
+                SqlValue.Real(2),
+                SqlValue.Integer(2));
+    }
+
+    [Test]
+    public void OrderedSetDiscretePercentilePreservesTypeAndUsesCumulativeRank()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE valueset(value);");
+        Execute(connection, "INSERT INTO valueset VALUES (1), (2), (3), (4);");
+
+        ReadRows(
+            connection,
+            "SELECT percentile_disc(0.6) WITHIN GROUP (ORDER BY value) FROM valueset;")[0]
+            .Should().Equal(SqlValue.Integer(3));
+
+        Execute(connection, "DELETE FROM valueset;");
+        Execute(connection, "INSERT INTO valueset VALUES ('z'), ('a'), ('m');");
+        ReadRows(
+            connection,
+            "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY value) FROM valueset;")[0]
+            .Should().Equal(SqlValue.Text("m"));
+    }
+
+    [Test]
+    public void OrderedSetPercentileValidatesDirectArgumentBeforeScanningRows()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE valueset(value);");
+
+        AssertError(
+            connection,
+            "SELECT percentile_cont(2) WITHIN GROUP (ORDER BY value) FROM valueset;",
+            "Percentile value must be between 0.0 and 1.0 inclusive");
+        AssertParseError(
+            connection,
+            "SELECT percentile_cont(ALL 0.5) WITHIN GROUP (ORDER BY value) FROM valueset;",
+            "DISTINCT is not supported for ordered-set aggregate percentile_cont()");
+    }
+
+    [Test]
+    public void OrderedSetAggregatesEnforceTursoSyntaxRestrictions()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+        Execute(connection, "CREATE TABLE valueset(value);");
+
+        AssertParseError(
+            connection,
+            "SELECT mode() FROM valueset;",
+            "mode() requires a WITHIN GROUP (ORDER BY ...) clause");
+        AssertParseError(
+            connection,
+            "SELECT mode() WITHIN GROUP (ORDER BY value DESC) FROM valueset;",
+            "DESC and NULLS ordering inside WITHIN GROUP are not supported yet");
+        AssertParseError(
+            connection,
+            "SELECT percentile_cont() WITHIN GROUP (ORDER BY value) FROM valueset;",
+            "wrong number of arguments to function percentile_cont()");
+        AssertParseError(
+            connection,
+            "SELECT sum(value) WITHIN GROUP (ORDER BY value) FROM valueset;",
+            "WITHIN GROUP is not supported for function sum()");
+    }
+
+    [Test]
+    public void TursoVersionReportsThePinnedCompatibilityVersion()
+    {
+        using var database = new EmbeddedDatabase();
+        using var connection = database.Connect();
+
+        ReadRows(connection, "SELECT turso_version();")[0]
+            .Should().Equal(SqlValue.Text(EmbeddedDatabase.TursoCompatibilityVersion));
+    }
+
+    [Test]
     public void PercentileAggregatesKeepIndependentGroupedStateAndReturnNullWithoutNumericInput()
     {
         using var database = new EmbeddedDatabase();
@@ -120,5 +215,11 @@ public class ManagedPercentileAggregateRuntimeSliceTests
     {
         var error = Assert.Throws<EmbeddedSqlException>(() => ReadRows(connection, sql));
         error!.Message.Should().Be(message);
+    }
+
+    private static void AssertParseError(EmbeddedConnection connection, string sql, string message)
+    {
+        var error = Assert.Throws<EmbeddedSqlException>(() => ReadRows(connection, sql));
+        error!.Message.Should().StartWith(message);
     }
 }

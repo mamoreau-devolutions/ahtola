@@ -82,8 +82,30 @@ public sealed record SqliteDatabaseHeader(
             throw new InvalidDataException("SQLite payload-fraction fields are invalid.");
 
         var schemaFormat = ReadUInt32(source, 44);
-        if (schemaFormat is < 1 or > 4)
-            throw new InvalidDataException($"Unsupported SQLite schema format {schemaFormat}.");
+        var changeCounter = ReadUInt32(source, 24);
+        var databaseSizeInPages = ReadUInt32(source, 28);
+        var firstFreelistTrunkPage = ReadUInt32(source, 32);
+        var freelistPageCount = ReadUInt32(source, 36);
+        var schemaCookie = ReadUInt32(source, 40);
+        var largestRootBtreePage = ReadUInt32(source, 52);
+        var textEncoding = ReadTextEncoding(source);
+        var versionValidFor = ReadUInt32(source, 92);
+        ValidateSchemaFormat(
+            schemaFormat,
+            changeCounter,
+            databaseSizeInPages,
+            firstFreelistTrunkPage,
+            freelistPageCount,
+            schemaCookie,
+            largestRootBtreePage,
+            textEncoding,
+            versionValidFor,
+            static message => new InvalidDataException(message));
+        ValidateAutoVacuum(
+            largestRootBtreePage,
+            ReadUInt32(source, 64),
+            databaseSizeInPages,
+            static message => new InvalidDataException(message));
         if (source.Slice(72, 20).IndexOfAnyExcept((byte)0) >= 0)
             throw new InvalidDataException("SQLite database header reserved bytes must be zero.");
 
@@ -92,19 +114,19 @@ public sealed record SqliteDatabaseHeader(
             writeVersion,
             readVersion,
             reservedSpace,
-            ReadUInt32(source, 24),
-            ReadUInt32(source, 28),
-            ReadUInt32(source, 32),
-            ReadUInt32(source, 36),
-            ReadUInt32(source, 40),
+            changeCounter,
+            databaseSizeInPages,
+            firstFreelistTrunkPage,
+            freelistPageCount,
+            schemaCookie,
             schemaFormat,
             ReadCacheSize(source),
-            ReadUInt32(source, 52),
-            ReadTextEncoding(source),
+            largestRootBtreePage,
+            textEncoding,
             BinaryPrimitives.ReadInt32BigEndian(source[60..]),
             ReadUInt32(source, 64),
             BinaryPrimitives.ReadInt32BigEndian(source[68..]),
-            ReadUInt32(source, 92),
+            versionValidFor,
             ReadUInt32(source, 96));
     }
 
@@ -120,8 +142,25 @@ public sealed record SqliteDatabaseHeader(
         if (destination.Length < Size)
             throw new ArgumentException($"SQLite database header requires {Size} bytes.", nameof(destination));
         ValidateUsableSpace(PageSize, ReservedSpace, static message => new InvalidOperationException(message));
-        if (SchemaFormat is < 1 or > 4)
-            throw new InvalidOperationException($"Unsupported SQLite schema format {SchemaFormat}.");
+        ValidateFileFormatVersion(WriteVersion, "write");
+        ValidateFileFormatVersion(ReadVersion, "read");
+        ValidateTextEncoding(TextEncoding);
+        ValidateSchemaFormat(
+            SchemaFormat,
+            ChangeCounter,
+            DatabaseSizeInPages,
+            FirstFreelistTrunkPage,
+            FreelistPageCount,
+            SchemaCookie,
+            LargestRootBtreePage,
+            TextEncoding,
+            VersionValidFor,
+            static message => new InvalidOperationException(message));
+        ValidateAutoVacuum(
+            LargestRootBtreePage,
+            IncrementalVacuumEnabled,
+            DatabaseSizeInPages,
+            static message => new InvalidOperationException(message));
 
         destination[..Size].Clear();
         Magic.CopyTo(destination);
@@ -160,6 +199,16 @@ public sealed record SqliteDatabaseHeader(
         return (SqliteFileFormatVersion)value;
     }
 
+    private static void ValidateFileFormatVersion(SqliteFileFormatVersion value, string direction)
+    {
+        if (value is not SqliteFileFormatVersion.Legacy
+            and not SqliteFileFormatVersion.Wal
+            and not SqliteFileFormatVersion.Mvcc)
+        {
+            throw new InvalidOperationException($"Unsupported SQLite {direction} file format version {(byte)value}.");
+        }
+    }
+
     private static SqliteTextEncoding ReadTextEncoding(ReadOnlySpan<byte> source)
     {
         var value = BinaryPrimitives.ReadUInt32BigEndian(source[56..]);
@@ -167,6 +216,96 @@ public sealed record SqliteDatabaseHeader(
             throw new InvalidDataException($"Unsupported SQLite text encoding {value}.");
 
         return (SqliteTextEncoding)value;
+    }
+
+    private static void ValidateTextEncoding(SqliteTextEncoding value)
+    {
+        if ((uint)value > (uint)SqliteTextEncoding.Utf16BigEndian)
+            throw new InvalidOperationException($"Unsupported SQLite text encoding {(uint)value}.");
+    }
+
+    private static void ValidateSchemaFormat<TException>(
+        uint schemaFormat,
+        uint changeCounter,
+        uint databaseSizeInPages,
+        uint firstFreelistTrunkPage,
+        uint freelistPageCount,
+        uint schemaCookie,
+        uint largestRootBtreePage,
+        SqliteTextEncoding textEncoding,
+        uint versionValidFor,
+        Func<string, TException> createException)
+        where TException : Exception
+    {
+        if (schemaFormat is >= 1 and <= 4)
+        {
+            // SQLite sets the file-format and text-encoding cookies together in
+            // sqlite3StartTable, so a file that has declared a schema format has
+            // always also declared its encoding. Format 1-4 with encoding zero is
+            // therefore an impossible header, not a pristine database.
+            if (textEncoding == SqliteTextEncoding.Unset)
+            {
+                throw createException(
+                    $"SQLite schema format {schemaFormat} requires a declared text encoding, but the header encoding is unset.");
+            }
+
+            return;
+        }
+
+        // SQLite and Turso use format zero before an empty database has acquired
+        // a schema encoding. Freelist or auto-vacuum metadata proves it is not
+        // that pristine state.
+        if (schemaFormat == 0
+            && versionValidFor == changeCounter
+            && databaseSizeInPages <= 1
+            && textEncoding == SqliteTextEncoding.Unset
+            && firstFreelistTrunkPage == 0
+            && freelistPageCount == 0
+            && schemaCookie == 0
+            && largestRootBtreePage == 0)
+        {
+            return;
+        }
+
+        throw createException($"Unsupported SQLite schema format {schemaFormat}.");
+    }
+
+    /// <summary>
+    /// Rejects auto-vacuum header pairs SQLite can never produce.
+    /// </summary>
+    /// <remarks>
+    /// Turso <c>auto_vacuum_header_fields</c> emits only <c>(0,0)</c> for no
+    /// auto-vacuum, <c>(root,0)</c> for full auto-vacuum and <c>(root,1)</c> for
+    /// incremental auto-vacuum, so a non-zero incremental-vacuum flag without a
+    /// largest-root-btree page is structurally impossible. The largest root page
+    /// must also lie inside the database when the size field is authoritative.
+    /// </remarks>
+    private static void ValidateAutoVacuum<TException>(
+        uint largestRootBtreePage,
+        uint incrementalVacuumEnabled,
+        uint databaseSizeInPages,
+        Func<string, TException> createException)
+        where TException : Exception
+    {
+        if (incrementalVacuumEnabled != 0 && largestRootBtreePage == 0)
+        {
+            throw createException(
+                "SQLite incremental-vacuum mode requires a non-zero largest root b-tree page.");
+        }
+
+        if (incrementalVacuumEnabled > 1)
+        {
+            throw createException(
+                $"SQLite incremental-vacuum flag {incrementalVacuumEnabled} must be zero or one.");
+        }
+
+        if (largestRootBtreePage != 0
+            && databaseSizeInPages != 0
+            && largestRootBtreePage > databaseSizeInPages)
+        {
+            throw createException(
+                $"SQLite largest root b-tree page {largestRootBtreePage} is outside the {databaseSizeInPages}-page database.");
+        }
     }
 
     private static int ReadCacheSize(ReadOnlySpan<byte> source)

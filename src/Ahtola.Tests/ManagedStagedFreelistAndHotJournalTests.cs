@@ -74,6 +74,79 @@ public sealed class ManagedStagedFreelistAndHotJournalTests
     }
 
     [Test]
+    public void StagedAllocateSkipsPendingBytePage()
+    {
+        const int pageSize = 512;
+        var pendingBytePage = (0x4000_0000u / pageSize) + 1;
+        var io = new SqliteStagedBtreePageIo(
+            _ => new byte[pageSize],
+            committedPageCount: pendingBytePage - 1,
+            pageSize,
+            usableSpace: pageSize);
+
+        io.AllocatePage().Should().Be(pendingBytePage + 1);
+        io.StagedPages.Should().ContainKey(pendingBytePage);
+        io.StagedPages.Should().ContainKey(pendingBytePage + 1);
+    }
+
+    [Test]
+    public void StagedFreelistRejectsDuplicateFree()
+    {
+        var pages = CreateBlankPages(pageCount: 3);
+        var io = CreateStagedIo(pages);
+
+        io.FreePage(3);
+
+        Assert.Throws<InvalidOperationException>(() => io.FreePage(3));
+    }
+
+    [Test]
+    public void StagedFreelistRejectsFreeingExistingTrunk()
+    {
+        var pages = CreateBlankPages(pageCount: 3);
+        WriteTrunk(pages[1], nextTrunk: 0, leafPages: [3]);
+        var io = CreateStagedIo(pages, firstTrunk: 2, freeCount: 2);
+
+        Assert.Throws<InvalidOperationException>(() => io.FreePage(2));
+    }
+
+    [Test]
+    public void StagedFreelistRejectsOversizedLeafCount()
+    {
+        var pages = CreateBlankPages(pageCount: 2);
+        BinaryPrimitives.WriteUInt32BigEndian(pages[1].AsSpan(sizeof(uint)), uint.MaxValue);
+
+        Assert.Throws<InvalidDataException>(() => CreateStagedIo(pages, firstTrunk: 2, freeCount: 1));
+    }
+
+    [Test]
+    public void StagedFreelistRejectsDuplicateLeaves()
+    {
+        var pages = CreateBlankPages(pageCount: 3);
+        WriteTrunk(pages[1], nextTrunk: 0, leafPages: [3, 3]);
+
+        Assert.Throws<InvalidDataException>(() => CreateStagedIo(pages, firstTrunk: 2, freeCount: 3));
+    }
+
+    [Test]
+    public void StagedFreelistRejectsInvalidNextTrunk()
+    {
+        var pages = CreateBlankPages(pageCount: 2);
+        WriteTrunk(pages[1], nextTrunk: 3, leafPages: []);
+
+        Assert.Throws<InvalidDataException>(() => CreateStagedIo(pages, firstTrunk: 2, freeCount: 1));
+    }
+
+    [Test]
+    public void StagedFreelistRejectsHeaderCountMismatch()
+    {
+        var pages = CreateBlankPages(pageCount: 2);
+        WriteTrunk(pages[1], nextTrunk: 0, leafPages: []);
+
+        Assert.Throws<InvalidDataException>(() => CreateStagedIo(pages, firstTrunk: 2, freeCount: 2));
+    }
+
+    [Test]
     public void IncrementalInsertReusesExistingFreelistLeafWithoutGrowingFile()
     {
         var fileSystem = new InMemoryFileSystem();
@@ -121,155 +194,155 @@ public sealed class ManagedStagedFreelistAndHotJournalTests
     }
 
     [Test]
-        public void BulkDeleteReclaimsLeafPagesOntoFreelistForLaterInserts()
+    public void BulkDeleteReclaimsLeafPagesOntoFreelistForLaterInserts()
     {
-            var fileSystem = new InMemoryFileSystem();
-            const string path = "bulk-delete-reclaim.db";
+        var fileSystem = new InMemoryFileSystem();
+        const string path = "bulk-delete-reclaim.db";
 
-            uint pageCountAfterInserts;
-            using (var database = EmbeddedDatabase.OpenFile(path, fileSystem))
-            using (var connection = database.Connect())
-            {
-                Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT);");
-                for (var id = 1; id <= 400; id++)
-                    Execute(connection, $"INSERT INTO t VALUES ({id}, '{new string('x', 80)}');");
-            }
-
-            using (var pager = SqlitePager.Open(fileSystem, path, path + "-wal", readOnly: true))
-            {
-                pageCountAfterInserts = pager.CommittedPageCount;
-                pageCountAfterInserts.Should().BeGreaterThan(5u);
-            }
-
-            using (var database = EmbeddedDatabase.OpenFile(path, fileSystem))
-            using (var connection = database.Connect())
-            {
-                Execute(connection, "DELETE FROM t;");
-                QueryInteger(connection, "SELECT COUNT(*) FROM t;").Should().Be(0);
-            }
-
-            uint freelistAfterDelete;
-            using (var pager = SqlitePager.Open(fileSystem, path, path + "-wal", readOnly: true))
-            {
-                var header = SqliteDatabaseHeader.Parse(pager.ReadCommittedPage(1));
-                freelistAfterDelete = header.FreelistPageCount;
-                freelistAfterDelete.Should().BeGreaterThan(0u);
-                header.DatabaseSizeInPages.Should().Be(pageCountAfterInserts);
-            }
-
-            using (var database = EmbeddedDatabase.OpenFile(path, fileSystem))
-            using (var connection = database.Connect())
-            {
-                for (var id = 1; id <= 400; id++)
-                    Execute(connection, $"INSERT INTO t VALUES ({id}, '{new string('y', 80)}');");
-                QueryInteger(connection, "SELECT COUNT(*) FROM t;").Should().Be(400);
-            }
-
-            using (var pager = SqlitePager.Open(fileSystem, path, path + "-wal", readOnly: true))
-            {
-                var header = SqliteDatabaseHeader.Parse(pager.ReadCommittedPage(1));
-                header.DatabaseSizeInPages.Should().Be(pageCountAfterInserts);
-                header.FreelistPageCount.Should().BeLessThan(freelistAfterDelete);
-            }
+        uint pageCountAfterInserts;
+        using (var database = EmbeddedDatabase.OpenFile(path, fileSystem))
+        using (var connection = database.Connect())
+        {
+            Execute(connection, "CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT);");
+            for (var id = 1; id <= 400; id++)
+                Execute(connection, $"INSERT INTO t VALUES ({id}, '{new string('x', 80)}');");
         }
 
-        [Test]
-        public void UnderfullLeafRedistributesWithFullSiblingWhenMergeDoesNotFit()
+        using (var pager = SqlitePager.Open(fileSystem, path, path + "-wal", readOnly: true))
         {
-            var pages = CreateBlankPages(pageCount: 2);
-            var io = new SqliteStagedBtreePageIo(
-                pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
-                committedPageCount: 2,
-                pageSize: PageSize,
-                usableSpace: UsableSpace);
-            io.WritePage(2, new SqliteTableLeafPageBuilder(PageSize, UsableSpace).Build());
-
-            var writer = new SqliteIncrementalTableBtree(io);
-            // Large records fill leaves quickly so a nearly-full sibling cannot absorb a
-            // half-empty neighbor — force two-way redistribute instead of merge.
-            var record = new byte[200];
-            record.AsSpan().Fill(0x4D);
-            const int rowCount = 80;
-            for (var rowId = 1L; rowId <= rowCount; rowId++)
-                writer.Insert(2, rowId, record);
-
-            io.PageCount.Should().BeGreaterThan(3u);
-
-            // Delete most low rowids so the left leaf falls below half full while the right
-            // sibling stays too full for a one-page merge.
-            for (var rowId = 1L; rowId <= 30; rowId++)
-            {
-                if (rowId % 4 != 0)
-                    writer.Delete(2, rowId);
-            }
-
-            var cursor = new SqliteTableBtreeCursor(io);
-            for (var rowId = 1L; rowId <= rowCount; rowId++)
-            {
-                var deleted = rowId <= 30 && rowId % 4 != 0;
-                if (deleted)
-                {
-                    cursor.TrySeek(2, rowId, out _).Should().BeFalse($"deleted rowid {rowId}");
-                    continue;
-                }
-
-                cursor.TrySeek(2, rowId, out var found).Should().BeTrue($"rowid {rowId}");
-                found.Should().Equal(record);
-            }
+            pageCountAfterInserts = pager.CommittedPageCount;
+            pageCountAfterInserts.Should().BeGreaterThan(5u);
         }
 
-        [Test]
-        public void UnderfullLeafMergesIntoSiblingWithoutGrowingOnRefill()
+        using (var database = EmbeddedDatabase.OpenFile(path, fileSystem))
+        using (var connection = database.Connect())
         {
-            var pages = CreateBlankPages(pageCount: 2);
-            var io = new SqliteStagedBtreePageIo(
-                pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
-                committedPageCount: 2,
-                pageSize: PageSize,
-                usableSpace: UsableSpace);
-            io.WritePage(2, new SqliteTableLeafPageBuilder(PageSize, UsableSpace).Build());
+            Execute(connection, "DELETE FROM t;");
+            QueryInteger(connection, "SELECT COUNT(*) FROM t;").Should().Be(0);
+        }
 
-            var writer = new SqliteIncrementalTableBtree(io);
-            var record = new byte[60];
-            record.AsSpan().Fill(0x3C);
-            const int rowCount = 200;
-            for (var rowId = 1L; rowId <= rowCount; rowId++)
-                writer.Insert(2, rowId, record);
+        uint freelistAfterDelete;
+        using (var pager = SqlitePager.Open(fileSystem, path, path + "-wal", readOnly: true))
+        {
+            var header = SqliteDatabaseHeader.Parse(pager.ReadCommittedPage(1));
+            freelistAfterDelete = header.FreelistPageCount;
+            freelistAfterDelete.Should().BeGreaterThan(0u);
+            header.DatabaseSizeInPages.Should().Be(pageCountAfterInserts);
+        }
 
-            var peakPages = io.PageCount;
-            peakPages.Should().BeGreaterThan(3u);
+        using (var database = EmbeddedDatabase.OpenFile(path, fileSystem))
+        using (var connection = database.Connect())
+        {
+            for (var id = 1; id <= 400; id++)
+                Execute(connection, $"INSERT INTO t VALUES ({id}, '{new string('y', 80)}');");
+            QueryInteger(connection, "SELECT COUNT(*) FROM t;").Should().Be(400);
+        }
 
-            // Delete every other row so leaves stay non-empty but under-full and merge.
-            for (var rowId = 1L; rowId <= rowCount; rowId += 2)
+        using (var pager = SqlitePager.Open(fileSystem, path, path + "-wal", readOnly: true))
+        {
+            var header = SqliteDatabaseHeader.Parse(pager.ReadCommittedPage(1));
+            header.DatabaseSizeInPages.Should().Be(pageCountAfterInserts);
+            header.FreelistPageCount.Should().BeLessThan(freelistAfterDelete);
+        }
+    }
+
+    [Test]
+    public void UnderfullLeafRedistributesWithFullSiblingWhenMergeDoesNotFit()
+    {
+        var pages = CreateBlankPages(pageCount: 2);
+        var io = new SqliteStagedBtreePageIo(
+            pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
+            committedPageCount: 2,
+            pageSize: PageSize,
+            usableSpace: UsableSpace);
+        io.WritePage(2, new SqliteTableLeafPageBuilder(PageSize, UsableSpace).Build());
+
+        var writer = new SqliteIncrementalTableBtree(io);
+        // Large records fill leaves quickly so a nearly-full sibling cannot absorb a
+        // half-empty neighbor — force two-way redistribute instead of merge.
+        var record = new byte[200];
+        record.AsSpan().Fill(0x4D);
+        const int rowCount = 80;
+        for (var rowId = 1L; rowId <= rowCount; rowId++)
+            writer.Insert(2, rowId, record);
+
+        io.PageCount.Should().BeGreaterThan(3u);
+
+        // Delete most low rowids so the left leaf falls below half full while the right
+        // sibling stays too full for a one-page merge.
+        for (var rowId = 1L; rowId <= 30; rowId++)
+        {
+            if (rowId % 4 != 0)
                 writer.Delete(2, rowId);
-
-            io.FreelistPageCount.Should().BeGreaterThan(0u);
-
-            // Surviving rows must still be seekable.
-            var cursor = new SqliteTableBtreeCursor(io);
-            for (var rowId = 2L; rowId <= rowCount; rowId += 2)
-            {
-                cursor.TrySeek(2, rowId, out var found).Should().BeTrue($"rowid {rowId}");
-                found.Should().Equal(record);
-            }
-
-            var freelistAfterDeletes = io.FreelistPageCount;
-
-            // Refill deleted rowids; tree must remain correct and not explode in size.
-            for (var rowId = 1L; rowId <= rowCount; rowId += 2)
-                writer.Insert(2, rowId, record);
-
-            // Merges reclaim some pages; refill may still append a few if packing differs.
-            io.PageCount.Should().BeLessThan(peakPages * 3);
-            if (freelistAfterDeletes > 0 && io.PageCount <= peakPages)
-                io.FreelistPageCount.Should().BeLessThanOrEqualTo(freelistAfterDeletes);
-            for (var rowId = 1L; rowId <= rowCount; rowId++)
-                cursor.TrySeek(2, rowId, out _).Should().BeTrue($"rowid {rowId} after refill");
         }
 
-        [Test]
-        public void EmptyNonRootLeafDeleteFreesPageAndCollapsesRoot()
+        var cursor = new SqliteTableBtreeCursor(io);
+        for (var rowId = 1L; rowId <= rowCount; rowId++)
         {
+            var deleted = rowId <= 30 && rowId % 4 != 0;
+            if (deleted)
+            {
+                cursor.TrySeek(2, rowId, out _).Should().BeFalse($"deleted rowid {rowId}");
+                continue;
+            }
+
+            cursor.TrySeek(2, rowId, out var found).Should().BeTrue($"rowid {rowId}");
+            found.Should().Equal(record);
+        }
+    }
+
+    [Test]
+    public void UnderfullLeafMergesIntoSiblingWithoutGrowingOnRefill()
+    {
+        var pages = CreateBlankPages(pageCount: 2);
+        var io = new SqliteStagedBtreePageIo(
+            pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
+            committedPageCount: 2,
+            pageSize: PageSize,
+            usableSpace: UsableSpace);
+        io.WritePage(2, new SqliteTableLeafPageBuilder(PageSize, UsableSpace).Build());
+
+        var writer = new SqliteIncrementalTableBtree(io);
+        var record = new byte[60];
+        record.AsSpan().Fill(0x3C);
+        const int rowCount = 200;
+        for (var rowId = 1L; rowId <= rowCount; rowId++)
+            writer.Insert(2, rowId, record);
+
+        var peakPages = io.PageCount;
+        peakPages.Should().BeGreaterThan(3u);
+
+        // Delete every other row so leaves stay non-empty but under-full and merge.
+        for (var rowId = 1L; rowId <= rowCount; rowId += 2)
+            writer.Delete(2, rowId);
+
+        io.FreelistPageCount.Should().BeGreaterThan(0u);
+
+        // Surviving rows must still be seekable.
+        var cursor = new SqliteTableBtreeCursor(io);
+        for (var rowId = 2L; rowId <= rowCount; rowId += 2)
+        {
+            cursor.TrySeek(2, rowId, out var found).Should().BeTrue($"rowid {rowId}");
+            found.Should().Equal(record);
+        }
+
+        var freelistAfterDeletes = io.FreelistPageCount;
+
+        // Refill deleted rowids; tree must remain correct and not explode in size.
+        for (var rowId = 1L; rowId <= rowCount; rowId += 2)
+            writer.Insert(2, rowId, record);
+
+        // Merges reclaim some pages; refill may still append a few if packing differs.
+        io.PageCount.Should().BeLessThan(peakPages * 3);
+        if (freelistAfterDeletes > 0 && io.PageCount <= peakPages)
+            io.FreelistPageCount.Should().BeLessThanOrEqualTo(freelistAfterDeletes);
+        for (var rowId = 1L; rowId <= rowCount; rowId++)
+            cursor.TrySeek(2, rowId, out _).Should().BeTrue($"rowid {rowId} after refill");
+    }
+
+    [Test]
+    public void EmptyNonRootLeafDeleteFreesPageAndCollapsesRoot()
+    {
         var pages = CreateBlankPages(pageCount: 2);
         var io = new SqliteStagedBtreePageIo(
             pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
@@ -294,79 +367,79 @@ public sealed class ManagedStagedFreelistAndHotJournalTests
         var rootHeader = SqliteBtreePageHeader.Parse(io.ReadPage(2), isFirstPage: false);
         rootHeader.PageType.Should().Be(SqliteBtreePageType.TableLeaf);
         rootHeader.CellCount.Should().Be(0);
-                // Every non-root data page created by the inserts must be on the freelist.
-                // Page 1 is the DB header page and page 2 is the catalog root — neither is freed.
-                io.FreelistPageCount.Should().BeGreaterThan(0u);
-                io.FirstFreelistTrunkPage.Should().NotBe(0u);
-                io.FirstFreelistTrunkPage.Should().NotBe(2u);
+        // Every non-root data page created by the inserts must be on the freelist.
+        // Page 1 is the DB header page and page 2 is the catalog root — neither is freed.
+        io.FreelistPageCount.Should().BeGreaterThan(0u);
+        io.FirstFreelistTrunkPage.Should().NotBe(0u);
+        io.FirstFreelistTrunkPage.Should().NotBe(2u);
 
-                // Refill until the root must split — new pages must come from the freelist.
-                var freelistBeforeRefill = io.FreelistPageCount;
-                for (var rowId = 1L; rowId <= rowCount; rowId++)
-                    writer.Insert(2, rowId, record);
+        // Refill until the root must split — new pages must come from the freelist.
+        var freelistBeforeRefill = io.FreelistPageCount;
+        for (var rowId = 1L; rowId <= rowCount; rowId++)
+            writer.Insert(2, rowId, record);
 
-                io.PageCount.Should().Be(peakPages);
-                io.FreelistPageCount.Should().BeLessThan(freelistBeforeRefill);
+        io.PageCount.Should().Be(peakPages);
+        io.FreelistPageCount.Should().BeLessThan(freelistBeforeRefill);
+    }
+
+    [Test]
+    public void DeepTreeRangeDeleteMergesInteriorSiblingsWithoutMaintenanceException()
+    {
+        // Build a multi-level interior tree, then delete a dense low-rowid range so
+        // empty leaves and underfull parents collapse. Single-child non-root interiors
+        // must merge into sibling interiors (P5-A) rather than throw MaintenanceRequired.
+        var pages = CreateBlankPages(pageCount: 2);
+        var io = new SqliteStagedBtreePageIo(
+            pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
+            committedPageCount: 2,
+            pageSize: PageSize,
+            usableSpace: UsableSpace);
+        io.WritePage(2, new SqliteTableLeafPageBuilder(PageSize, UsableSpace).Build());
+
+        var writer = new SqliteIncrementalTableBtree(io);
+        var record = new byte[48];
+        record.AsSpan().Fill(0x7E);
+        const int rowCount = 2500;
+        for (var rowId = 1L; rowId <= rowCount; rowId++)
+            writer.Insert(2, rowId, record);
+
+        io.PageCount.Should().BeGreaterThan(10u, "fixture must create multi-level interiors");
+        var peakPages = io.PageCount;
+
+        // Delete the lower ~40% so left branches empty/underfill while right branches
+        // remain dense enough that the root stays interior with sibling subtrees.
+        const int deleteThrough = rowCount * 2 / 5;
+        for (var rowId = 1L; rowId <= deleteThrough; rowId++)
+            writer.Delete(2, rowId);
+
+        var cursor = new SqliteTableBtreeCursor(io);
+        for (var rowId = 1L; rowId <= rowCount; rowId++)
+        {
+            if (rowId <= deleteThrough)
+            {
+                cursor.TrySeek(2, rowId, out _).Should().BeFalse($"deleted rowid {rowId}");
+                continue;
             }
 
-                        [Test]
-                        public void DeepTreeRangeDeleteMergesInteriorSiblingsWithoutMaintenanceException()
-                        {
-                            // Build a multi-level interior tree, then delete a dense low-rowid range so
-                            // empty leaves and underfull parents collapse. Single-child non-root interiors
-                            // must merge into sibling interiors (P5-A) rather than throw MaintenanceRequired.
-                            var pages = CreateBlankPages(pageCount: 2);
-                            var io = new SqliteStagedBtreePageIo(
-                                pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
-                                committedPageCount: 2,
-                                pageSize: PageSize,
-                                usableSpace: UsableSpace);
-                            io.WritePage(2, new SqliteTableLeafPageBuilder(PageSize, UsableSpace).Build());
+            cursor.TrySeek(2, rowId, out var found).Should().BeTrue($"surviving rowid {rowId}");
+            found.Should().Equal(record);
+        }
 
-                            var writer = new SqliteIncrementalTableBtree(io);
-                            var record = new byte[48];
-                            record.AsSpan().Fill(0x7E);
-                            const int rowCount = 2500;
-                            for (var rowId = 1L; rowId <= rowCount; rowId++)
-                                writer.Insert(2, rowId, record);
+        io.FreelistPageCount.Should().BeGreaterThan(0u);
+        io.PageCount.Should().BeLessThanOrEqualTo(peakPages);
 
-                            io.PageCount.Should().BeGreaterThan(10u, "fixture must create multi-level interiors");
-                            var peakPages = io.PageCount;
+        // Refill deleted keys; tree must remain seek-correct without exploding.
+        for (var rowId = 1L; rowId <= deleteThrough; rowId++)
+            writer.Insert(2, rowId, record);
 
-                            // Delete the lower ~40% so left branches empty/underfill while right branches
-                            // remain dense enough that the root stays interior with sibling subtrees.
-                            const int deleteThrough = rowCount * 2 / 5;
-                            for (var rowId = 1L; rowId <= deleteThrough; rowId++)
-                                writer.Delete(2, rowId);
+        for (var rowId = 1L; rowId <= rowCount; rowId++)
+            cursor.TrySeek(2, rowId, out _).Should().BeTrue($"rowid {rowId} after refill");
+        io.PageCount.Should().BeLessThan(peakPages * 3);
+    }
 
-                            var cursor = new SqliteTableBtreeCursor(io);
-                            for (var rowId = 1L; rowId <= rowCount; rowId++)
-                            {
-                                if (rowId <= deleteThrough)
-                                {
-                                    cursor.TrySeek(2, rowId, out _).Should().BeFalse($"deleted rowid {rowId}");
-                                    continue;
-                                }
-
-                                cursor.TrySeek(2, rowId, out var found).Should().BeTrue($"surviving rowid {rowId}");
-                                found.Should().Equal(record);
-                            }
-
-                            io.FreelistPageCount.Should().BeGreaterThan(0u);
-                            io.PageCount.Should().BeLessThanOrEqualTo(peakPages);
-
-                            // Refill deleted keys; tree must remain seek-correct without exploding.
-                            for (var rowId = 1L; rowId <= deleteThrough; rowId++)
-                                writer.Insert(2, rowId, record);
-
-                            for (var rowId = 1L; rowId <= rowCount; rowId++)
-                                cursor.TrySeek(2, rowId, out _).Should().BeTrue($"rowid {rowId} after refill");
-                            io.PageCount.Should().BeLessThan(peakPages * 3);
-                        }
-
-                    [Test]
-                    public void HotJournalRecoveryAcceptsTrailingPaddingAndSentinelRecordCount()
-                    {
+    [Test]
+    public void HotJournalRecoveryAcceptsTrailingPaddingAndSentinelRecordCount()
+    {
         var fileSystem = new InMemoryFileSystem();
         const string dbPath = "hot-journal.db";
         const string journalPath = "hot-journal.db-journal";
@@ -498,6 +571,18 @@ public sealed class ManagedStagedFreelistAndHotJournalTests
             pages[i] = new byte[PageSize];
         return pages;
     }
+
+    private static SqliteStagedBtreePageIo CreateStagedIo(
+        byte[][] pages,
+        uint firstTrunk = 0,
+        uint freeCount = 0)
+        => new(
+            pageNumber => (byte[])pages[checked((int)pageNumber) - 1].Clone(),
+            committedPageCount: (uint)pages.Length,
+            pageSize: PageSize,
+            usableSpace: UsableSpace,
+            firstFreelistTrunkPage: firstTrunk,
+            freelistPageCount: freeCount);
 
     private static void WriteTrunk(byte[] page, uint nextTrunk, uint[] leafPages)
     {

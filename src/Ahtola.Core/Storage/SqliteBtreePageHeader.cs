@@ -48,9 +48,20 @@ public sealed record SqliteBtreePageHeader(
             0);
     }
 
-    public static SqliteBtreePageHeader Parse(ReadOnlySpan<byte> page, bool isFirstPage = false)
+    /// <summary>
+    /// Parses a b-tree page header. <paramref name="usableSpace"/> bounds the
+    /// cell-content area and freeblock chain exactly like SQLite's
+    /// <c>btreeInitPage</c>/<c>btreeComputeFreeSpace</c>, which compare against
+    /// <c>usableSize</c> rather than the physical page size. Callers that do not
+    /// know the reserved-space suffix fall back to the page length.
+    /// </summary>
+    public static SqliteBtreePageHeader Parse(
+        ReadOnlySpan<byte> page,
+        bool isFirstPage = false,
+        int? usableSpace = null)
     {
         ValidatePageSize(page.Length);
+        var contentBound = ResolveContentBound(page.Length, usableSpace);
 
         var offset = isFirstPage ? FirstPageOffset : 0;
         if (page.Length < offset + LeafHeaderSize)
@@ -73,7 +84,7 @@ public sealed record SqliteBtreePageHeader(
             : BinaryPrimitives.ReadUInt32BigEndian(page[(offset + 8)..]);
 
         ValidateLayout(
-            page.Length,
+            contentBound,
             offset,
             headerSize,
             firstFreeblockOffset,
@@ -91,11 +102,19 @@ public sealed record SqliteBtreePageHeader(
             rightMostChildPage);
     }
 
-    public void WriteTo(Span<byte> page)
+    public void WriteTo(Span<byte> page, int? usableSpace = null)
     {
         ValidatePageSize(page.Length);
+        var contentBound = ResolveContentBound(page.Length, usableSpace);
         if (Offset is not (0 or FirstPageOffset))
             throw new InvalidOperationException($"SQLite B-tree header offset {Offset} is invalid.");
+        if (PageType is not SqliteBtreePageType.IndexInterior
+            and not SqliteBtreePageType.TableInterior
+            and not SqliteBtreePageType.IndexLeaf
+            and not SqliteBtreePageType.TableLeaf)
+        {
+            throw new InvalidOperationException($"Unsupported SQLite B-tree page type {(byte)PageType}.");
+        }
 
         var expectedOffset = Offset == FirstPageOffset ? FirstPageOffset : 0;
         var expectedHeaderSize = IsLeaf ? LeafHeaderSize : InteriorHeaderSize;
@@ -103,7 +122,7 @@ public sealed record SqliteBtreePageHeader(
             throw new ArgumentException("SQLite B-tree page is too small for its header.", nameof(page));
 
         ValidateLayout(
-            page.Length,
+            contentBound,
             expectedOffset,
             expectedHeaderSize,
             FirstFreeblockOffset,
@@ -159,8 +178,17 @@ public sealed record SqliteBtreePageHeader(
         }
     }
 
+    private static int ResolveContentBound(int pageSize, int? usableSpace)
+    {
+        if (usableSpace is not { } usable)
+            return pageSize;
+
+        ValidateUsableSpace(pageSize, usable);
+        return usable;
+    }
+
     private static void ValidateLayout(
-        int pageSize,
+        int contentBound,
         int offset,
         int headerSize,
         ushort firstFreeblockOffset,
@@ -170,14 +198,14 @@ public sealed record SqliteBtreePageHeader(
     {
         if (fragmentedFreeBytes > 60)
             throw new InvalidDataException("SQLite B-tree page has too many fragmented free bytes.");
-        if (cellContentAreaOffset < offset + headerSize || cellContentAreaOffset > pageSize)
+        if (cellContentAreaOffset < offset + headerSize || cellContentAreaOffset > contentBound)
             throw new InvalidDataException("SQLite B-tree cell content area is invalid.");
 
         var cellPointerArrayEnd = offset + headerSize + cellCount * sizeof(ushort);
         if (cellPointerArrayEnd > cellContentAreaOffset)
             throw new InvalidDataException("SQLite B-tree cell pointer array overlaps cell content.");
         if (firstFreeblockOffset != 0
-            && (firstFreeblockOffset < cellContentAreaOffset || firstFreeblockOffset > pageSize - 4))
+            && (firstFreeblockOffset < cellContentAreaOffset || firstFreeblockOffset > contentBound - 4))
         {
             throw new InvalidDataException("SQLite B-tree first freeblock offset is invalid.");
         }

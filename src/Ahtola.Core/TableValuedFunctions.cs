@@ -101,6 +101,8 @@ internal static class TableValuedFunctionRegistry
 
     public static bool IsRegistered(string name) => Modules.ContainsKey(name);
 
+    public static IReadOnlyCollection<string> AllNames => Modules.Keys;
+
     public static TableValuedFunctionModule Resolve(string name)
         => TryResolve(name, out var module)
             ? module

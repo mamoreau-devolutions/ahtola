@@ -46,7 +46,7 @@ public sealed class SqliteTableLeafPageView
         bool isFirstPage = false)
     {
         var snapshot = page.ToArray();
-        var header = SqliteBtreePageHeader.Parse(snapshot, isFirstPage);
+        var header = SqliteBtreePageHeader.Parse(snapshot, isFirstPage, usableSpace);
         if (header.PageType != SqliteBtreePageType.TableLeaf)
             throw new InvalidDataException("SQLite page is not a table-leaf b-tree page.");
 
@@ -79,6 +79,7 @@ public sealed class SqliteTableLeafPageView
         SqliteBtreePageValidation.ValidateCellsDoNotOverlapFreeblocks(
             snapshot,
             header,
+            usableSpace,
             ranges,
             "table-leaf");
         return new SqliteTableLeafPageView(page.Length, usableSpace, header, pointers, cells);

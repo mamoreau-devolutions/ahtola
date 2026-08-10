@@ -26,6 +26,7 @@ internal sealed class MvccTransaction
     private readonly object _gate = new();
     private readonly HashSet<MvccRowId> _writeSet = [];
     private readonly List<MvccLogOp> _logOps = [];
+    private readonly List<MvccSavepointMark> _savepoints = [];
     private MvccTransactionState _state = MvccTransactionState.Active;
     private ulong? _commitTimestamp;
 
@@ -79,6 +80,84 @@ internal sealed class MvccTransaction
         lock (_gate)
             return _logOps.ToArray();
     }
+
+    /// <summary>
+    /// Records a named savepoint watermark (log-op count) for later ROLLBACK TO.
+    /// </summary>
+    internal void BeginNamedSavepoint(string name)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        lock (_gate)
+        {
+            ThrowIfNotActive();
+            _savepoints.Add(new MvccSavepointMark(name, _logOps.Count));
+        }
+    }
+
+    /// <summary>
+    /// Drops the named savepoint and every savepoint created after it (RELEASE).
+    /// </summary>
+    internal void ReleaseNamedSavepoint(string name)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        lock (_gate)
+        {
+            ThrowIfNotActive();
+            var index = FindSavepointIndexLocked(name);
+            _savepoints.RemoveRange(index, _savepoints.Count - index);
+        }
+    }
+
+    /// <summary>
+    /// Returns the log-op watermark for ROLLBACK TO <paramref name="name"/> and
+    /// drops every savepoint created after it (named mark is retained).
+    /// </summary>
+    internal int RollbackToNamedSavepoint(string name)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        lock (_gate)
+        {
+            ThrowIfNotActive();
+            var index = FindSavepointIndexLocked(name);
+            var mark = _savepoints[index].LogOpCount;
+            if (index + 1 < _savepoints.Count)
+                _savepoints.RemoveRange(index + 1, _savepoints.Count - index - 1);
+            return mark;
+        }
+    }
+
+    /// <summary>
+    /// Truncates logical ops after a ROLLBACK TO watermark and rebuilds the write set.
+    /// </summary>
+    internal void TruncateLogOpsTo(int logOpCount)
+    {
+        lock (_gate)
+        {
+            ThrowIfNotActive();
+            if (logOpCount < 0 || logOpCount > _logOps.Count)
+                throw new InvalidOperationException("Invalid MVCC savepoint log watermark.");
+            if (logOpCount == _logOps.Count)
+                return;
+
+            _logOps.RemoveRange(logOpCount, _logOps.Count - logOpCount);
+            _writeSet.Clear();
+            foreach (var op in _logOps)
+                _writeSet.Add(op.RowId);
+        }
+    }
+
+    private int FindSavepointIndexLocked(string name)
+    {
+        for (var index = _savepoints.Count - 1; index >= 0; index--)
+        {
+            if (string.Equals(_savepoints[index].Name, name, StringComparison.OrdinalIgnoreCase))
+                return index;
+        }
+
+        throw new EmbeddedSqlException($"no such savepoint: {name}");
+    }
+
+    private readonly record struct MvccSavepointMark(string Name, int LogOpCount);
 
     internal void MarkPreparing(ulong commitTimestamp)
     {
@@ -670,6 +749,84 @@ internal sealed class MvStore
                 throw new InvalidOperationException("Cannot roll back a committed MVCC transaction.");
             AbortLocked(id, tx);
         }
+    }
+
+    /// <summary>Named SAVEPOINT mark on an active MVCC transaction (Turso begin_named_savepoint).</summary>
+    internal void BeginNamedSavepoint(MvccTxId id, string name)
+    {
+        lock (_gate)
+            RequireActive(id).BeginNamedSavepoint(name);
+    }
+
+    /// <summary>RELEASE a named MVCC savepoint (keeps later log ops).</summary>
+    internal void ReleaseNamedSavepoint(MvccTxId id, string name)
+    {
+        lock (_gate)
+            RequireActive(id).ReleaseNamedSavepoint(name);
+    }
+
+    /// <summary>
+    /// ROLLBACK TO a named MVCC savepoint: undo version-chain effects of log ops
+    /// after the mark, then truncate the transaction log (Turso rollback_to_named_savepoint).
+    /// </summary>
+    internal void RollbackToNamedSavepoint(MvccTxId id, string name)
+    {
+        lock (_gate)
+        {
+            var tx = RequireActive(id);
+            var mark = tx.RollbackToNamedSavepoint(name);
+            var logOps = tx.SnapshotLogOps();
+            for (var i = logOps.Count - 1; i >= mark; i--)
+                UndoLogOpLocked(id, logOps[i]);
+            tx.TruncateLogOpsTo(mark);
+        }
+    }
+
+    private void UndoLogOpLocked(MvccTxId id, MvccLogOp op)
+    {
+        if (!_rows.TryGetValue(op.RowId, out var chain))
+            return;
+
+        if (op.IsDelete)
+        {
+            // Undo end-stamp / pure tombstone created by this tx for the row.
+            for (var i = chain.Count - 1; i >= 0; i--)
+            {
+                var version = chain[i];
+                if (version.End is { IsTimestamp: false, Value: var endTx } && endTx == id.Value)
+                {
+                    version.End = null;
+                    break;
+                }
+
+                if (version.IsTombstone
+                    && version.End is null
+                    && version.Begin is { IsTimestamp: false, Value: var beginTx }
+                    && beginTx == id.Value)
+                {
+                    chain.RemoveAt(i);
+                    break;
+                }
+            }
+        }
+        else
+        {
+            // Undo the newest insert version created by this tx for the row.
+            for (var i = chain.Count - 1; i >= 0; i--)
+            {
+                var version = chain[i];
+                if (version.Begin is { IsTimestamp: false, Value: var beginTx }
+                    && beginTx == id.Value
+                    && !version.IsTombstone)
+                {
+                    chain.RemoveAt(i);
+                    break;
+                }
+            }
+        }
+
+        if (chain.Count == 0)
+            _rows.Remove(op.RowId);
     }
 
     private void AbortLocked(MvccTxId id, MvccTransaction tx)

@@ -141,6 +141,7 @@ public sealed class SqlitePagerLockManager
     private bool _writerActive;
     private bool _checkpointActive;
     private long _generation;
+    private long _journalModeGeneration;
     private IDisposable? _sharedReaderLock;
 
     /// <summary>Creates a process-local SQLite pager lock manager.</summary>
@@ -200,6 +201,20 @@ public sealed class SqlitePagerLockManager
         {
             lock (_gate)
                 return _generation;
+        }
+    }
+
+    /// <summary>
+    /// The storage generation of the most recent journal-mode transition.
+    /// Pagers opened before this generation must reopen even if the durable
+    /// header has since made a complete round trip back to their original mode.
+    /// </summary>
+    internal long JournalModeGeneration
+    {
+        get
+        {
+            lock (_gate)
+                return _journalModeGeneration;
         }
     }
 
@@ -357,6 +372,16 @@ public sealed class SqlitePagerLockManager
                 throw new InvalidOperationException("The SQLite checkpoint lease is no longer active.");
 
             return checked(++_generation);
+        }
+    }
+
+    internal long PublishJournalModeChange(SqlitePagerLockOperation operation)
+    {
+        lock (_gate)
+        {
+            var generation = PublishStorageChange(operation);
+            _journalModeGeneration = generation;
+            return generation;
         }
     }
 
@@ -564,6 +589,13 @@ public sealed class SqlitePagerLockLease : IDisposable
         var manager = Volatile.Read(ref _manager)
             ?? throw new ObjectDisposedException(nameof(SqlitePagerLockLease));
         return manager.PublishStorageChange(Operation);
+    }
+
+    internal long PublishJournalModeChange()
+    {
+        var manager = Volatile.Read(ref _manager)
+            ?? throw new ObjectDisposedException(nameof(SqlitePagerLockLease));
+        return manager.PublishJournalModeChange(Operation);
     }
 
     /// <inheritdoc />

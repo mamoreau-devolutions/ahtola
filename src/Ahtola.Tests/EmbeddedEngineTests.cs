@@ -202,13 +202,12 @@ public class EmbeddedEngineTests
     }
 
     [Test]
-    public void DistinctAggregateWithOrderByIsExplicitlyRejected()
+    public void DistinctAggregateWithOrderByDeduplicatesInAggregateOrder()
     {
         using var connection = CreateOrderedAggregateTable();
 
-        Assert.Throws<EmbeddedSqlException>(
-                () => connection.Prepare("SELECT group_concat(DISTINCT s ORDER BY s) FROM t;").Step())!
-            .Message.Should().Contain("DISTINCT aggregates with ORDER BY");
+        ReadSingle(connection, "SELECT group_concat(DISTINCT s ORDER BY s DESC) FROM t;")
+            .Should().Be(SqlValue.Text("c,b,a"));
     }
 
     [Test]

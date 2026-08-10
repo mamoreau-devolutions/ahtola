@@ -265,7 +265,7 @@ public class SetOperationSqlRoutingTests
     }
 
     [Test]
-    public void ExceptWithLimitFallsBackToEvaluator()
+    public void ExceptWithLimitNowLowersToBytecode()
     {
         using var connection = new EmbeddedDatabase().Connect();
         SeedSingleColumn(connection);
@@ -273,12 +273,14 @@ public class SetOperationSqlRoutingTests
         Column0(ReadRows(connection, "SELECT a FROM t EXCEPT SELECT a FROM u LIMIT 1;"))
             .Should().Equal(SqlValue.Integer(1));
 
-        Assert.Throws<EmbeddedSqlException>(
-            () => ReadRows(connection, "EXPLAIN SELECT a FROM t EXCEPT SELECT a FROM u LIMIT 1;"));
+        // The compound program now composes with the limit/offset counters: the row-set probe runs
+        // as a RowGate ahead of them so a suppressed candidate never consumes the budget.
+        Opcodes(ReadRows(connection, "EXPLAIN SELECT a FROM t EXCEPT SELECT a FROM u LIMIT 1;"))
+            .Should().ContainInOrder("RowGate", "LimitGate", "ResultRow");
     }
 
     [Test]
-    public void IntersectWithOffsetFallsBackToEvaluator()
+    public void IntersectWithOffsetNowLowersToBytecode()
     {
         using var connection = new EmbeddedDatabase().Connect();
         SeedSingleColumn(connection);
@@ -286,8 +288,8 @@ public class SetOperationSqlRoutingTests
         Column0(ReadRows(connection, "SELECT a FROM t EXCEPT SELECT a FROM u LIMIT 1 OFFSET 1;"))
             .Should().Equal(SqlValue.Integer(3));
 
-        Assert.Throws<EmbeddedSqlException>(
-            () => ReadRows(connection, "EXPLAIN SELECT a FROM t EXCEPT SELECT a FROM u LIMIT 1 OFFSET 1;"));
+        Opcodes(ReadRows(connection, "EXPLAIN SELECT a FROM t EXCEPT SELECT a FROM u LIMIT 1 OFFSET 1;"))
+            .Should().ContainInOrder("RowGate", "OffsetGate", "LimitGate", "ResultRow");
     }
 
     [Test]
