@@ -773,20 +773,20 @@ public sealed class ResumableStatement : IDisposable
                         try
                         {
                             var target = RequireWriteTarget(commit.Cursor);
-                                            var committedRowId = target.Commit();
-                                            // Turso InsertFlags::SKIP_LAST_ROWID: keep last_insert_rowid() unchanged.
-                                            if (!_skipLastInsertRowId[commit.Cursor.Index])
-                                                LastInsertRowId = committedRowId;
-                                            AdvanceInstructionPointer();
-                                        }
-                                        catch
-                                        {
-                                            State = ResumableStatementState.Faulted;
-                                            throw;
-                                        }
+                            var committedRowId = target.Commit();
+                            // Turso InsertFlags::SKIP_LAST_ROWID: keep last_insert_rowid() unchanged.
+                            if (!_skipLastInsertRowId[commit.Cursor.Index])
+                                LastInsertRowId = committedRowId;
+                            AdvanceInstructionPointer();
+                        }
+                        catch
+                        {
+                            State = ResumableStatementState.Faulted;
+                            throw;
+                        }
 
-                                        break;
-                                    }
+                        break;
+                    }
                 case OpenSorterInstruction openSorter:
                     OpenSorter(openSorter);
                     AdvanceInstructionPointer();
@@ -1347,9 +1347,9 @@ public sealed class ResumableStatement : IDisposable
         Array.Clear(_registers);
         Array.Clear(_openCursors);
         Array.Clear(_cursorPositions);
-                Array.Clear(_skipLastInsertRowId);
-                Array.Clear(_materializedRows);
-                Array.Clear(_materializedRowIds);
+        Array.Clear(_skipLastInsertRowId);
+        Array.Clear(_materializedRows);
+        Array.Clear(_materializedRowIds);
         DisposeAllJoinCursors();
         DisposeAllSorters();
         Array.Clear(_accumulatorContexts);
@@ -1693,50 +1693,50 @@ public sealed class ResumableStatement : IDisposable
             ?? throw new InvalidOperationException(
                 $"Cursor {cursor.Index} has no mutation action bound.");
 
-            // Capture pre-mutation rowid when UPDATE changes the row's rowid (Turso UPDATE_ROWID_CHANGE).
-            // Forces a positioned read of the old key before the write mutates the cursor.
-            if ((flags & VdbeInsertFlags.UpdateRowidChange) != 0
-                && IsCursorPositioned(cursor))
-            {
-                _ = CurrentCursorRowId(cursor);
-            }
-
-            var mutation = mutate(_cursorPositions[cursor.Index]);
-            _materializedRows[cursor.Index] = mutation.Row;
-            _materializedRowIds[cursor.Index] = mutation.RowId;
-
-            // Track whether last_insert_rowid() must stay frozen across Commit for this cursor.
-            // Intermediate multi-row INSERT steps set SkipLastRowid; only the final write clears it.
-            if ((flags & VdbeInsertFlags.SkipLastRowid) != 0)
-                _skipLastInsertRowId[cursor.Index] = true;
-            else if (target.Commit is not null)
-                _skipLastInsertRowId[cursor.Index] = false;
-
-            // SkipLastRowid is honored at Commit; mutation still records the rowid for Column/RowId.
-            if ((flags & (VdbeInsertFlags.SkipStatementChangeCount | VdbeInsertFlags.SkipAllChangeCounts)) == 0)
-                RowsAffected = checked(RowsAffected + 1);
+        // Capture pre-mutation rowid when UPDATE changes the row's rowid (Turso UPDATE_ROWID_CHANGE).
+        // Forces a positioned read of the old key before the write mutates the cursor.
+        if ((flags & VdbeInsertFlags.UpdateRowidChange) != 0
+            && IsCursorPositioned(cursor))
+        {
+            _ = CurrentCursorRowId(cursor);
         }
+
+        var mutation = mutate(_cursorPositions[cursor.Index]);
+        _materializedRows[cursor.Index] = mutation.Row;
+        _materializedRowIds[cursor.Index] = mutation.RowId;
+
+        // Track whether last_insert_rowid() must stay frozen across Commit for this cursor.
+        // Intermediate multi-row INSERT steps set SkipLastRowid; only the final write clears it.
+        if ((flags & VdbeInsertFlags.SkipLastRowid) != 0)
+            _skipLastInsertRowId[cursor.Index] = true;
+        else if (target.Commit is not null)
+            _skipLastInsertRowId[cursor.Index] = false;
+
+        // SkipLastRowid is honored at Commit; mutation still records the rowid for Column/RowId.
+        if ((flags & (VdbeInsertFlags.SkipStatementChangeCount | VdbeInsertFlags.SkipAllChangeCounts)) == 0)
+            RowsAffected = checked(RowsAffected + 1);
+    }
 
     private void EnsureCursorPositioned(Cursor cursor)
     {
-            if (IsCursorPositioned(cursor))
+        if (IsCursorPositioned(cursor))
             return;
 
-            throw new InvalidOperationException(
-                $"Cursor {cursor.Index} requires a prior seek before this write (VdbeInsertFlags.RequireSeek).");
-        }
+        throw new InvalidOperationException(
+            $"Cursor {cursor.Index} requires a prior seek before this write (VdbeInsertFlags.RequireSeek).");
+    }
 
-        private bool IsCursorPositioned(Cursor cursor)
-        {
-            if (_materializedRows[cursor.Index] is not null)
-                return true;
+    private bool IsCursorPositioned(Cursor cursor)
+    {
+        if (_materializedRows[cursor.Index] is not null)
+            return true;
 
-            if (_joinCursorStates[cursor.Index] is { CurrentRow: not null })
-                return true;
+        if (_joinCursorStates[cursor.Index] is { CurrentRow: not null })
+            return true;
 
-            var position = _cursorPositions[cursor.Index];
-            return position >= 0 && position < CursorRowCount(cursor);
-        }
+        var position = _cursorPositions[cursor.Index];
+        return position >= 0 && position < CursorRowCount(cursor);
+    }
 
     private SqlValue[] CurrentCursorRow(Cursor cursor)
     {
