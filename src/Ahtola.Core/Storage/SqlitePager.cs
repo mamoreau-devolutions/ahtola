@@ -349,57 +349,66 @@ public sealed class SqlitePager : IDisposable
         SqlitePagerLockManager? lockManager = null,
         TimeSpan? busyTimeout = null,
         AhtolaEncryptionOptions? encryption = null,
-        int pageCacheCapacity = DefaultPageCacheCapacity)
-    {
-        ArgumentNullException.ThrowIfNull(fileSystem);
-        ArgumentException.ThrowIfNullOrEmpty(databasePath);
-        ArgumentException.ThrowIfNullOrEmpty(walPath);
-        ArgumentNullException.ThrowIfNull(walHeader);
-        ValidateBusyTimeout(busyTimeout, nameof(busyTimeout));
-        ValidatePageCacheCapacity(pageCacheCapacity, nameof(pageCacheCapacity));
-        encryption ??= GetFileSystemEncryption(fileSystem);
-        var effectiveDatabaseHeader = databaseHeader ?? SqliteDatabaseHeader.CreateDefault();
-        if (effectiveDatabaseHeader.PageSize != walHeader.PageSize)
-            throw new InvalidOperationException("SQLite database and WAL page sizes must match.");
-        if (!IsWalCompatibleFormat(effectiveDatabaseHeader.WriteVersion)
-            || !IsWalCompatibleFormat(effectiveDatabaseHeader.ReadVersion))
+            int pageCacheCapacity = DefaultPageCacheCapacity,
+            IPageCodec? pageCodec = null)
         {
-            throw new InvalidOperationException("A SQLite WAL overlay requires WAL/MVCC read and write format versions.");
-        }
+            ArgumentNullException.ThrowIfNull(fileSystem);
+            ArgumentException.ThrowIfNullOrEmpty(databasePath);
+            ArgumentException.ThrowIfNullOrEmpty(walPath);
+            ArgumentNullException.ThrowIfNull(walHeader);
+            ValidateBusyTimeout(busyTimeout, nameof(busyTimeout));
+            ValidatePageCacheCapacity(pageCacheCapacity, nameof(pageCacheCapacity));
+            encryption ??= GetFileSystemEncryption(fileSystem);
+            pageCodec ??= GetFileSystemPageCodec(fileSystem);
+            PageCodecSupport.RejectCombinedTransforms(encryption, pageCodec);
+            var effectiveDatabaseHeader = databaseHeader ?? SqliteDatabaseHeader.CreateDefault();
+            if (effectiveDatabaseHeader.PageSize != walHeader.PageSize)
+                throw new InvalidOperationException("SQLite database and WAL page sizes must match.");
+            if (!IsWalCompatibleFormat(effectiveDatabaseHeader.WriteVersion)
+                || !IsWalCompatibleFormat(effectiveDatabaseHeader.ReadVersion))
+            {
+                throw new InvalidOperationException("A SQLite WAL overlay requires WAL/MVCC read and write format versions.");
+            }
 
-        var configuredBusyTimeout = busyTimeout ?? TimeSpan.Zero;
-        var effectiveLockManager = lockManager ?? SqlitePagerLockRegistry.Get(fileSystem, databasePath, walPath);
-        var storageFileSystem = CreateStorageFileSystem(fileSystem);
-        var lockStopwatch = configuredBusyTimeout == Timeout.InfiniteTimeSpan
-            ? null
-            : Stopwatch.StartNew();
-        var clientOwnership = SqliteManagedFileOwnershipRegistry.Acquire(
-            fileSystem,
-            databasePath,
-            createNew: true,
-            readOnly: false,
-            configuredBusyTimeout);
-        SqlitePageStore? pageStore = null;
-        SqliteWalFile? wal = null;
-        var databaseCreated = clientOwnership is not null;
-        var walCreated = false;
-        try
-        {
-            using var createLock = EnterLockWithinBudget(
-                effectiveLockManager,
-                SqlitePagerLockOperation.Checkpoint,
-                configuredBusyTimeout,
-                lockStopwatch,
-                pagerReadOnly: false);
-            pageStore = SqlitePageStore.Create(
-                storageFileSystem,
+            var configuredBusyTimeout = busyTimeout ?? TimeSpan.Zero;
+            var effectiveLockManager = lockManager ?? SqlitePagerLockRegistry.Get(fileSystem, databasePath, walPath);
+            var storageFileSystem = CreateStorageFileSystem(fileSystem);
+            var lockStopwatch = configuredBusyTimeout == Timeout.InfiniteTimeSpan
+                ? null
+                : Stopwatch.StartNew();
+            var clientOwnership = SqliteManagedFileOwnershipRegistry.Acquire(
+                fileSystem,
                 databasePath,
-                effectiveDatabaseHeader,
-                overwrite: clientOwnership is not null,
-                encryption: encryption);
-            databaseCreated = true;
-            wal = SqliteWalFile.Create(storageFileSystem, walPath, walHeader, encryption);
-            walCreated = true;
+                createNew: true,
+                readOnly: false,
+                configuredBusyTimeout);
+            SqlitePageStore? pageStore = null;
+            SqliteWalFile? wal = null;
+            var databaseCreated = clientOwnership is not null;
+            var walCreated = false;
+            try
+            {
+                using var createLock = EnterLockWithinBudget(
+                    effectiveLockManager,
+                    SqlitePagerLockOperation.Checkpoint,
+                    configuredBusyTimeout,
+                    lockStopwatch,
+                    pagerReadOnly: false);
+                pageStore = SqlitePageStore.Create(
+                    storageFileSystem,
+                    databasePath,
+                    effectiveDatabaseHeader,
+                    overwrite: clientOwnership is not null,
+                    encryption: encryption,
+                    pageCodec: pageCodec);
+                databaseCreated = true;
+                wal = SqliteWalFile.Create(
+                    storageFileSystem,
+                    walPath,
+                    walHeader,
+                    encryption,
+                    pageCodec);
+                walCreated = true;
 
             var pager = new SqlitePager(
                 storageFileSystem,
@@ -474,18 +483,23 @@ public sealed class SqlitePager : IDisposable
         TimeSpan? busyTimeout = null,
         AhtolaEncryptionOptions? encryption = null,
         int pageCacheCapacity = DefaultPageCacheCapacity,
-        bool foreignReadOnly = false)
-    {
-        ArgumentNullException.ThrowIfNull(fileSystem);
-        ArgumentException.ThrowIfNullOrEmpty(databasePath);
-        ArgumentException.ThrowIfNullOrEmpty(walPath);
-        ValidateBusyTimeout(busyTimeout, nameof(busyTimeout));
-        ValidatePageCacheCapacity(pageCacheCapacity, nameof(pageCacheCapacity));
-        if (foreignReadOnly && !readOnly)
-            throw new ArgumentException("A foreign open is always read-only.", nameof(foreignReadOnly));
-        if (foreignReadOnly && encryption is not null)
-            throw new ArgumentException("A foreign open cannot combine with managed encryption.", nameof(foreignReadOnly));
-        encryption ??= GetFileSystemEncryption(fileSystem);
+            bool foreignReadOnly = false,
+            IPageCodec? pageCodec = null)
+        {
+            ArgumentNullException.ThrowIfNull(fileSystem);
+            ArgumentException.ThrowIfNullOrEmpty(databasePath);
+            ArgumentException.ThrowIfNullOrEmpty(walPath);
+            ValidateBusyTimeout(busyTimeout, nameof(busyTimeout));
+            ValidatePageCacheCapacity(pageCacheCapacity, nameof(pageCacheCapacity));
+            if (foreignReadOnly && !readOnly)
+                throw new ArgumentException("A foreign open is always read-only.", nameof(foreignReadOnly));
+            if (foreignReadOnly && encryption is not null)
+                throw new ArgumentException("A foreign open cannot combine with managed encryption.", nameof(foreignReadOnly));
+            if (foreignReadOnly && pageCodec is not null)
+                throw new ArgumentException("A foreign open cannot combine with a page codec.", nameof(foreignReadOnly));
+            encryption ??= GetFileSystemEncryption(fileSystem);
+            pageCodec ??= GetFileSystemPageCodec(fileSystem);
+            PageCodecSupport.RejectCombinedTransforms(encryption, pageCodec);
 
         var configuredBusyTimeout = busyTimeout ?? TimeSpan.Zero;
         var effectiveLockManager = lockManager
@@ -525,59 +539,66 @@ public sealed class SqlitePager : IDisposable
                 databasePath,
                 databasePath + "-journal",
                 readOnly);
-            var pageStore = SqlitePageStore.OpenForPager(storageFileSystem, databasePath, readOnly, encryption);
-            try
-            {
-                var header = pageStore.Header;
-                if (header.WriteVersion != header.ReadVersion)
-                {
-                    throw new InvalidDataException(
-                        "SQLite database read and write format versions must match for managed storage.");
-                }
+            var pageStore = SqlitePageStore.OpenForPager(
+                            storageFileSystem,
+                            databasePath,
+                            readOnly,
+                            encryption,
+                            pageCodec);
+                        try
+                        {
+                            var header = pageStore.Header;
+                            if (header.WriteVersion != header.ReadVersion)
+                            {
+                                throw new InvalidDataException(
+                                    "SQLite database read and write format versions must match for managed storage.");
+                            }
 
-                var journalMode = header.WriteVersion switch
-                {
-                    SqliteFileFormatVersion.Legacy => SqliteJournalMode.Delete,
-                    SqliteFileFormatVersion.Wal => SqliteJournalMode.Wal,
-                    // Turso MVCC keeps a WAL open for page durability under header version 255.
-                    SqliteFileFormatVersion.Mvcc => SqliteJournalMode.Mvcc,
-                    _ => throw new InvalidDataException(
-                        $"Managed storage does not support SQLite file format version {header.WriteVersion}."),
-                };
-                SqliteWalFile? wal = null;
-                try
-                {
-                    if (UsesWalStorage(journalMode))
-                    {
-                        if (storageFileSystem.FileExists(walPath))
-                        {
-                            // Stock SQLite often leaves a zero-length -wal while a
-                            // connection is live (post-checkpoint / reopen). Open it
-                            // as a truncated WAL so multi-engine attach succeeds; the
-                            // real on-disk header is adopted when the peer materializes
-                            // frames (see SqliteWalFile.ScanCore).
-                            var truncatedHeader = SqliteWalHeader.Create(
-                                pageStore.PageSize,
-                                unchecked((uint)Random.Shared.NextInt64()),
-                                unchecked((uint)Random.Shared.NextInt64()));
-                            wal = SqliteWalFile.Open(
-                                storageFileSystem,
-                                walPath,
-                                readOnly,
-                                encryption,
-                                truncatedHeader);
-                        }
-                        else if (!readOnly)
-                        {
-                            wal = SqliteWalFile.Create(
-                                storageFileSystem,
-                                walPath,
-                                SqliteWalHeader.Create(
-                                    pageStore.PageSize,
-                                    unchecked((uint)Random.Shared.NextInt64()),
-                                    unchecked((uint)Random.Shared.NextInt64())),
-                                encryption);
-                        }
+                            var journalMode = header.WriteVersion switch
+                            {
+                                SqliteFileFormatVersion.Legacy => SqliteJournalMode.Delete,
+                                SqliteFileFormatVersion.Wal => SqliteJournalMode.Wal,
+                                // Turso MVCC keeps a WAL open for page durability under header version 255.
+                                SqliteFileFormatVersion.Mvcc => SqliteJournalMode.Mvcc,
+                                _ => throw new InvalidDataException(
+                                    $"Managed storage does not support SQLite file format version {header.WriteVersion}."),
+                            };
+                            SqliteWalFile? wal = null;
+                            try
+                            {
+                                if (UsesWalStorage(journalMode))
+                                {
+                                    if (storageFileSystem.FileExists(walPath))
+                                    {
+                                        // Stock SQLite often leaves a zero-length -wal while a
+                                        // connection is live (post-checkpoint / reopen). Open it
+                                        // as a truncated WAL so multi-engine attach succeeds; the
+                                        // real on-disk header is adopted when the peer materializes
+                                        // frames (see SqliteWalFile.ScanCore).
+                                        var truncatedHeader = SqliteWalHeader.Create(
+                                            pageStore.PageSize,
+                                            unchecked((uint)Random.Shared.NextInt64()),
+                                            unchecked((uint)Random.Shared.NextInt64()));
+                                        wal = SqliteWalFile.Open(
+                                            storageFileSystem,
+                                            walPath,
+                                            readOnly,
+                                            encryption,
+                                            truncatedHeader,
+                                            pageCodec);
+                                    }
+                                    else if (!readOnly)
+                                    {
+                                        wal = SqliteWalFile.Create(
+                                            storageFileSystem,
+                                            walPath,
+                                            SqliteWalHeader.Create(
+                                                pageStore.PageSize,
+                                                unchecked((uint)Random.Shared.NextInt64()),
+                                                unchecked((uint)Random.Shared.NextInt64())),
+                                            encryption,
+                                            pageCodec);
+                                    }
                     }
                     else if (!readOnly && storageFileSystem.FileExists(walPath))
                     {
@@ -1212,8 +1233,9 @@ public sealed class SqlitePager : IDisposable
                             _pageStore.PageSize,
                             unchecked((uint)Random.Shared.NextInt64()),
                             unchecked((uint)Random.Shared.NextInt64())),
-                        GetFileSystemEncryption(_fileSystem));
-                }
+                                            GetFileSystemEncryption(_fileSystem),
+                                            GetFileSystemPageCodec(_fileSystem));
+                                    }
 
                 SqliteRollbackJournal.Commit(
                     _fileSystem,
@@ -2342,20 +2364,21 @@ public sealed class SqlitePager : IDisposable
             _fileSystem,
             _walPath,
             readOnly: true,
-            GetFileSystemEncryption(_fileSystem));
-        if (currentWal.Header.Salt1 != _wal.Header.Salt1
-            || currentWal.Header.Salt2 != _wal.Header.Salt2)
-        {
-            if (_lockManager.UsesFileBackedWalLocks)
-            {
-                ReconcilePeerWalIncarnation();
-                return;
-            }
+                    GetFileSystemEncryption(_fileSystem),
+                    pageCodec: GetFileSystemPageCodec(_fileSystem));
+                if (currentWal.Header.Salt1 != _wal.Header.Salt1
+                    || currentWal.Header.Salt2 != _wal.Header.Salt2)
+                {
+                    if (_lockManager.UsesFileBackedWalLocks)
+                    {
+                        ReconcilePeerWalIncarnation();
+                        return;
+                    }
 
-            throw new InvalidDataException(
-                "SQLite WAL storage changed while this pager was open; dispose and reopen it.");
-        }
-    }
+                    throw new InvalidDataException(
+                        "SQLite WAL storage changed while this pager was open; dispose and reopen it.");
+                }
+            }
 
     /// <summary>
     /// A foreign reader shares no lock state with the database owner, so the owner
@@ -2407,29 +2430,31 @@ public sealed class SqlitePager : IDisposable
                     _fileSystem,
                     _walPath,
                     readOnly: true,
-                    GetFileSystemEncryption(_fileSystem));
-                if (currentWal.Header.Salt1 == _wal.Header.Salt1
-                    && currentWal.Header.Salt2 == _wal.Header.Salt2)
-                {
-                    return;
-                }
-            }
+                                    GetFileSystemEncryption(_fileSystem),
+                                    pageCodec: GetFileSystemPageCodec(_fileSystem));
+                                if (currentWal.Header.Salt1 == _wal.Header.Salt1
+                                    && currentWal.Header.Salt2 == _wal.Header.Salt2)
+                                {
+                                    return;
+                                }
+                            }
 
-            _wal.Dispose();
-            _wal = null;
-        }
+                            _wal.Dispose();
+                            _wal = null;
+                        }
 
-        var truncatedHeader = SqliteWalHeader.Create(
-            _pageStore.PageSize,
-            unchecked((uint)Random.Shared.NextInt64()),
-            unchecked((uint)Random.Shared.NextInt64()));
-        _wal = SqliteWalFile.Open(
-            _fileSystem,
-            _walPath,
-            readOnly: IsReadOnly,
-            GetFileSystemEncryption(_fileSystem),
-            truncatedHeader);
-    }
+                        var truncatedHeader = SqliteWalHeader.Create(
+                            _pageStore.PageSize,
+                            unchecked((uint)Random.Shared.NextInt64()),
+                            unchecked((uint)Random.Shared.NextInt64()));
+                        _wal = SqliteWalFile.Open(
+                            _fileSystem,
+                            _walPath,
+                            readOnly: IsReadOnly,
+                            GetFileSystemEncryption(_fileSystem),
+                            truncatedHeader,
+                            GetFileSystemPageCodec(_fileSystem));
+                    }
 
     private void RecoverUncommittedTailUnderWriterLock(SqlitePagerLockLease writerLock)
     {
@@ -2563,9 +2588,11 @@ public sealed class SqlitePager : IDisposable
         {
             AhtolaEncryptionFileSystem encrypted when encrypted.Inner is PhysicalFileSystem physicalFileSystem
                 => encrypted.WithInner(new SqlitePagerPhysicalFileSystem(physicalFileSystem)),
-            PhysicalFileSystem physicalFileSystem => new SqlitePagerPhysicalFileSystem(physicalFileSystem),
-            _ => fileSystem,
-        };
+                AhtolaPageCodecFileSystem codec when codec.Inner is PhysicalFileSystem physicalFileSystem
+                    => codec.WithInner(new SqlitePagerPhysicalFileSystem(physicalFileSystem)),
+                PhysicalFileSystem physicalFileSystem => new SqlitePagerPhysicalFileSystem(physicalFileSystem),
+                _ => fileSystem,
+            };
 
     private static void TryDeleteCreatedArtifact(IFileSystem fileSystem, string path)
     {
@@ -2580,6 +2607,9 @@ public sealed class SqlitePager : IDisposable
 
     private static AhtolaEncryptionOptions? GetFileSystemEncryption(IFileSystem fileSystem)
         => fileSystem is AhtolaEncryptionFileSystem encrypted ? encrypted.Encryption : null;
+
+        private static IPageCodec? GetFileSystemPageCodec(IFileSystem fileSystem)
+            => fileSystem is AhtolaPageCodecFileSystem codec ? codec.PageCodec : null;
 
     private static SqliteWalRecoveryInfo CreateEmptyRecoveryInfo()
         => new(

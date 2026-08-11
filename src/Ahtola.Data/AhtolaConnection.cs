@@ -18,6 +18,8 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
     private AhtolaReplicaOptions? _replicaOptions;
     private HttpMessageHandler? _ownedReplicaHttpHandler;
     private AhtolaEncryptionFileSystem? _managedEncryptionFileSystem;
+    private AhtolaPageCodecFileSystem? _managedPageCodecFileSystem;
+    private IPageCodec? _pageCodec;
     private bool _disposed;
     private bool _readUncommitted;
     private bool _managedSharedMemory;
@@ -57,6 +59,24 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
         => AhtolaConnectionCapabilities.ForAhtola(_connectionOptions);
 
     public override bool CanCreateBatch => Capabilities.CanCreateBatch;
+
+    /// <summary>
+    /// Optional external page codec applied to managed local databases opened by
+    /// this connection. Must be set before <see cref="Open"/> and cannot be combined
+    /// with built-in encryption options. The codec is not owned by the connection.
+    /// </summary>
+    public IPageCodec? PageCodec
+    {
+        get => _pageCodec;
+        set
+        {
+            if (State == ConnectionState.Open)
+                throw new InvalidOperationException("PageCodec cannot be set while the connection is open.");
+            if (value is not null)
+                PageCodecId.ValidateNonZero(value.CodecId);
+            _pageCodec = value;
+        }
+    }
 
     protected override DbProviderFactory DbProviderFactory => AhtolaFactory.Instance;
 
@@ -156,6 +176,7 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
             var managedDatabase = _managedDatabase;
             var managedPoolLease = _managedPoolLease;
             var managedEncryptionFileSystem = _managedEncryptionFileSystem;
+            var managedPageCodecFileSystem = _managedPageCodecFileSystem;
             var reusable = false;
             try
             {
@@ -171,6 +192,7 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
                 _managedDatabase = null;
                 _managedPoolLease = null;
                 _managedEncryptionFileSystem = null;
+                _managedPageCodecFileSystem = null;
                 try
                 {
                     nativeDatabase?.Dispose();
@@ -187,6 +209,7 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
                     finally
                     {
                         managedEncryptionFileSystem?.Dispose();
+                        managedPageCodecFileSystem?.Dispose();
                         _readUncommitted = false;
                         _managedSharedMemory = false;
                         _managedReadOnly = false;
@@ -878,6 +901,7 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
         }
         else if (_connectionOptions.Pooling
             && options.Encryption is null
+            && PageCodec is null
             && !options.ForeignReadOnly
             && !options.DataSource.Equals(":memory:", StringComparison.Ordinal))
         {
@@ -888,7 +912,7 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
             _managedDatabase = _managedPoolLease.Database;
             _managedPoolKey = poolKey;
         }
-        else if (options.Encryption is null && !options.ReadOnly)
+        else if (options.Encryption is null && PageCodec is null && !options.ReadOnly)
         {
             var managedDatabase = ManagedDatabaseAdapter.Open(options.DataSource);
             try
@@ -902,10 +926,16 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
                 throw;
             }
         }
-
         else
         {
+            if (options.Encryption is not null && PageCodec is not null)
+            {
+                throw new InvalidOperationException(
+                    "Built-in encryption cannot be combined with an external page codec.");
+            }
+
             AhtolaEncryptionFileSystem? managedEncryptionFileSystem = null;
+            AhtolaPageCodecFileSystem? managedPageCodecFileSystem = null;
             IManagedDatabaseAdapter? managedDatabase = null;
             try
             {
@@ -916,6 +946,13 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
                         PhysicalFileSystem.Instance,
                         options.Encryption);
                     fileSystem = managedEncryptionFileSystem;
+                }
+                else if (PageCodec is not null)
+                {
+                    managedPageCodecFileSystem = new AhtolaPageCodecFileSystem(
+                        PhysicalFileSystem.Instance,
+                        PageCodec);
+                    fileSystem = managedPageCodecFileSystem;
                 }
 
                 managedDatabase = ManagedDatabaseAdapter.OpenFile(
@@ -930,6 +967,8 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
                     managedDatabase = null;
                     _managedEncryptionFileSystem = managedEncryptionFileSystem;
                     managedEncryptionFileSystem = null;
+                    _managedPageCodecFileSystem = managedPageCodecFileSystem;
+                    managedPageCodecFileSystem = null;
                 }
                 catch
                 {
@@ -940,6 +979,7 @@ public class AhtolaConnection : DbConnection, ILocalReaderConnection
             {
                 managedDatabase?.Dispose();
                 managedEncryptionFileSystem?.Dispose();
+                managedPageCodecFileSystem?.Dispose();
             }
         }
 
