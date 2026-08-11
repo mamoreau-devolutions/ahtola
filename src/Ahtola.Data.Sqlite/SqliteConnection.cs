@@ -29,6 +29,8 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
     private string? _dataSource;
     private bool _readOnly;
     private AhtolaEncryptionFileSystem? _managedEncryptionFileSystem;
+    private AhtolaPageCodecFileSystem? _managedPageCodecFileSystem;
+    private IPageCodec? _pageCodec;
     private bool _recursiveTriggers;
     private bool _readUncommitted;
     private bool _managedSharedMemory;
@@ -88,6 +90,24 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
     public virtual dynamic? Handle => null;
 
     public SqliteTransaction? Transaction { get; internal set; }
+
+    /// <summary>
+    /// Optional external page codec for managed local databases. Set before
+    /// <see cref="Open"/>; cannot be combined with built-in encryption options.
+    /// The codec is not owned by the connection.
+    /// </summary>
+    public IPageCodec? PageCodec
+    {
+        get => _pageCodec;
+        set
+        {
+            if (State == ConnectionState.Open)
+                throw new InvalidOperationException("PageCodec cannot be set while the connection is open.");
+            if (value is not null)
+                PageCodecId.ValidateNonZero(value.CodecId);
+            _pageCodec = value;
+        }
+    }
 
     internal bool IsSharedCache => _connectionOptions.Cache == SqliteCacheMode.Shared;
 
@@ -164,19 +184,26 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
                     var poolKey = ManagedConnectionPoolKey.Create(filename, readOnly);
                     _managedPoolLease = ManagedConnectionPool.Rent(
                         poolKey,
-                        () => OpenManagedDatabase(filename, readOnly, encryption: null, out _));
-                    _managedDatabase = _managedPoolLease.Database;
-                }
-                else
-                {
-                    _managedDatabase = OpenManagedDatabase(
-                        filename,
-                        readOnly,
-                        managedEncryption,
-                        out var managedEncryptionFileSystem,
-                        _connectionOptions.ForeignReadOnly);
-                    _managedEncryptionFileSystem = managedEncryptionFileSystem;
-                }
+                                        () => OpenManagedDatabase(
+                                            filename,
+                                            readOnly,
+                                            encryption: null,
+                                            out _,
+                                            out _));
+                                    _managedDatabase = _managedPoolLease.Database;
+                                }
+                                else
+                                {
+                                    _managedDatabase = OpenManagedDatabase(
+                                        filename,
+                                        readOnly,
+                                        managedEncryption,
+                                        out var managedEncryptionFileSystem,
+                                        out var managedPageCodecFileSystem,
+                                        _connectionOptions.ForeignReadOnly);
+                                    _managedEncryptionFileSystem = managedEncryptionFileSystem;
+                                    _managedPageCodecFileSystem = managedPageCodecFileSystem;
+                                }
             }
             else
             {
@@ -714,19 +741,27 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
             ReleaseSharedMemoryFile(sharedMemoryPath);
     }
 
-    private static IManagedDatabaseAdapter OpenManagedDatabase(
+    private IManagedDatabaseAdapter OpenManagedDatabase(
         string filename,
         bool readOnly,
         AhtolaEncryptionOptions? encryption,
         out AhtolaEncryptionFileSystem? managedEncryptionFileSystem,
+        out AhtolaPageCodecFileSystem? managedPageCodecFileSystem,
         bool foreignReadOnly = false)
     {
         managedEncryptionFileSystem = null;
+        managedPageCodecFileSystem = null;
         IManagedDatabaseAdapter? database = null;
 
         try
         {
-            if (encryption is null && !readOnly)
+            if (encryption is not null && PageCodec is not null)
+            {
+                throw new InvalidOperationException(
+                    "Built-in encryption cannot be combined with an external page codec.");
+            }
+
+            if (encryption is null && PageCodec is null && !readOnly)
             {
                 database = ManagedDatabaseAdapter.Open(filename);
                 _ = database.Connect();
@@ -740,6 +775,13 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
                     PhysicalFileSystem.Instance,
                     encryption);
                 fileSystem = managedEncryptionFileSystem;
+            }
+            else if (PageCodec is not null)
+            {
+                managedPageCodecFileSystem = new AhtolaPageCodecFileSystem(
+                    PhysicalFileSystem.Instance,
+                    PageCodec);
+                fileSystem = managedPageCodecFileSystem;
             }
 
             database = ManagedDatabaseAdapter.OpenFile(
@@ -755,6 +797,8 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
             database?.Dispose();
             managedEncryptionFileSystem?.Dispose();
             managedEncryptionFileSystem = null;
+            managedPageCodecFileSystem?.Dispose();
+            managedPageCodecFileSystem = null;
             throw;
         }
     }
@@ -765,10 +809,12 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
         var managedDatabase = _managedDatabase;
         var managedPoolLease = _managedPoolLease;
         var managedEncryptionFileSystem = _managedEncryptionFileSystem;
+        var managedPageCodecFileSystem = _managedPageCodecFileSystem;
         _database = null;
         _managedDatabase = null;
         _managedPoolLease = null;
         _managedEncryptionFileSystem = null;
+        _managedPageCodecFileSystem = null;
         try
         {
             database?.Dispose();
@@ -785,6 +831,7 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
             finally
             {
                 managedEncryptionFileSystem?.Dispose();
+                managedPageCodecFileSystem?.Dispose();
             }
         }
     }
@@ -953,22 +1000,24 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
     private bool CanUseManagedPooling(string filename, AhtolaEncryptionOptions? encryption)
         => _connectionOptions.Pooling
            && encryption is null
-           && !HasManagedCallbacks
-           && !_connectionOptions.ForeignReadOnly
-           && _connectionOptions.Mode != SqliteOpenMode.Memory
-           && !filename.Equals(":memory:", StringComparison.Ordinal);
+               && PageCodec is null
+               && !HasManagedCallbacks
+               && !_connectionOptions.ForeignReadOnly
+               && _connectionOptions.Mode != SqliteOpenMode.Memory
+               && !filename.Equals(":memory:", StringComparison.Ordinal);
 
-    private bool TryGetManagedPoolKey(out ManagedConnectionPoolKey key)
-    {
-        key = default;
-        if (_connectionOptions.EffectiveLocalProvider != AhtolaLocalProvider.Managed
-            || !_connectionOptions.Pooling
-            || _connectionOptions.HasEncryptionOptions
-            || _connectionOptions.Mode == SqliteOpenMode.Memory
-            || _connectionOptions.Cache == SqliteCacheMode.Shared)
+        private bool TryGetManagedPoolKey(out ManagedConnectionPoolKey key)
         {
-            return false;
-        }
+            key = default;
+            if (_connectionOptions.EffectiveLocalProvider != AhtolaLocalProvider.Managed
+                || !_connectionOptions.Pooling
+                || _connectionOptions.HasEncryptionOptions
+                || PageCodec is not null
+                || _connectionOptions.Mode == SqliteOpenMode.Memory
+                || _connectionOptions.Cache == SqliteCacheMode.Shared)
+            {
+                return false;
+            }
 
         var filename = NormalizeDataSource(_connectionOptions, validateFileExists: false);
         if (filename.Equals(":memory:", StringComparison.Ordinal))

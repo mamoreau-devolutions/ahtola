@@ -73,7 +73,12 @@ public sealed class AhtolaEncryptionFileSystem : IFileSystem, IDisposable
         => new(inner, Encryption, ownsEncryption: false);
 
     internal static IFileSystem Unwrap(IFileSystem fileSystem)
-        => fileSystem is AhtolaEncryptionFileSystem encrypted ? encrypted._inner : fileSystem;
+            => fileSystem switch
+            {
+                AhtolaEncryptionFileSystem encrypted => Unwrap(encrypted._inner),
+                AhtolaPageCodecFileSystem codec => Unwrap(codec.Inner),
+                _ => fileSystem,
+            };
 
     ~AhtolaEncryptionFileSystem() => Dispose();
 }

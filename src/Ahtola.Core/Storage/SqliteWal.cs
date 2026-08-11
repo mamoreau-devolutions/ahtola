@@ -412,23 +412,26 @@ public sealed class SqliteWalFile : IDisposable
     private const uint PagerCheckpointedRecoverySequence = 0xA5C3_5A3C;
 
     private readonly IFile _file;
-    private readonly AhtolaPageEncryption? _encryption;
-    private SqliteWalHeader _header;
-    private bool _hasCheckpointedRecoveryMarker;
-    private bool _truncatedAfterCheckpoint;
-    private bool _disposed;
+        private readonly IPageCodec? _pageCodec;
+        private readonly bool _ownsPageCodec;
+        private SqliteWalHeader _header;
+        private bool _hasCheckpointedRecoveryMarker;
+        private bool _truncatedAfterCheckpoint;
+        private bool _disposed;
 
-    private SqliteWalFile(
-        IFile file,
-        SqliteWalHeader header,
-        AhtolaPageEncryption? encryption,
-        bool hasCheckpointedRecoveryMarker = false)
-    {
-        _file = file;
-        _header = header;
-        _encryption = encryption;
-        _hasCheckpointedRecoveryMarker = hasCheckpointedRecoveryMarker;
-    }
+        private SqliteWalFile(
+            IFile file,
+            SqliteWalHeader header,
+            IPageCodec? pageCodec,
+            bool ownsPageCodec,
+            bool hasCheckpointedRecoveryMarker = false)
+        {
+            _file = file;
+            _header = header;
+            _pageCodec = pageCodec;
+            _ownsPageCodec = ownsPageCodec;
+            _hasCheckpointedRecoveryMarker = hasCheckpointedRecoveryMarker;
+        }
 
     /// <summary>The validated WAL header.</summary>
     public SqliteWalHeader Header
@@ -488,52 +491,53 @@ public sealed class SqliteWalFile : IDisposable
         IFileSystem fileSystem,
         string path,
         SqliteWalHeader header,
-        AhtolaEncryptionOptions? encryption = null)
-    {
-        ArgumentNullException.ThrowIfNull(fileSystem);
-        ArgumentException.ThrowIfNullOrEmpty(path);
-        ArgumentNullException.ThrowIfNull(header);
-
-        var pageEncryption = encryption?.CreatePageEncryption(header.PageSize);
-        var file = fileSystem.OpenFile(path, FileOpenMode.CreateNew);
-        try
+            AhtolaEncryptionOptions? encryption = null,
+            IPageCodec? pageCodec = null)
         {
-            file.Write(0, header.ToArray());
-            if (file.Length != SqliteWalHeader.Size)
-                throw new InvalidDataException("Writing the SQLite WAL header produced an invalid file length.");
+            ArgumentNullException.ThrowIfNull(fileSystem);
+            ArgumentException.ThrowIfNullOrEmpty(path);
+            ArgumentNullException.ThrowIfNull(header);
 
-            file.FlushToDisk();
-            return new SqliteWalFile(file, header, pageEncryption);
+            var boundCodec = PageCodecSupport.Bind(encryption, pageCodec, header.PageSize, out var ownsCodec);
+            var file = fileSystem.OpenFile(path, FileOpenMode.CreateNew);
+            try
+            {
+                file.Write(0, header.ToArray());
+                if (file.Length != SqliteWalHeader.Size)
+                    throw new InvalidDataException("Writing the SQLite WAL header produced an invalid file length.");
+
+                file.FlushToDisk();
+                return new SqliteWalFile(file, header, boundCodec, ownsCodec);
+            }
+            catch
+            {
+                try
+                {
+                    file.Dispose();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    PageCodecSupport.DisposeOwned(boundCodec, ownsCodec);
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    fileSystem.DeleteFile(path);
+                }
+                catch
+                {
+                }
+
+                throw;
+            }
         }
-        catch
-        {
-            try
-            {
-                file.Dispose();
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                pageEncryption?.Dispose();
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                fileSystem.DeleteFile(path);
-            }
-            catch
-            {
-            }
-
-            throw;
-        }
-    }
 
     /// <summary>
     /// Opens an existing WAL after validating its header. A partial or corrupt
@@ -544,41 +548,48 @@ public sealed class SqliteWalFile : IDisposable
         string path,
         bool readOnly = false,
         AhtolaEncryptionOptions? encryption = null,
-        SqliteWalHeader? truncatedHeader = null)
-    {
-        ArgumentNullException.ThrowIfNull(fileSystem);
-        ArgumentException.ThrowIfNullOrEmpty(path);
-
-        var file = fileSystem.OpenFile(path, FileOpenMode.OpenExisting, readOnly);
-        AhtolaPageEncryption? pageEncryption = null;
-        try
+            SqliteWalHeader? truncatedHeader = null,
+            IPageCodec? pageCodec = null)
         {
-            if (file.Length == 0 && truncatedHeader is not null)
+            ArgumentNullException.ThrowIfNull(fileSystem);
+            ArgumentException.ThrowIfNullOrEmpty(path);
+            PageCodecSupport.RejectCombinedTransforms(encryption, pageCodec);
+
+            var file = fileSystem.OpenFile(path, FileOpenMode.OpenExisting, readOnly);
+            IPageCodec? boundCodec = null;
+            var ownsCodec = false;
+            try
             {
-                pageEncryption = encryption?.CreatePageEncryption(truncatedHeader.PageSize);
-                return new SqliteWalFile(file, truncatedHeader, pageEncryption)
+                if (file.Length == 0 && truncatedHeader is not null)
                 {
-                    _truncatedAfterCheckpoint = true,
-                };
+                    boundCodec = PageCodecSupport.Bind(
+                        encryption,
+                        pageCodec,
+                        truncatedHeader.PageSize,
+                        out ownsCodec);
+                    return new SqliteWalFile(file, truncatedHeader, boundCodec, ownsCodec)
+                    {
+                        _truncatedAfterCheckpoint = true,
+                    };
+                }
+                if (file.Length < SqliteWalHeader.Size)
+                    throw new InvalidDataException("File is too small to contain a SQLite WAL header.");
+
+                Span<byte> headerBytes = stackalloc byte[SqliteWalHeader.Size];
+                if (file.Read(0, headerBytes) != headerBytes.Length)
+                    throw new InvalidDataException("Failed to read the complete SQLite WAL header.");
+
+                var header = SqliteWalHeader.Parse(headerBytes);
+                boundCodec = PageCodecSupport.Bind(encryption, pageCodec, header.PageSize, out ownsCodec);
+                return new SqliteWalFile(file, header, boundCodec, ownsCodec);
             }
-            if (file.Length < SqliteWalHeader.Size)
-                throw new InvalidDataException("File is too small to contain a SQLite WAL header.");
-
-            Span<byte> headerBytes = stackalloc byte[SqliteWalHeader.Size];
-            if (file.Read(0, headerBytes) != headerBytes.Length)
-                throw new InvalidDataException("Failed to read the complete SQLite WAL header.");
-
-            var header = SqliteWalHeader.Parse(headerBytes);
-            pageEncryption = encryption?.CreatePageEncryption(header.PageSize);
-            return new SqliteWalFile(file, header, pageEncryption);
+            catch
+            {
+                file.Dispose();
+                PageCodecSupport.DisposeOwned(boundCodec, ownsCodec);
+                throw;
+            }
         }
-        catch
-        {
-            file.Dispose();
-            pageEncryption?.Dispose();
-            throw;
-        }
-    }
 
     /// <summary>
     /// Appends a checksummed page frame. A non-zero
@@ -619,10 +630,15 @@ public sealed class SqliteWalFile : IDisposable
             0,
             0);
         frameHeader.WriteTo(frame.AsSpan(0, SqliteWalFrameHeader.Size));
-        if (_encryption is null)
+                if (_pageCodec is null)
             pageData.CopyTo(frame.AsSpan(SqliteWalFrameHeader.Size));
         else
-            _encryption.EncryptPage(pageData, pageNumber).CopyTo(frame, SqliteWalFrameHeader.Size);
+                    PageCodecSupport.Encode(
+                        _pageCodec,
+                        PageLocation.Wal,
+                        pageNumber,
+                        pageData,
+                        frame.AsSpan(SqliteWalFrameHeader.Size));
 
         var (First, Second) = SqliteWalChecksum.Calculate(
             frame.AsSpan(0, 8),
@@ -668,10 +684,23 @@ public sealed class SqliteWalFile : IDisposable
             if (currentFrameNumber == frameNumber)
             {
                 var onDiskPageData = frame.AsSpan(SqliteWalFrameHeader.Size);
-                var pageData = _encryption is null
-                    ? onDiskPageData.ToArray()
-                    : _encryption.DecryptPage(onDiskPageData, frameHeader.PageNumber);
-                return new SqliteWalFrame(frameHeader, pageData);
+                                byte[] pageData;
+                                if (_pageCodec is null)
+                                {
+                                    pageData = onDiskPageData.ToArray();
+                                }
+                                else
+                                {
+                                    pageData = new byte[onDiskPageData.Length];
+                                    PageCodecSupport.Decode(
+                                        _pageCodec,
+                                        PageLocation.Wal,
+                                        frameHeader.PageNumber,
+                                        onDiskPageData,
+                                        pageData);
+                                }
+
+                                return new SqliteWalFrame(frameHeader, pageData);
             }
 
             previousChecksum = checksum;
@@ -808,7 +837,7 @@ public sealed class SqliteWalFile : IDisposable
 
         _disposed = true;
         _file.Dispose();
-        _encryption?.Dispose();
+                PageCodecSupport.DisposeOwned(_pageCodec, _ownsPageCodec);
     }
 
     private ScanState ScanCore()

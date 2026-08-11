@@ -85,61 +85,71 @@ internal sealed class EmbeddedFileStore : IDisposable
         bool readOnly = false,
         int? initialPageSize = null,
         SqliteTextEncoding? initialTextEncoding = null,
-        bool foreignReadOnly = false)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(path);
-        ArgumentNullException.ThrowIfNull(fileSystem);
-
-        var walPath = path + "-wal";
-        var databaseExists = fileSystem.FileExists(path);
-        var walExists = fileSystem.FileExists(walPath);
-        if (initialPageSize is { } requestedPageSize)
-            _ = SqlitePageSize.Encode(requestedPageSize);
-
-        SqlitePager pager;
-        if (!databaseExists)
+            bool foreignReadOnly = false,
+            IPageCodec? pageCodec = null)
         {
-            if (readOnly)
-            {
-                throw new EmbeddedSqlException(
-                    $"Cannot open managed database '{path}' read-only because its database file does not exist.");
-            }
+            ArgumentException.ThrowIfNullOrEmpty(path);
+            ArgumentNullException.ThrowIfNull(fileSystem);
+            PageCodecSupport.RejectCombinedTransforms(encryption, pageCodec);
 
-            // The main database file is absent. A lingering write-ahead log is
-            // orphaned — its frames reference a database that was deleted (for
-            // example by EFCore's EnsureDeleted, which removes only the main
-            // file). Native SQLite discards the orphaned WAL and creates a
-            // fresh database; match that so delete/reopen cycles do not fault
-            // with "missing its main database file".
-            if (walExists)
-                fileSystem.DeleteFile(walPath);
+            var walPath = path + "-wal";
+            var databaseExists = fileSystem.FileExists(path);
+            var walExists = fileSystem.FileExists(walPath);
+            if (initialPageSize is { } requestedPageSize)
+                _ = SqlitePageSize.Encode(requestedPageSize);
 
-            var header = SqliteDatabaseHeader.CreateDefault() with
+            SqlitePager pager;
+            if (!databaseExists)
             {
-                PageSize = initialPageSize ?? SqlitePageSize.Default,
-                TextEncoding = initialTextEncoding ?? SqliteTextEncoding.Utf8,
-            };
-            var walHeader = SqliteWalHeader.Create(
-                header.PageSize,
-                unchecked((uint)Random.Shared.Next()),
-                unchecked((uint)Random.Shared.Next()));
-            pager = SqlitePager.Create(fileSystem, path, walPath, walHeader, header, encryption: encryption);
-        }
-        else
-        {
-            if (initialPageSize is not null || initialTextEncoding is not null)
-            {
-                throw new InvalidOperationException(
-                    "Initial page size and text encoding can be specified only when creating a database.");
+                if (readOnly)
+                {
+                    throw new EmbeddedSqlException(
+                        $"Cannot open managed database '{path}' read-only because its database file does not exist.");
+                }
+
+                // The main database file is absent. A lingering write-ahead log is
+                // orphaned — its frames reference a database that was deleted (for
+                // example by EFCore's EnsureDeleted, which removes only the main
+                // file). Native SQLite discards the orphaned WAL and creates a
+                // fresh database; match that so delete/reopen cycles do not fault
+                // with "missing its main database file".
+                if (walExists)
+                    fileSystem.DeleteFile(walPath);
+
+                var header = SqliteDatabaseHeader.CreateDefault() with
+                {
+                    PageSize = initialPageSize ?? SqlitePageSize.Default,
+                    TextEncoding = initialTextEncoding ?? SqliteTextEncoding.Utf8,
+                };
+                var walHeader = SqliteWalHeader.Create(
+                    header.PageSize,
+                    unchecked((uint)Random.Shared.Next()),
+                    unchecked((uint)Random.Shared.Next()));
+                pager = SqlitePager.Create(
+                    fileSystem,
+                    path,
+                    walPath,
+                    walHeader,
+                    header,
+                    encryption: encryption,
+                    pageCodec: pageCodec);
             }
-            pager = SqlitePager.Open(
-                fileSystem,
-                path,
-                walPath,
-                readOnly,
-                encryption: encryption,
-                foreignReadOnly: foreignReadOnly);
-        }
+            else
+            {
+                if (initialPageSize is not null || initialTextEncoding is not null)
+                {
+                    throw new InvalidOperationException(
+                        "Initial page size and text encoding can be specified only when creating a database.");
+                }
+                pager = SqlitePager.Open(
+                    fileSystem,
+                    path,
+                    walPath,
+                    readOnly,
+                    encryption: encryption,
+                    foreignReadOnly: foreignReadOnly,
+                    pageCodec: pageCodec);
+            }
 
         try
         {
