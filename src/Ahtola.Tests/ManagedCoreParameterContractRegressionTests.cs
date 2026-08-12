@@ -142,6 +142,52 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
+    public void ManagedAhtolaReaderReadsBlobGuidAndReportsInvalidStorageWithoutValue()
+    {
+        using var connection = new AhtolaConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE users(id GUID PRIMARY KEY);";
+            create.ExecuteNonQuery();
+        }
+
+        var id = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO users(id) VALUES ($id);";
+            var parameter = insert.CreateParameter();
+            parameter.ParameterName = "$id";
+            parameter.Value = id.ToByteArray();
+            insert.Parameters.Add(parameter);
+            insert.ExecuteNonQuery();
+        }
+
+        using (var select = connection.CreateCommand())
+        {
+            select.CommandText = "SELECT id FROM users;";
+            using var reader = select.ExecuteReader();
+            reader.Read().Should().BeTrue();
+            reader.GetGuid(0).Should().Be(id);
+        }
+
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO users(id) VALUES ('not-a-guid');";
+            insert.ExecuteNonQuery();
+        }
+
+        using var invalidSelect = connection.CreateCommand();
+        invalidSelect.CommandText = "SELECT id FROM users WHERE typeof(id) = 'text';";
+        using var invalidReader = invalidSelect.ExecuteReader();
+        invalidReader.Read().Should().BeTrue();
+        var exception = Assert.Throws<InvalidOperationException>(() => invalidReader.GetGuid(0))!;
+        exception.Message.Should().Be("Unable to parse GUID for column 'id' (ordinal 0, declared type 'GUID', storage TEXT).");
+        exception.Message.Should().NotContain("not-a-guid");
+    }
+
+    [Test]
     public void ManagedSqliteFacadeAdapterUpdatesGuidAndTextColumns()
     {
         using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
