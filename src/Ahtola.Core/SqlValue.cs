@@ -93,6 +93,16 @@ public readonly struct SqlValue : IEquatable<SqlValue>
             ? _blob.ToArray()
             : throw InvalidKind(SqlValueKind.Blob);
 
+        /// <summary>Returns the owned blob bytes without allocating a defensive copy.</summary>
+        /// <remarks>
+        /// Internal hot-path readers (record encode, comparisons) must not mutate the returned
+        /// span. Public callers keep <see cref="AsBlob"/> so exposed buffers stay snapshot-isolated.
+        /// </remarks>
+        internal ReadOnlySpan<byte> AsBlobSpan()
+            => Kind == SqlValueKind.Blob
+                ? _blob.Span
+                : throw InvalidKind(SqlValueKind.Blob);
+
     public bool Equals(SqlValue other)
     {
         if (Kind != other.Kind)

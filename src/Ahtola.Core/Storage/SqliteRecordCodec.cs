@@ -99,8 +99,8 @@ public static class SqliteRecordCodec
                 }
             case SqlValueKind.Blob:
                 {
-                    var bytes = value.AsBlob();
-                    body.AddRange(bytes.ToArray());
+                                var bytes = value.AsBlobSpan();
+                                body.AddRange(bytes);
                     return checked((ulong)bytes.Length * 2 + 12);
                 }
             default:
@@ -225,7 +225,7 @@ public static class SqliteRecordCodec
     {
         Span<byte> bytes = stackalloc byte[sizeof(long)];
         BinaryPrimitives.WriteInt64BigEndian(bytes, value);
-        body.AddRange(bytes.ToArray());
+            body.AddRange(bytes);
     }
 
     private static void WriteVarint(List<byte> destination, ulong value)
