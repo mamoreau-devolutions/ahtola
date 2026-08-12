@@ -1225,14 +1225,20 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
     private static ReaderValueKind GetValueKindFromTypeName(string typeName)
     {
         var normalized = StripTypeLength(typeName).ToUpperInvariant();
+        if (IsGuidType(normalized))
+            return ReaderValueKind.Blob;
         if (normalized.Contains("INT"))
             return ReaderValueKind.Integer;
         if (normalized.Contains("CHAR") || normalized.Contains("CLOB") || normalized.Contains("TEXT"))
             return ReaderValueKind.Text;
         if (normalized.Contains("REAL") || normalized.Contains("FLOA") || normalized.Contains("DOUB"))
             return ReaderValueKind.Real;
+        if (normalized.Length == 0 || normalized.Contains("BLOB"))
+            return ReaderValueKind.Blob;
 
-        return ReaderValueKind.Blob;
+        // Unknown declared types have NUMERIC affinity in SQLite. The provider surfaces them
+        // as text, matching GetClrTypeFromSqliteType and avoiding conflicting BLOB metadata.
+        return ReaderValueKind.Text;
     }
 
     [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]

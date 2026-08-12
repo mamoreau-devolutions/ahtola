@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.Common;
 using System.Reflection;
 using AwesomeAssertions;
 using Ahtola.Core;
@@ -89,6 +90,73 @@ public sealed class ManagedCoreParameterContractRegressionTests
 
         Assert.Throws<SqliteException>(() => command.ExecuteScalar())!
             .SqliteErrorCode.Should().Be(1);
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeBindsGuidValuesAsBlobs()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        var id = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+
+        using var inferredCommand = connection.CreateCommand();
+        inferredCommand.CommandText = "SELECT typeof($id), $id;";
+        inferredCommand.Parameters.AddWithValue("$id", id);
+        using var inferredReader = inferredCommand.ExecuteReader();
+        inferredReader.Read().Should().BeTrue();
+        inferredReader.GetString(0).Should().Be("blob");
+        inferredReader.GetFieldValue<byte[]>(1).Should().Equal(id.ToByteArray());
+
+        using var typedCommand = connection.CreateCommand();
+        typedCommand.CommandText = "SELECT typeof($id), $id;";
+        var parameter = typedCommand.Parameters.Add("$id", SqliteType.Text);
+        parameter.DbType = DbType.Guid;
+        parameter.Value = id;
+        using var typedReader = typedCommand.ExecuteReader();
+        typedReader.Read().Should().BeTrue();
+        typedReader.GetString(0).Should().Be("blob");
+        typedReader.GetFieldValue<byte[]>(1).Should().Equal(id.ToByteArray());
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeAdapterUpdatesGuidAndTextColumns()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE users(id GUID PRIMARY KEY, name STRING NOT NULL);";
+            create.ExecuteNonQuery();
+        }
+
+        using (var schemaCommand = connection.CreateCommand())
+        {
+            schemaCommand.CommandText = "SELECT id, name FROM users;";
+            using var schemaReader = schemaCommand.ExecuteReader();
+            var schema = schemaReader.GetSchemaTable()!;
+            schema.Rows[0][SchemaTableColumn.ProviderType].Should().Be((int)SqliteType.Blob);
+            schema.Rows[1][SchemaTableColumn.ProviderType].Should().Be((int)SqliteType.Text);
+        }
+
+        using var adapter = new Ahtola.AhtolaDataAdapter("SELECT id, name FROM users", connection);
+        using var builder = new Ahtola.AhtolaCommandBuilder(adapter);
+        var users = new DataTable();
+        adapter.Fill(users);
+        users.Columns["id"]!.DataType.Should().Be(typeof(Guid));
+        users.Columns["name"]!.DataType.Should().Be(typeof(string));
+
+        var id = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        users.Rows.Add(id, "dvls-admin");
+        adapter.Update(users).Should().Be(1);
+
+        using var verify = connection.CreateCommand();
+        verify.CommandText = "SELECT id, name FROM users;";
+        using var reader = verify.ExecuteReader();
+        reader.Read().Should().BeTrue();
+        reader.GetFieldValue<Guid>(0).Should().Be(id);
+        reader.GetString(1).Should().Be("dvls-admin");
     }
 
     [Test]

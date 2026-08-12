@@ -53,7 +53,7 @@ public class SqliteParameter : DbParameter
             _dbType = value;
             _sqliteType = value switch
             {
-                DbType.Binary => SqliteType.Blob,
+                DbType.Binary or DbType.Guid => SqliteType.Blob,
                 DbType.Byte or DbType.Boolean or DbType.Int16 or DbType.Int32 or DbType.Int64 or DbType.SByte
                     or DbType.UInt16 or DbType.UInt32 or DbType.UInt64 => SqliteType.Integer,
                 DbType.Double or DbType.Single => SqliteType.Real,
@@ -189,7 +189,7 @@ public class SqliteParameter : DbParameter
         return value switch
         {
             null or DBNull => SqliteType.Text,
-            byte[] or Memory<byte> or ReadOnlyMemory<byte> => SqliteType.Blob,
+            byte[] or Memory<byte> or ReadOnlyMemory<byte> or Guid => SqliteType.Blob,
             Enum => SqliteType.Integer,
             float or double => SqliteType.Real,
             bool or byte or sbyte or short or ushort or int or uint or long or ulong => SqliteType.Integer,
