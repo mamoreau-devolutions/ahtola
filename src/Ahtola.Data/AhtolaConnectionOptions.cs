@@ -1,4 +1,5 @@
 using System.Globalization;
+using Ahtola.Core.Storage;
 using ManagedEncryptionOptions = Ahtola.Core.Storage.AhtolaEncryptionOptions;
 
 namespace Ahtola;
@@ -126,8 +127,6 @@ public class AhtolaConnectionOptions
         if (mode is ManagedLocalOpenMode.ReadOnly or ManagedLocalOpenMode.ReadWrite && !File.Exists(dataSource))
             throw new InvalidOperationException($"Mode={Mode} requires an existing database file when Local Provider=Managed.");
 
-        if (!string.IsNullOrWhiteSpace(_builder.GetOption("Password")))
-            throw new NotSupportedException("Password is not supported when Local Provider=Managed because the managed engine does not provide encryption.");
         if (!string.IsNullOrWhiteSpace(_builder.GetOption("Vfs")))
         {
             throw new NotSupportedException(
@@ -209,10 +208,11 @@ public class AhtolaConnectionOptions
         if (mode == ManagedLocalOpenMode.Memory
             || dataSource.Equals(":memory:", StringComparison.Ordinal)
             || GetEncryptionCipher().HasValue
-            || _builder.GetOption("Encryption Key") is not null)
-        {
-            return false;
-        }
+                    || _builder.GetOption("Encryption Key") is not null
+                    || !string.IsNullOrWhiteSpace(_builder.GetOption("Password")))
+                {
+                    return false;
+                }
 
         key = ManagedConnectionPoolKey.Create(
             dataSource,
@@ -291,40 +291,89 @@ public class AhtolaConnectionOptions
         ManagedLocalOpenMode mode,
         string dataSource)
     {
-        var cipher = _builder.GetOption("Encryption Cipher");
-        var key = _builder.GetOption("Encryption Key");
-        if (string.IsNullOrWhiteSpace(cipher))
-        {
-            if (key is not null)
-                throw new NotSupportedException("Encryption is not available for the managed engine.");
+            var password = _builder.GetOption("Password");
+            var hasPassword = !string.IsNullOrEmpty(password);
+                var passwordScheme = _builder.GetOption("Password Scheme");
+                var cipher = _builder.GetOption("Encryption Cipher");
+                var key = _builder.GetOption("Encryption Key");
+                var hasKey = !string.IsNullOrWhiteSpace(key);
 
-            return null;
-        }
+                if (!hasPassword && !string.IsNullOrWhiteSpace(passwordScheme))
+                {
+                    throw new InvalidOperationException(
+                        "Password Scheme requires Password=; it only selects passphrase key derivation.");
+                }
 
-        if (string.IsNullOrWhiteSpace(key))
-            throw new InvalidOperationException("Encryption Key is required when Encryption Cipher is specified.");
-        if (mode == ManagedLocalOpenMode.Memory || dataSource == ":memory:")
-        {
-            throw new NotSupportedException(
-                "Encryption is supported only for file-backed databases when Local Provider=Managed.");
-        }
+                if (hasPassword && hasKey)
+            {
+                    throw new InvalidOperationException(
+                        "Password and Encryption Key cannot be combined; use one passphrase or one hex key.");
+                }
 
-        return cipher.ToLowerInvariant() switch
-        {
-            "aes128gcm" => ManagedEncryptionOptions.FromHex(
-                Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm,
-                key),
-            "aes256gcm" => ManagedEncryptionOptions.FromHex(
-                Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm,
-                key),
-            _ => throw new NotSupportedException(
-                "Local Provider=Managed supports only Ahtola encrypted format version 0 with "
-                + "AES128GCM (cipher ID 1) or AES256GCM (cipher ID 2); cipher fallback is not permitted."),
-        };
-    }
-}
+                ManagedEncryptionOptions? options;
+                if (hasPassword)
+                {
+                    var scheme = AhtolaPassphraseSchemes.Resolve(passwordScheme);
+                    if (!string.IsNullOrWhiteSpace(cipher)
+                        && !CipherNameMatches(cipher, scheme.PageCipher))
+                    {
+                        throw new NotSupportedException(
+                            $"Password Scheme '{scheme.Id}' derives {scheme.PageCipher}; "
+                            + "Encryption Cipher must be omitted or match that page cipher.");
+                    }
 
-internal readonly record struct ManagedLocalOpenOptions(
+                    options = scheme.DeriveEncryptionOptions(password!);
+                }
+                else if (string.IsNullOrWhiteSpace(cipher))
+                {
+                    if (key is not null)
+                {
+                    throw new InvalidOperationException(
+                        "Encryption Cipher is required when Encryption Key is specified.");
+                }
+
+                return null;
+            }
+            else if (!hasKey)
+            {
+                throw new InvalidOperationException("Encryption Key is required when Encryption Cipher is specified.");
+            }
+            else
+            {
+                options = cipher.ToLowerInvariant() switch
+                {
+                    "aes128gcm" => ManagedEncryptionOptions.FromHex(
+                        Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm,
+                        key!),
+                    "aes256gcm" => ManagedEncryptionOptions.FromHex(
+                        Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm,
+                        key!),
+                    _ => throw new NotSupportedException(
+                        "Local Provider=Managed supports only Ahtola encrypted format version 0 with "
+                        + "AES128GCM (cipher ID 1) or AES256GCM (cipher ID 2); cipher fallback is not permitted."),
+                };
+            }
+
+            if (mode == ManagedLocalOpenMode.Memory || dataSource == ":memory:")
+            {
+                options.Dispose();
+                throw new NotSupportedException(
+                    "Encryption is supported only for file-backed databases when Local Provider=Managed.");
+            }
+
+            return options;
+                }
+
+                private static bool CipherNameMatches(string cipherName, Ahtola.Core.Storage.AhtolaEncryptionCipher cipher)
+                    => cipherName.ToLowerInvariant() switch
+                    {
+                        "aes128gcm" => cipher == Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm,
+                        "aes256gcm" => cipher == Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm,
+                        _ => false,
+                    };
+            }
+
+            internal readonly record struct ManagedLocalOpenOptions(
     string DataSource,
     bool ReadOnly,
     ManagedEncryptionOptions? Encryption,

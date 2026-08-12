@@ -15,8 +15,9 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
         "Mode",
         "Cache",
         "Password",
-        "Encryption Cipher",
-        "Encryption Key",
+                "Password Scheme",
+                "Encryption Cipher",
+                "Encryption Key",
         "Foreign Keys",
         "Recursive Triggers",
         "Default Timeout",
@@ -38,10 +39,12 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
         ["Mode"] = "Mode",
         ["Cache"] = "Cache",
         ["Password"] = "Password",
-        ["Encryption Cipher"] = "Encryption Cipher",
-        ["EncryptionCipher"] = "Encryption Cipher",
-        ["Encryption Key"] = "Encryption Key",
-        ["EncryptionKey"] = "Encryption Key",
+                ["Password Scheme"] = "Password Scheme",
+                ["PasswordScheme"] = "Password Scheme",
+                ["Encryption Cipher"] = "Encryption Cipher",
+                ["EncryptionCipher"] = "Encryption Cipher",
+                ["Encryption Key"] = "Encryption Key",
+                ["EncryptionKey"] = "Encryption Key",
         ["Foreign Keys"] = "Foreign Keys",
         ["ForeignKeys"] = "Foreign Keys",
         ["Recursive Triggers"] = "Recursive Triggers",
@@ -99,11 +102,21 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
         set => SetString("Password", value);
     }
 
-    public string EncryptionCipher
-    {
-        get => GetString("Encryption Cipher");
-        set => SetString("Encryption Cipher", value);
-    }
+        /// <summary>
+        /// Passphrase key-derivation scheme id (for example <c>Ahtola.Password.v1</c>).
+        /// Empty selects the catalog default. See <see cref="AhtolaPassphraseSchemes"/>.
+        /// </summary>
+        public string PasswordScheme
+        {
+            get => GetString("Password Scheme");
+            set => SetString("Password Scheme", value);
+        }
+
+        public string EncryptionCipher
+        {
+            get => GetString("Encryption Cipher");
+            set => SetString("Encryption Cipher", value);
+        }
 
     public string EncryptionKey
     {
@@ -264,35 +277,75 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
 
     internal AhtolaEncryptionOptions? CreateManagedEncryptionOptions()
     {
-        var cipher = GetString("Encryption Cipher");
-        var keyConfigured = base.TryGetValue("Encryption Key", out var keyValue);
-        var key = keyConfigured
-            ? Convert.ToString(keyValue, CultureInfo.InvariantCulture)
-            : null;
+            var password = Password;
+            var hasPassword = !string.IsNullOrEmpty(password);
+            var passwordScheme = PasswordScheme;
+            var cipher = GetString("Encryption Cipher");
+            var keyConfigured = base.TryGetValue("Encryption Key", out var keyValue);
+            var key = keyConfigured
+                ? Convert.ToString(keyValue, CultureInfo.InvariantCulture)
+                : null;
+            var hasKey = !string.IsNullOrWhiteSpace(key);
 
-        if (string.IsNullOrWhiteSpace(cipher))
-        {
-            if (keyConfigured)
-                throw new InvalidOperationException("Encryption Cipher is required when Encryption Key is specified.");
+            if (!hasPassword && !string.IsNullOrWhiteSpace(passwordScheme))
+            {
+                throw new InvalidOperationException(
+                    "Password Scheme requires Password=; it only selects passphrase key derivation.");
+            }
 
-            return null;
+            if (hasPassword && hasKey)
+            {
+                throw new InvalidOperationException(
+                    "Password and Encryption Key cannot be combined; use one passphrase or one hex key.");
+            }
+
+            if (hasPassword)
+            {
+                var scheme = AhtolaPassphraseSchemes.Resolve(passwordScheme);
+                if (!string.IsNullOrWhiteSpace(cipher)
+                    && !CipherNameMatches(cipher, scheme.PageCipher))
+                {
+                    throw new NotSupportedException(
+                        $"Password Scheme '{scheme.Id}' derives {scheme.PageCipher}; "
+                        + "Encryption Cipher must be omitted or match that page cipher.");
+                }
+
+                return scheme.DeriveEncryptionOptions(password);
+            }
+
+            if (string.IsNullOrWhiteSpace(cipher))
+            {
+                if (keyConfigured)
+                    throw new InvalidOperationException("Encryption Cipher is required when Encryption Key is specified.");
+
+                return null;
+            }
+
+            if (!hasKey)
+                throw new InvalidOperationException("Encryption Key is required when Encryption Cipher is specified.");
+
+            return cipher.ToLowerInvariant() switch
+            {
+                "aes128gcm" => AhtolaEncryptionOptions.FromHex(Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm, key!),
+                "aes256gcm" => AhtolaEncryptionOptions.FromHex(Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm, key!),
+                _ => throw new NotSupportedException(
+                    "Local Provider=Managed supports only Ahtola encrypted format version 0 with "
+                    + "AES128GCM (cipher ID 1) or AES256GCM (cipher ID 2); cipher fallback is not permitted."),
+            };
         }
 
-        if (string.IsNullOrWhiteSpace(key))
-            throw new InvalidOperationException("Encryption Key is required when Encryption Cipher is specified.");
+        internal bool HasEncryptionOptions
+            => base.ContainsKey("Encryption Cipher")
+               || base.ContainsKey("Encryption Key")
+               || !string.IsNullOrEmpty(Password);
 
-        return cipher.ToLowerInvariant() switch
-        {
-            "aes128gcm" => AhtolaEncryptionOptions.FromHex(Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm, key),
-            "aes256gcm" => AhtolaEncryptionOptions.FromHex(Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm, key),
-            _ => throw new NotSupportedException(
-                "Local Provider=Managed supports only Ahtola encrypted format version 0 with "
-                + "AES128GCM (cipher ID 1) or AES256GCM (cipher ID 2); cipher fallback is not permitted."),
-        };
-    }
-
-    internal bool HasEncryptionOptions
-        => base.ContainsKey("Encryption Cipher") || base.ContainsKey("Encryption Key");
+        private static bool CipherNameMatches(string cipherName, Ahtola.Core.Storage.AhtolaEncryptionCipher cipher)
+            => cipherName.ToLowerInvariant() switch
+            {
+                "aes128gcm" => cipher == Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm,
+                "aes256gcm" => cipher == Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm,
+                _ => false,
+            };
 
     private static string NormalizeKeyword(string keyword)
     {
@@ -404,8 +457,9 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
             "Mode" => SqliteOpenMode.ReadWriteCreate,
             "Cache" => SqliteCacheMode.Default,
             "Password" => string.Empty,
-            "Encryption Cipher" => string.Empty,
-            "Encryption Key" => string.Empty,
+                        "Password Scheme" => string.Empty,
+                        "Encryption Cipher" => string.Empty,
+                        "Encryption Key" => string.Empty,
             "Foreign Keys" => null!,
             "Recursive Triggers" => false,
             "Default Timeout" => 30,

@@ -129,7 +129,7 @@ public class ManagedTableInteriorFileStoreTests
     }
 
     [Test]
-    public void ReopenRejectsInteriorWhoseSeparatorDoesNotMatchItsLeaf()
+        public void ReopenRejectsInteriorWhoseSeparatorIsBelowItsLeafMaximum()
     {
         var fileSystem = new InMemoryFileSystem();
         SqliteDatabaseHeader header;
@@ -158,23 +158,165 @@ public class ManagedTableInteriorFileStoreTests
                 header.UsableSpace);
             root.Cells.Should().NotBeEmpty();
 
-            var rootImage = store.ReadPage(rootPage);
-            rootImage[root.CellPointers[0] + sizeof(uint)] = 0;
-            store.WritePage(rootPage, rootImage);
-            store.Flush();
+                // Force separator rowid to 0 so the left child's live max exceeds it.
+                var rootImage = store.ReadPage(rootPage);
+                rootImage[root.CellPointers[0] + sizeof(uint)] = 0;
+                store.WritePage(rootPage, rootImage);
+                store.Flush();
+            }
+
+            fileSystem.DeleteFile("interior-corrupt.db-wal");
+            using (SqliteWalFile.Create(
+                       fileSystem,
+                       "interior-corrupt.db-wal",
+                       SqliteWalHeader.Create(header.PageSize, salt1: 1, salt2: 2)))
+            {
+            }
+
+            var reopen = () => EmbeddedDatabase.OpenFile("interior-corrupt.db", fileSystem);
+            reopen.Should().Throw<EmbeddedSqlException>().WithMessage("*separator*below maximum rowid*");
         }
 
-        fileSystem.DeleteFile("interior-corrupt.db-wal");
-        using (SqliteWalFile.Create(
-                   fileSystem,
-                   "interior-corrupt.db-wal",
-                   SqliteWalHeader.Create(header.PageSize, salt1: 1, salt2: 2)))
+        [Test]
+        public void OpensExternalSqliteTableInteriorWithStaleSeparatorsAfterDeletes()
         {
+            // Real SQLite leaves parent separators unchanged when the left child's
+            // maximum rowid is deleted. RDM Connections.db hits this shape; managed
+            // open must accept separator >= left-child max, not require equality.
+            var path = CreateDatabasePath();
+            try
+            {
+                using (var sqlite = new MsData.SqliteConnection($"Data Source={path}"))
+                {
+                    sqlite.Open();
+                    using var command = sqlite.CreateCommand();
+                    command.CommandText =
+                        """
+                        PRAGMA journal_mode=DELETE;
+                        CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                        """;
+                    command.ExecuteNonQuery();
+
+                    command.CommandText = BuildInsert(1, 200);
+                    command.ExecuteNonQuery();
+
+                    // Do not VACUUM: rebuild would tighten separators. Stale parent keys
+                    // after deleting left-child maxima are what production RDM files keep.
+                    command.CommandText =
+                        """
+                        DELETE FROM t WHERE id % 5 = 0;
+                        DELETE FROM t WHERE id IN (1, 2, 3, 50, 51, 99, 100, 150, 199, 200);
+                        """;
+                    command.ExecuteNonQuery();
+                }
+
+                MsData.SqliteConnection.ClearAllPools();
+
+                AssertStaleSeparatorPresent(path);
+
+                using (var database = EmbeddedDatabase.OpenFile(path))
+                using (var connection = database.Connect())
+                {
+                    var rows = Query(connection, "SELECT id FROM t ORDER BY id;");
+                    rows.Should().NotBeEmpty();
+                    rows.Select(row => row[0].AsInteger())
+                        .Should()
+                        .Equal(LoadSqliteRowIds(path));
+                }
+
+                using var facade = new Ahtola.Data.Sqlite.SqliteConnection(
+                    $"Data Source={path};Mode=ReadOnly;Pooling=False");
+                facade.Open();
+                using var select = facade.CreateCommand();
+                select.CommandText = "SELECT COUNT(*) FROM t;";
+                Convert.ToInt64(select.ExecuteScalar()).Should().Be(LoadSqliteRowIds(path).Count);
+            }
+            finally
+            {
+                MsData.SqliteConnection.ClearAllPools();
+                DeleteDatabase(path);
+            }
         }
 
-        var reopen = () => EmbeddedDatabase.OpenFile("interior-corrupt.db", fileSystem);
-        reopen.Should().Throw<EmbeddedSqlException>().WithMessage("*separator*");
-    }
+        private static void AssertStaleSeparatorPresent(string path)
+        {
+            using var store = SqlitePageStore.Open(PhysicalFileSystem.Instance, path, readOnly: true);
+            var header = store.Header;
+            var schema = SqliteTableLeafPageView.Parse(
+                store.ReadPage(1),
+                header.UsableSpace,
+                isFirstPage: true);
+            var rootPage = checked((uint)schema.Cells
+                .Select(cell => SqliteRecordCodec.Decode(cell.Cell.LocalPayload.Span, header.TextEncoding))
+                .Single(values => values[0].AsText() == "table" && values[1].AsText() == "t")[3]
+                .AsInteger());
+            var rootHeader = SqliteBtreePageHeader.Parse(store.ReadPage(rootPage));
+            rootHeader.PageType.Should().Be(SqliteBtreePageType.TableInterior);
+
+            SubtreeMaximumRowId(
+                    store,
+                    header,
+                    rootPage,
+                    out var sawStaleSeparator)
+                .Should()
+                .NotBeNull();
+            sawStaleSeparator.Should().BeTrue("the fixture must keep at least one stale interior separator");
+        }
+
+        private static long? SubtreeMaximumRowId(
+            SqlitePageStore store,
+            SqliteDatabaseHeader header,
+            uint pageNumber,
+            out bool sawStaleSeparator)
+        {
+            sawStaleSeparator = false;
+            var page = store.ReadPage(pageNumber);
+            var pageHeader = SqliteBtreePageHeader.Parse(page);
+            if (pageHeader.PageType == SqliteBtreePageType.TableLeaf)
+            {
+                var leaf = SqliteTableLeafPageView.Parse(page, header.UsableSpace);
+                return leaf.Cells.Count == 0 ? null : leaf.Cells[^1].Cell.RowId;
+            }
+
+            pageHeader.PageType.Should().Be(SqliteBtreePageType.TableInterior);
+            var interior = SqliteTableInteriorPageView.Parse(page, header.UsableSpace);
+            long? maximum = null;
+            for (var index = 0; index <= interior.Cells.Count; index++)
+            {
+                var childPage = index == interior.Cells.Count
+                    ? interior.Header.RightMostChildPage
+                    : interior.Cells[index].Cell.LeftChildPage;
+                var childMax = SubtreeMaximumRowId(
+                    store,
+                    header,
+                    childPage,
+                    out var childStale);
+                sawStaleSeparator |= childStale;
+                if (childMax is { } value)
+                    maximum = value;
+                if (index < interior.Cells.Count
+                    && childMax is { } leftMax
+                    && leftMax < interior.Cells[index].Cell.RowId)
+                {
+                    sawStaleSeparator = true;
+                }
+            }
+
+            return maximum;
+        }
+
+        private static List<long> LoadSqliteRowIds(string path)
+        {
+            using var sqlite = new MsData.SqliteConnection($"Data Source={path}");
+            sqlite.Open();
+            using var command = sqlite.CreateCommand();
+            command.CommandText = "SELECT id FROM t ORDER BY id;";
+            using var reader = command.ExecuteReader();
+            var ids = new List<long>();
+            while (reader.Read())
+                ids.Add(reader.GetInt64(0));
+            return ids;
+        }
 
     private static string BuildInsert(int firstId, int lastId)
     {
