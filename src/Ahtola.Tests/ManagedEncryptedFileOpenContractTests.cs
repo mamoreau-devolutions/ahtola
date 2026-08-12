@@ -167,7 +167,7 @@ public class ManagedEncryptedFileOpenContractTests
                     open.Open();
                 });
                 emptyPassword.Should().BeOfType<InvalidDataException>();
-                emptyPassword!.Message.Should().ContainEquivalentOf(
+                emptyPassword!.Message.Should().StartWith(
                     AhtolaPasswordEncryption.EncryptedOrNotDatabaseMessage);
 
                 var wrongPassword = Assert.Catch(() =>
@@ -176,9 +176,10 @@ public class ManagedEncryptedFileOpenContractTests
                         $"Data Source={path};Local Provider=Managed;Password=wrong;Pooling=False");
                     open.Open();
                 });
-                wrongPassword.Should().NotBeNull();
-                wrongPassword!.Message.Should().ContainEquivalentOf(
+                wrongPassword.Should().BeOfType<InvalidDataException>();
+                wrongPassword!.Message.Should().StartWith(
                     AhtolaPasswordEncryption.EncryptedOrNotDatabaseMessage);
+                wrongPassword.InnerException.Should().NotBeNull();
             }
             finally
             {

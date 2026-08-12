@@ -80,13 +80,15 @@ public static class AhtolaPasswordEncryption
     /// <summary>
     /// Ensures failure text includes the SDS-shaped detection phrase so RDM
     /// <c>IsPasswordProtected</c> / open sniffing keep working.
-    /// </summary>
-    public static string EnsureEncryptedOrNotDatabasePhrase(string message)
-    {
-        if (string.IsNullOrWhiteSpace(message))
-            return EncryptedOrNotDatabaseMessage;
-        if (ContainsEncryptedOrNotDatabasePhrase(message))
-            return message;
-        return $"{message} ({EncryptedOrNotDatabaseMessage})";
+        /// The classic phrase is placed first so substring detectors and
+        /// <c>StartsWith</c>-style checks stay reliable.
+        /// </summary>
+        public static string EnsureEncryptedOrNotDatabasePhrase(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return EncryptedOrNotDatabaseMessage;
+            if (ContainsEncryptedOrNotDatabasePhrase(message))
+                return message;
+            return $"{EncryptedOrNotDatabaseMessage}: {message}";
+        }
     }
-}
