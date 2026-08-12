@@ -125,9 +125,193 @@ public class ManagedEncryptedFileOpenContractTests
         using var connection = new global::Ahtola.AhtolaConnection(
             "Data Source=:memory:;Local Provider=Managed;Encryption Key=0011");
 
-        Assert.Throws<NotSupportedException>(() => connection.Open())!.Message
-            .Should().Be("Encryption is not available for the managed engine.");
+            Assert.Throws<InvalidOperationException>(() => connection.Open())!.Message
+                .Should().Be("Encryption Cipher is required when Encryption Key is specified.");
     }
+
+        [Test]
+        public void SqliteFacadePasswordCreatesReopensAndRejectsWrongOrEmptyPassword()
+        {
+            var path = CreateDatabasePath("password");
+            const string password = "rdm-workspace-secret";
+            try
+            {
+                var createCs = new SqliteConnectionStringBuilder
+                {
+                    DataSource = path,
+                    LocalProvider = AhtolaLocalProvider.Managed,
+                    Password = password,
+                    Pooling = false,
+                }.ConnectionString;
+
+                using (var create = new SqliteConnection(createCs))
+                {
+                    create.Open();
+                    create.ExecuteNonQuery("CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT);");
+                    create.ExecuteNonQuery("INSERT INTO records VALUES (1, 'secret-row');");
+                }
+
+                File.ReadAllBytes(path).AsSpan(0, 5).ToArray().Should().Equal("AHTLA"u8.ToArray());
+
+                using (var reopen = new SqliteConnection(createCs))
+                {
+                    reopen.Open();
+                    reopen.ExecuteScalar<string>("SELECT value FROM records WHERE id = 1;")
+                        .Should().Be("secret-row");
+                }
+
+                var emptyPassword = Assert.Catch(() =>
+                {
+                    using var open = new SqliteConnection(
+                        $"Data Source={path};Local Provider=Managed;Pooling=False");
+                    open.Open();
+                });
+                emptyPassword.Should().BeOfType<InvalidDataException>();
+                emptyPassword!.Message.Should().ContainEquivalentOf(
+                    AhtolaPasswordEncryption.EncryptedOrNotDatabaseMessage);
+
+                var wrongPassword = Assert.Catch(() =>
+                {
+                    using var open = new SqliteConnection(
+                        $"Data Source={path};Local Provider=Managed;Password=wrong;Pooling=False");
+                    open.Open();
+                });
+                wrongPassword.Should().NotBeNull();
+                wrongPassword!.Message.Should().ContainEquivalentOf(
+                    AhtolaPasswordEncryption.EncryptedOrNotDatabaseMessage);
+            }
+            finally
+            {
+                DeleteDatabase(path);
+            }
+        }
+
+        [Test]
+        public void SqliteFacadeRejectsPasswordCombinedWithEncryptionKey()
+        {
+            var path = CreateDatabasePath("password-key-conflict");
+            try
+            {
+                using var connection = new SqliteConnection(
+                    $"Data Source={path};Local Provider=Managed;Password=secret;Encryption Cipher=Aes256Gcm;Encryption Key={Aes256Key}");
+                Assert.Throws<InvalidOperationException>(() => connection.Open())!.Message
+                    .Should().Contain("Password and Encryption Key cannot be combined");
+            }
+            finally
+            {
+                DeleteDatabase(path);
+            }
+        }
+
+        [Test]
+        public void AhtolaManagedPasswordMatchesSqliteFacadeDerivation()
+        {
+            var path = CreateDatabasePath("password-ahtola");
+            const string password = "shared-passphrase";
+            try
+            {
+                using (var create = new global::Ahtola.AhtolaConnection(
+                           $"Data Source={path};Local Provider=Managed;Password={password}"))
+                {
+                    create.Open();
+                    create.ExecuteNonQuery("CREATE TABLE t(v TEXT);");
+                    create.ExecuteNonQuery("INSERT INTO t VALUES ('ok');");
+                }
+
+                using var reopen = new SqliteConnection(
+                    $"Data Source={path};Local Provider=Managed;Password={password};Pooling=False");
+                reopen.Open();
+                reopen.ExecuteScalar<string>("SELECT v FROM t;").Should().Be("ok");
+            }
+            finally
+            {
+                DeleteDatabase(path);
+            }
+        }
+
+        [Test]
+        public void SqliteFacadeChangePasswordAndClearPasswordRewriteRekey()
+        {
+            var path = CreateDatabasePath("rekey");
+            const string original = "original-secret";
+            const string rotated = "rotated-secret";
+            try
+            {
+                using (var create = new SqliteConnection(
+                           $"Data Source={path};Local Provider=Managed;Password={original};Pooling=False"))
+                {
+                    create.Open();
+                    create.ExecuteNonQuery("CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT);");
+                    create.ExecuteNonQuery("INSERT INTO records VALUES (1, 'before-rekey');");
+                    create.ChangePassword(rotated);
+                    create.ExecuteScalar<string>("SELECT value FROM records WHERE id = 1;")
+                        .Should().Be("before-rekey");
+                }
+
+                Assert.Catch(() =>
+                {
+                    using var stale = new SqliteConnection(
+                        $"Data Source={path};Local Provider=Managed;Password={original};Pooling=False");
+                    stale.Open();
+                })!.Message.Should().ContainEquivalentOf(
+                    AhtolaPasswordEncryption.EncryptedOrNotDatabaseMessage);
+
+                using (var reopen = new SqliteConnection(
+                           $"Data Source={path};Local Provider=Managed;Password={rotated};Pooling=False"))
+                {
+                    reopen.Open();
+                    reopen.ExecuteScalar<string>("SELECT value FROM records WHERE id = 1;")
+                        .Should().Be("before-rekey");
+                    reopen.ClearPassword();
+                    reopen.ExecuteScalar<string>("SELECT value FROM records WHERE id = 1;")
+                        .Should().Be("before-rekey");
+                }
+
+                File.ReadAllBytes(path).AsSpan(0, 15).ToArray()
+                    .Should().Equal(System.Text.Encoding.ASCII.GetBytes("SQLite format 3"));
+
+                using var plain = new SqliteConnection(
+                    $"Data Source={path};Local Provider=Managed;Pooling=False");
+                plain.Open();
+                plain.ExecuteScalar<string>("SELECT value FROM records WHERE id = 1;")
+                    .Should().Be("before-rekey");
+            }
+            finally
+            {
+                DeleteDatabase(path);
+            }
+        }
+
+        [Test]
+        public void SqliteFacadeSetPasswordEncryptsPlaintextDatabase()
+        {
+            var path = CreateDatabasePath("set-password");
+            const string password = "after-create";
+            try
+            {
+                using (var create = new SqliteConnection(
+                           $"Data Source={path};Local Provider=Managed;Pooling=False"))
+                {
+                    create.Open();
+                    create.ExecuteNonQuery("CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT);");
+                    create.ExecuteNonQuery("INSERT INTO records VALUES (3, 'plain-then-encrypted');");
+                    create.SetPassword(string.Empty);
+                    create.SetPassword(password);
+                }
+
+                File.ReadAllBytes(path).AsSpan(0, 5).ToArray().Should().Equal("AHTLA"u8.ToArray());
+
+                using var reopen = new SqliteConnection(
+                    $"Data Source={path};Local Provider=Managed;Password={password};Pooling=False");
+                reopen.Open();
+                reopen.ExecuteScalar<string>("SELECT value FROM records WHERE id = 3;")
+                    .Should().Be("plain-then-encrypted");
+            }
+            finally
+            {
+                DeleteDatabase(path);
+            }
+        }
 
     [Test]
     public void EncryptedPhysicalPagerFactoryEncryptsWalFramesAndReopensThem()

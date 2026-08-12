@@ -264,35 +264,58 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
 
     internal AhtolaEncryptionOptions? CreateManagedEncryptionOptions()
     {
-        var cipher = GetString("Encryption Cipher");
-        var keyConfigured = base.TryGetValue("Encryption Key", out var keyValue);
-        var key = keyConfigured
-            ? Convert.ToString(keyValue, CultureInfo.InvariantCulture)
-            : null;
+            var password = Password;
+            var hasPassword = !string.IsNullOrEmpty(password);
+            var cipher = GetString("Encryption Cipher");
+            var keyConfigured = base.TryGetValue("Encryption Key", out var keyValue);
+            var key = keyConfigured
+                ? Convert.ToString(keyValue, CultureInfo.InvariantCulture)
+                : null;
+            var hasKey = !string.IsNullOrWhiteSpace(key);
 
-        if (string.IsNullOrWhiteSpace(cipher))
-        {
-            if (keyConfigured)
-                throw new InvalidOperationException("Encryption Cipher is required when Encryption Key is specified.");
+            if (hasPassword && hasKey)
+            {
+                throw new InvalidOperationException(
+                    "Password and Encryption Key cannot be combined; use one passphrase or one hex key.");
+            }
 
-            return null;
+            if (hasPassword)
+            {
+                if (!string.IsNullOrWhiteSpace(cipher)
+                    && !cipher.Equals("aes256gcm", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new NotSupportedException(
+                        "Password= derives an AES-256-GCM key; Encryption Cipher must be omitted or Aes256Gcm.");
+                }
+
+                return AhtolaPasswordEncryption.FromPassword(password);
+            }
+
+            if (string.IsNullOrWhiteSpace(cipher))
+            {
+                if (keyConfigured)
+                    throw new InvalidOperationException("Encryption Cipher is required when Encryption Key is specified.");
+
+                return null;
+            }
+
+            if (!hasKey)
+                throw new InvalidOperationException("Encryption Key is required when Encryption Cipher is specified.");
+
+            return cipher.ToLowerInvariant() switch
+            {
+                "aes128gcm" => AhtolaEncryptionOptions.FromHex(Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm, key!),
+                "aes256gcm" => AhtolaEncryptionOptions.FromHex(Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm, key!),
+                _ => throw new NotSupportedException(
+                    "Local Provider=Managed supports only Ahtola encrypted format version 0 with "
+                    + "AES128GCM (cipher ID 1) or AES256GCM (cipher ID 2); cipher fallback is not permitted."),
+            };
         }
 
-        if (string.IsNullOrWhiteSpace(key))
-            throw new InvalidOperationException("Encryption Key is required when Encryption Cipher is specified.");
-
-        return cipher.ToLowerInvariant() switch
-        {
-            "aes128gcm" => AhtolaEncryptionOptions.FromHex(Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm, key),
-            "aes256gcm" => AhtolaEncryptionOptions.FromHex(Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm, key),
-            _ => throw new NotSupportedException(
-                "Local Provider=Managed supports only Ahtola encrypted format version 0 with "
-                + "AES128GCM (cipher ID 1) or AES256GCM (cipher ID 2); cipher fallback is not permitted."),
-        };
-    }
-
-    internal bool HasEncryptionOptions
-        => base.ContainsKey("Encryption Cipher") || base.ContainsKey("Encryption Key");
+        internal bool HasEncryptionOptions
+            => base.ContainsKey("Encryption Cipher")
+               || base.ContainsKey("Encryption Key")
+               || !string.IsNullOrEmpty(Password);
 
     private static string NormalizeKeyword(string keyword)
     {

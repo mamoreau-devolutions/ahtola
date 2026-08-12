@@ -74,8 +74,30 @@ options.UseAhtola("Data Source=app.db");
 
 Common connection-string keywords: `Data Source`, `Mode`, `Cache`, `Pooling`,
 `Foreign Keys`, `Default Timeout` / `Command Timeout`, `Foreign Read Only`,
-`Encryption Cipher` + `Encryption Key` (AES-128/256-GCM). Default local provider
-is managed-only.
+`DateTimeKind`, `BinaryGUID`, `Password` (passphrase → AES-256-GCM), or
+`Encryption Cipher` + `Encryption Key` (hex AES-128/256-GCM). Default local
+provider is managed-only.
+
+### Standard SQLite files
+
+Managed open of **unencrypted** SQLite databases created by System.Data.SQLite /
+Microsoft.Data.Sqlite / native sqlite3 is supported (`Data Source=path` only;
+no special flags). Ahtola is byte-compatible with the on-disk format for normal
+read/write workloads.
+
+### File encryption (not SEE / SQLCipher)
+
+| Mechanism | Connection string | Notes |
+| --- | --- | --- |
+| Passphrase | `Password=...` | PBKDF2-HMAC-SHA256 (`Ahtola.Password.v1`, 210k iters) → AES-256-GCM (`AHTLA` header) |
+| Raw key | `Encryption Cipher=Aes256Gcm; Encryption Key=<64 hex chars>` | Same on-disk format |
+| Rekey | `SqliteConnection.ChangePassword` / `ClearPassword` / `SetPassword` | Rewrite backup + atomic file replace; exclusive access |
+
+Do **not** combine `Password` and `Encryption Key`. Legacy SEE/SQLCipher RDM
+files are **not** opened — export/recreate under Ahtola password or plain SQLite.
+
+Wrong/missing password failures include the phrase
+`file is encrypted or is not a database` for SDS-shaped detection.
 
 ## What this is good for
 

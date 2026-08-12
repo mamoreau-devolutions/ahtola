@@ -323,14 +323,15 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
     {
         EnsureOpen();
         var value = GetTypedValue(ordinal);
-        return value.Kind switch
+            var dateTime = value.Kind switch
         {
             ReaderValueKind.Text => ParseDateTime(value.Text),
             ReaderValueKind.Real => DateTime.FromOADate(value.Real - 2415018.5),
             ReaderValueKind.Integer => DateTime.FromOADate(value.Integer - 2415018.5),
             _ => DateTime.Parse(GetString(ordinal), CultureInfo.InvariantCulture)
         };
-    }
+            return ApplyConfiguredDateTimeKind(dateTime);
+        }
 
     public virtual DateTimeOffset GetDateTimeOffset(int ordinal)
     {
@@ -1347,12 +1348,42 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             : throw new InvalidCastException("The requested value is not TEXT.");
     }
 
-    private static Guid ToGuid(ReaderValue value)
-        => value.Kind == ReaderValueKind.Blob
-            ? value.Blob.Length == 16
-                ? new Guid(value.Blob)
-                : Guid.Parse(Encoding.UTF8.GetString(value.Blob))
-            : Guid.Parse(value.Text);
+    private Guid ToGuid(ReaderValue value)
+        {
+            if (value.Kind == ReaderValueKind.Blob)
+            {
+                if (value.Blob.Length == 16)
+                {
+                    // BinaryGUID=true (default): little-endian .NET Guid blob layout (SDS default).
+                    // BinaryGUID=false: big-endian RFC 4122 byte order.
+                    return _connection.BinaryGuid
+                        ? new Guid(value.Blob)
+                        : new Guid(
+                            (value.Blob[0] << 24) | (value.Blob[1] << 16) | (value.Blob[2] << 8) | value.Blob[3],
+                            (short)((value.Blob[4] << 8) | value.Blob[5]),
+                            (short)((value.Blob[6] << 8) | value.Blob[7]),
+                            value.Blob[8],
+                            value.Blob[9],
+                            value.Blob[10],
+                            value.Blob[11],
+                            value.Blob[12],
+                            value.Blob[13],
+                            value.Blob[14],
+                            value.Blob[15]);
+                }
+
+                return Guid.Parse(Encoding.UTF8.GetString(value.Blob));
+            }
+
+            return Guid.Parse(value.Text);
+        }
+
+        private DateTime ApplyConfiguredDateTimeKind(DateTime value)
+        {
+            // Match Microsoft.Data.Sqlite / SDS: apply connection DateTimeKind via SpecifyKind
+            // (no zone conversion) so RDM DateTimeKind=Utc surfaces Kind=Utc on reads.
+            return DateTime.SpecifyKind(value, _connection.DateTimeKind);
+        }
 
     private void DrainRemainingStatements()
     {

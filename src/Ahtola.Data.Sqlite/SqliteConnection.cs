@@ -153,101 +153,107 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
         }
         ValidateManagedSharedCacheOptions();
         ValidateForeignReadOnlyOptions();
-        if (!string.IsNullOrEmpty(_connectionOptions.Password))
-            throw new InvalidOperationException(Properties.Resources.EncryptionNotSupported("e_sqlite3"));
+                var useManaged = _connectionOptions.EffectiveLocalProvider == AhtolaLocalProvider.Managed;
+                if (!useManaged && !string.IsNullOrEmpty(_connectionOptions.Password))
+                    throw new InvalidOperationException(Properties.Resources.EncryptionNotSupported("e_sqlite3"));
 
-        var originalState = State;
-        var filename = NormalizeDataSource(_connectionOptions);
-        var readOnly = _connectionOptions.Mode == SqliteOpenMode.ReadOnly;
-        var managedSharedMemory = IsManagedSharedMemoryConfiguration(_connectionOptions);
-        var sharedMemoryPath = IsNativeSharedMemory(_connectionOptions) ? RegisterSharedMemoryFile(filename) : null;
-        AhtolaEncryptionOptions? managedEncryption = null;
-        try
-        {
-            if (_connectionOptions.EffectiveLocalProvider == AhtolaLocalProvider.Managed)
-            {
-                managedEncryption = _connectionOptions.CreateManagedEncryptionOptions();
-                if (managedEncryption is not null
-                    && (_connectionOptions.Mode == SqliteOpenMode.Memory
-                        || filename.Equals(":memory:", StringComparison.Ordinal)))
+                var originalState = State;
+                var filename = NormalizeDataSource(_connectionOptions);
+                var readOnly = _connectionOptions.Mode == SqliteOpenMode.ReadOnly;
+                var managedSharedMemory = IsManagedSharedMemoryConfiguration(_connectionOptions);
+                var sharedMemoryPath = IsNativeSharedMemory(_connectionOptions) ? RegisterSharedMemoryFile(filename) : null;
+                AhtolaEncryptionOptions? managedEncryption = null;
+                try
                 {
-                    throw new NotSupportedException(Properties.Resources.ManagedMemoryEncryptionNotSupported);
+                    if (useManaged)
+                    {
+                        managedEncryption = _connectionOptions.CreateManagedEncryptionOptions();
+                        if (managedEncryption is not null
+                            && (_connectionOptions.Mode == SqliteOpenMode.Memory
+                                || filename.Equals(":memory:", StringComparison.Ordinal)))
+                        {
+                            throw new NotSupportedException(Properties.Resources.ManagedMemoryEncryptionNotSupported);
+                        }
+
+                        if (managedSharedMemory)
+                        {
+                            _managedDatabase = ManagedSharedMemoryDatabase.Open(filename);
+                            _managedSharedMemory = true;
+                        }
+                        else if (CanUseManagedPooling(filename, managedEncryption))
+                        {
+                            var poolKey = ManagedConnectionPoolKey.Create(filename, readOnly);
+                            _managedPoolLease = ManagedConnectionPool.Rent(
+                                poolKey,
+                                () => OpenManagedDatabase(
+                                    filename,
+                                    readOnly,
+                                    encryption: null,
+                                    out _,
+                                    out _));
+                            _managedDatabase = _managedPoolLease.Database;
+                        }
+                        else
+                        {
+                            _managedDatabase = OpenManagedDatabase(
+                                filename,
+                                readOnly,
+                                managedEncryption,
+                                out var managedEncryptionFileSystem,
+                                out var managedPageCodecFileSystem,
+                                _connectionOptions.ForeignReadOnly);
+                            _managedEncryptionFileSystem = managedEncryptionFileSystem;
+                            _managedPageCodecFileSystem = managedPageCodecFileSystem;
+                        }
+                    }
+                    else
+                    {
+                        if (_connectionOptions.HasEncryptionOptions)
+                        {
+                            throw new InvalidOperationException(
+                                "Password, Encryption Cipher, and Encryption Key require Local Provider=Managed.");
+                        }
+
+                        _database = AhtolaNativeProvider.OpenDatabase(filename, cipher: null, encryptionKey: null);
+                    }
+
+                    _dataSource = filename;
+                    _readOnly = readOnly;
+                    _sharedMemoryPath = sharedMemoryPath;
+                    if (IsManagedReadOnly)
+                        EnableManagedReadOnly();
+                    ApplyExtensionSettings();
+                    ApplyConnectionOptions();
+                    RegisterScalarFunctions();
+                    RegisterAggregateFunctions();
+                    RegisterCollations();
+                    RegisterHooks();
+                    LoadPendingExtensions();
+                    OnStateChange(new StateChangeEventArgs(originalState, State));
                 }
-
-                if (managedSharedMemory)
+                catch (AhtolaException ex)
                 {
-                    _managedDatabase = ManagedSharedMemoryDatabase.Open(filename);
-                    _managedSharedMemory = true;
+                    CleanupFailedOpen(sharedMemoryPath);
+                    throw MapManagedEncryptionOpenFailure(ToSqliteException(ex), managedEncryption is not null);
                 }
-                else if (CanUseManagedPooling(filename, managedEncryption))
+                catch (SqliteException ex)
                 {
-                    var poolKey = ManagedConnectionPoolKey.Create(filename, readOnly);
-                    _managedPoolLease = ManagedConnectionPool.Rent(
-                        poolKey,
-                                        () => OpenManagedDatabase(
-                                            filename,
-                                            readOnly,
-                                            encryption: null,
-                                            out _,
-                                            out _));
-                                    _managedDatabase = _managedPoolLease.Database;
-                                }
-                                else
-                                {
-                                    _managedDatabase = OpenManagedDatabase(
-                                        filename,
-                                        readOnly,
-                                        managedEncryption,
-                                        out var managedEncryptionFileSystem,
-                                        out var managedPageCodecFileSystem,
-                                        _connectionOptions.ForeignReadOnly);
-                                    _managedEncryptionFileSystem = managedEncryptionFileSystem;
-                                    _managedPageCodecFileSystem = managedPageCodecFileSystem;
-                                }
-            }
-            else
-            {
-                if (_connectionOptions.HasEncryptionOptions)
-                {
-                    throw new InvalidOperationException(
-                        "Encryption Cipher and Encryption Key require Local Provider=Managed.");
+                    CleanupFailedOpen(sharedMemoryPath);
+                    throw MapManagedEncryptionOpenFailure(ex, managedEncryption is not null);
                 }
-
-                _database = AhtolaNativeProvider.OpenDatabase(filename, cipher: null, encryptionKey: null);
-            }
-
-            _dataSource = filename;
-            _readOnly = readOnly;
-            _sharedMemoryPath = sharedMemoryPath;
-            if (IsManagedReadOnly)
-                EnableManagedReadOnly();
-            ApplyExtensionSettings();
-            ApplyConnectionOptions();
-            RegisterScalarFunctions();
-            RegisterAggregateFunctions();
-            RegisterCollations();
-            RegisterHooks();
-            LoadPendingExtensions();
-            OnStateChange(new StateChangeEventArgs(originalState, State));
-        }
-        catch (AhtolaException ex)
-        {
-            CleanupFailedOpen(sharedMemoryPath);
-            throw ToSqliteException(ex);
-        }
-        catch (SqliteException)
-        {
-            CleanupFailedOpen(sharedMemoryPath);
-            throw;
-        }
-        catch
-        {
-            CleanupFailedOpen(sharedMemoryPath);
-            throw;
-        }
-        finally
-        {
-            managedEncryption?.Dispose();
+                catch (InvalidDataException ex)
+                {
+                    CleanupFailedOpen(sharedMemoryPath);
+                    throw MapManagedEncryptionOpenFailure(ex, managedEncryption is not null || useManaged);
+                }
+                catch
+                {
+                    CleanupFailedOpen(sharedMemoryPath);
+                    throw;
+                }
+                finally
+                {
+                    managedEncryption?.Dispose();
         }
     }
 
@@ -308,8 +314,54 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
         throw new NotSupportedException("Changing databases is not supported.");
     }
 
-    public override DataTable GetSchema()
-        => GetSchema(DbMetaDataCollectionNames.MetaDataCollections, null);
+        /// <summary>
+        /// Rewrites the open managed database under a new passphrase (or plaintext when
+        /// <paramref name="newPassword"/> is null/empty). Exclusive access required.
+        /// </summary>
+        /// <remarks>
+        /// Ahtola AES-256-GCM only (via <see cref="AhtolaPasswordEncryption"/>). Not SEE/SQLCipher.
+        /// </remarks>
+        public virtual void ChangePassword(string? newPassword)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (State != ConnectionState.Open)
+                throw new InvalidOperationException(Properties.Resources.CallRequiresOpenConnection(nameof(ChangePassword)));
+            if (!IsManagedConnection)
+                throw new NotSupportedException("ChangePassword requires Local Provider=Managed.");
+            if (_readOnly)
+                throw new InvalidOperationException("Cannot change the password of a read-only connection.");
+            if (_managedSharedMemory)
+                throw new NotSupportedException("ChangePassword is not supported for shared-memory databases.");
+            if (Transaction is not null || HasOpenReader || _openManagedBlobs.Count > 0)
+                throw new SqliteException(Properties.Resources.SqliteNativeError(5, "database is locked"), 5);
+
+            var path = _dataSource;
+            if (string.IsNullOrEmpty(path)
+                || path.Equals(":memory:", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("file:memory:", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new NotSupportedException("ChangePassword is supported only for file-backed managed databases.");
+            }
+
+            RewriteManagedFilePassword(Path.GetFullPath(path), newPassword);
+        }
+
+        /// <summary>Clears file encryption by rewriting the managed database as plaintext.</summary>
+        public virtual void ClearPassword() => ChangePassword(newPassword: null);
+
+        /// <summary>
+        /// Encrypts an open plaintext managed database with <paramref name="password"/>.
+        /// Empty/null is a no-op (SDS CreateFile + SetPassword("") compatibility).
+        /// </summary>
+        public virtual void SetPassword(string? password)
+        {
+            if (string.IsNullOrEmpty(password))
+                return;
+            ChangePassword(password);
+        }
+
+        public override DataTable GetSchema()
+            => GetSchema(DbMetaDataCollectionNames.MetaDataCollections, null);
 
     public override DataTable GetSchema(string collectionName)
         => GetSchema(collectionName, null);
@@ -553,6 +605,10 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
     internal bool IsManagedConnection => _managedDatabase is not null;
 
     internal bool UsesManagedDatabase => IsManagedConnection;
+
+        internal DateTimeKind DateTimeKind => _connectionOptions.DateTimeKind;
+
+        internal bool BinaryGuid => _connectionOptions.BinaryGUID;
 
     internal bool IsManagedSharedMemory => _managedSharedMemory;
 
@@ -1073,12 +1129,222 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
         }
     }
 
-    private static SqliteException ToSqliteException(AhtolaException exception)
+    private void RewriteManagedFilePassword(string databasePath, string? newPassword)
     {
-        var message = exception.Message;
-        return new SqliteException(Properties.Resources.SqliteNativeError(SQLITE_ERROR, message), SQLITE_ERROR);
+            var directory = Path.GetDirectoryName(databasePath);
+            if (string.IsNullOrEmpty(directory))
+                directory = Path.GetTempPath();
+
+            var tempPath = Path.Combine(directory, $".ahtola-rekey-{Guid.NewGuid():N}.db");
+            var previousConnectionString = ConnectionString;
+            var reopenConnectionString = BuildPasswordRewriteConnectionString(databasePath, newPassword);
+
+            try
+            {
+                try
+                {
+                    ExecuteNonQuery("PRAGMA wal_checkpoint(TRUNCATE);");
+                }
+                catch
+                {
+                    // Best-effort; snapshot backup still copies a consistent catalog view.
+                }
+
+                var destinationConnectionString = BuildPasswordRewriteConnectionString(tempPath, newPassword);
+                using (var destination = new SqliteConnection(destinationConnectionString))
+                {
+                    destination.Open();
+                    BackupDatabase(destination);
+                    destination.Close();
+                }
+
+                ReleaseManagedHandlesForFileReplace();
+
+                try
+                {
+                    ReplaceDatabaseFiles(databasePath, tempPath);
+                }
+                catch
+                {
+                    ConnectionString = previousConnectionString;
+                    Open();
+                    throw;
+                }
+
+                ConnectionString = reopenConnectionString;
+                Open();
+            }
+            finally
+            {
+                DeleteDatabaseFiles(tempPath);
+            }
+        }
+
+        private string BuildPasswordRewriteConnectionString(string dataSource, string? newPassword)
+        {
+            var builder = new SqliteConnectionStringBuilder(ConnectionString)
+            {
+                DataSource = dataSource,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false,
+                ForeignReadOnly = false,
+                LocalProvider = AhtolaLocalProvider.Managed,
+                Cache = SqliteCacheMode.Default,
+            };
+
+            builder.Remove("Encryption Cipher");
+            builder.Remove("Encryption Key");
+            if (string.IsNullOrEmpty(newPassword))
+                builder.Remove("Password");
+            else
+                builder.Password = newPassword;
+
+            return builder.ConnectionString;
+        }
+
+        private void ReleaseManagedHandlesForFileReplace()
+        {
+            CloseOpenManagedBlobs();
+            CloseOpenReaders();
+            Transaction?.Dispose();
+            ResetOpenCommands();
+            var originalState = State;
+            DisposeDatabaseAndManagedEncryptionFileSystem(pooledReusable: false);
+            _dataSource = null;
+            _readOnly = false;
+            _managedSharedMemory = false;
+            if (_sharedMemoryPath is not null)
+            {
+                ReleaseSharedMemoryFile(_sharedMemoryPath);
+                _sharedMemoryPath = null;
+            }
+
+            OnStateChange(new StateChangeEventArgs(originalState, State));
+        }
+
+        private static void ReplaceDatabaseFiles(string databasePath, string tempPath)
+        {
+            if (!File.Exists(tempPath))
+                throw new FileNotFoundException("Rewrite destination database was not created.", tempPath);
+
+            var backupPath = databasePath + $".ahtola-rekey-bak-{Guid.NewGuid():N}";
+            try
+            {
+                File.Move(databasePath, backupPath);
+                try
+                {
+                    File.Move(tempPath, databasePath);
+                }
+                catch
+                {
+                    if (!File.Exists(databasePath) && File.Exists(backupPath))
+                        File.Move(backupPath, databasePath);
+                    throw;
+                }
+
+                DeleteDatabaseSidecars(databasePath);
+                MoveSidecarIfPresent(tempPath + "-wal", databasePath + "-wal");
+                MoveSidecarIfPresent(tempPath + "-shm", databasePath + "-shm");
+                DeleteDatabaseFiles(backupPath);
+            }
+            catch
+            {
+                DeleteDatabaseFiles(backupPath);
+                throw;
+            }
+        }
+
+        private static void MoveSidecarIfPresent(string source, string destination)
+        {
+            if (!File.Exists(source))
+                return;
+            if (File.Exists(destination))
+                File.Delete(destination);
+            File.Move(source, destination);
+        }
+
+        private static void DeleteDatabaseFiles(string path)
+        {
+            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
+            {
+                if (File.Exists(candidate))
+                    File.Delete(candidate);
+            }
+        }
+
+        private static void DeleteDatabaseSidecars(string databasePath)
+        {
+            foreach (var candidate in new[] { databasePath + "-wal", databasePath + "-shm" })
+            {
+                if (File.Exists(candidate))
+                    File.Delete(candidate);
+            }
+        }
+
+        private static SqliteException ToSqliteException(AhtolaException exception)
+        {
+            var message = exception.Message;
+            return new SqliteException(Properties.Resources.SqliteNativeError(SQLITE_ERROR, message), SQLITE_ERROR);
+        }
+
+        /// <summary>
+        /// Maps managed encryption/open authentication failures to include the SDS-shaped
+        /// phrase RDM uses for password-protected file detection.
+        /// </summary>
+        private static Exception MapManagedEncryptionOpenFailure(Exception exception, bool encryptionAttempted)
+        {
+            if (!encryptionAttempted && !LooksLikeEncryptedOrCorruptDatabase(exception))
+                return exception;
+
+            if (!LooksLikeEncryptedOrCorruptDatabase(exception)
+                && exception is not InvalidDataException
+                && exception is not SqliteException)
+            {
+                return exception;
+            }
+
+            var mapped = AhtolaPasswordEncryption.EnsureEncryptedOrNotDatabasePhrase(exception.Message);
+            if (AhtolaPasswordEncryption.ContainsEncryptedOrNotDatabasePhrase(exception.Message)
+                && exception is SqliteException)
+            {
+                return exception;
+            }
+
+            return exception switch
+            {
+                SqliteException sqlite => new SqliteException(
+                    Properties.Resources.SqliteNativeError(sqlite.SqliteErrorCode, mapped),
+                    sqlite.SqliteErrorCode,
+                    sqlite.SqliteExtendedErrorCode),
+                InvalidDataException => new InvalidDataException(mapped, exception),
+                _ => new InvalidDataException(mapped, exception),
+            };
+        }
+
+        private static bool LooksLikeEncryptedOrCorruptDatabase(Exception exception)
+        {
+            for (var current = exception; current is not null; current = current.InnerException)
+            {
+                var message = current.Message;
+                if (string.IsNullOrEmpty(message))
+                    continue;
+                if (AhtolaPasswordEncryption.ContainsEncryptedOrNotDatabasePhrase(message))
+                    return true;
+                if (message.Contains("failed authentication", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("not a database", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("file is not a database", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("AHTLA", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("encrypted", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("invalid database header", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("malformed database", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsManagedProvider => _connectionOptions.EffectiveLocalProvider == AhtolaLocalProvider.Managed;
+
     }
-
-    private bool IsManagedProvider => _connectionOptions.EffectiveLocalProvider == AhtolaLocalProvider.Managed;
-
-}
