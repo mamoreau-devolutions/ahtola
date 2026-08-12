@@ -149,6 +149,69 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
+    public void ManagedSqliteFacadeBindsRepeatedNamedParametersAcrossBatchStatements()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE connections(id TEXT PRIMARY KEY, repositoryid TEXT, defaultrepositoryid TEXT);
+                INSERT INTO connections(id, repositoryid, defaultrepositoryid) VALUES ('first', 'old', 'old'), ('second', 'target', 'old');
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        using (var update = connection.CreateCommand())
+        {
+            update.CommandText = """
+                UPDATE connections SET repositoryid = @RepositoryID WHERE id = @ID OR id = @ID;
+                UPDATE connections SET defaultrepositoryid = @DefaultRepositoryID WHERE repositoryid = @RepositoryID OR id = @ID;
+                """;
+            update.Parameters.AddWithValue("@ID", "first");
+            update.Parameters.AddWithValue("@RepositoryID", "target");
+            update.Parameters.AddWithValue("@DefaultRepositoryID", "default");
+            update.ExecuteNonQuery().Should().Be(3);
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT repositoryid, defaultrepositoryid FROM connections WHERE id = 'first';";
+        using var reader = select.ExecuteReader();
+        reader.Read().Should().BeTrue();
+        reader.GetString(0).Should().Be("target");
+        reader.GetString(1).Should().Be("default");
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeAdapterRetainsTextStoredInBlobColumns()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE permissions(type BLOB NOT NULL, roleid BLOB);
+                INSERT INTO permissions(type, roleid) VALUES ('USER', 'role');
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT type, roleid FROM permissions;";
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = select;
+        var permissions = new DataTable();
+        adapter.Fill(permissions).Should().Be(1);
+
+        permissions.Columns["type"]!.DataType.Should().Be(typeof(object));
+        permissions.Columns["roleid"]!.DataType.Should().Be(typeof(object));
+        permissions.Rows[0]["type"].Should().Be("USER");
+        permissions.Rows[0]["roleid"].Should().Be("role");
+    }
+
+    [Test]
     public void ManagedSqliteFacadeAdapterPreservesGuidBlobsInTextColumns()
     {
         using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");

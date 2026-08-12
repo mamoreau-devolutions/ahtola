@@ -394,7 +394,19 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         var valueType = CurrentValueKind(ordinal);
         var declaredType = GetDeclaredTypeName(ordinal);
         if (!string.IsNullOrEmpty(declaredType))
+        {
+            if (IsBlobType(declaredType))
+            {
+                var sampledValueType = valueType is ReaderValueKind.Empty or ReaderValueKind.Null
+                    ? GetSampleValueType(ordinal)
+                    : valueType;
+                return sampledValueType == ReaderValueKind.Blob
+                    ? typeof(byte[])
+                    : typeof(object);
+            }
+
             return GetClrTypeFromSqliteType(declaredType, valueType);
+        }
 
         if (HasUndeclaredSelectSourceColumn(ordinal))
         {
@@ -617,7 +629,9 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             var info = resolvedColumn?.Column;
             var hasBaseColumn = info is not null;
             var valueType = _hasCurrentRow ? ReadValue(i).Kind : ReaderValueKind.Empty;
-            if (valueType == ReaderValueKind.Empty && !string.IsNullOrEmpty(info?.TypeName))
+            if (valueType == ReaderValueKind.Empty
+                && !string.IsNullOrEmpty(info?.TypeName)
+                && !IsBlobType(info.TypeName))
                 valueType = GetValueKindFromTypeName(info.TypeName);
             else if (valueType is ReaderValueKind.Empty or ReaderValueKind.Null)
                 valueType = GetSampleValueType(i);
@@ -632,6 +646,8 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                     ? valueType == ReaderValueKind.Blob
                         ? typeof(object)
                         : GetClrTypeFromValueType(valueType)
+                    : IsBlobType(info.TypeName) && valueType != ReaderValueKind.Blob
+                        ? typeof(object)
                     : GetClrTypeFromSqliteType(info.TypeName, valueType)
                 : GetClrTypeFromValueType(valueType);
             var isExpression = info is null;
@@ -1440,6 +1456,9 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                || normalized.Contains("CLOB", StringComparison.OrdinalIgnoreCase)
                || normalized.Contains("TEXT", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsBlobType(string typeName)
+        => StripTypeLength(typeName).Contains("BLOB", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsIdentifierColumnName(string columnName)
     {

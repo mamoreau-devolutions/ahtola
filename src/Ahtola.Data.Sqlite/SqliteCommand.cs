@@ -587,7 +587,7 @@ public class SqliteCommand : DbCommand
             {
                 // See BindNativeParameters: named ADO.NET parameters bind anonymous SQLite
                 // placeholders in collection order when no exact placeholder name exists.
-                if (statementParameterNames.Any(static name => name is null))
+                if (statementParameterNames.Skip(1).Any(static name => name is null))
                     (positionalParameters ??= []).Add(parameter);
                 continue;
             }
