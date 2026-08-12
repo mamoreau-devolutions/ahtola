@@ -272,6 +272,52 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
+    public void ManagedSqliteFacadeAdapterMaterializesGuidBlobsInAliasedUndeclaredIdentifierColumns()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE UserAccount(ID);
+                CREATE TABLE UserProfile(ID, UserID);
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        var userId = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        var profileId = new Guid("a39d4d78-d4ec-4f4f-b903-f65b5bf4040b");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT INTO UserAccount(ID) VALUES ($userId);
+                INSERT INTO UserProfile(ID, UserID) VALUES ($profileId, $userId);
+                """;
+            insert.Parameters.AddWithValue("$userId", userId);
+            insert.Parameters.AddWithValue("$profileId", profileId);
+            insert.ExecuteNonQuery().Should().Be(2);
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = """
+            SELECT a.ID, p.UserID, p.ID AS [UserProfile.ID]
+            FROM UserAccount a
+            LEFT OUTER JOIN UserProfile p ON p.UserID = a.ID
+            WHERE a.ID = $userId;
+            """;
+        select.Parameters.AddWithValue("$userId", userId);
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = select;
+        var users = new DataTable();
+        adapter.Fill(users).Should().Be(1);
+
+        users.Columns["UserProfile.ID"]!.DataType.Should().Be(typeof(object));
+        Guid.TryParse((string)users.Rows[0]["UserProfile.ID"], out var readProfileId).Should().BeTrue();
+        readProfileId.Should().Be(profileId);
+    }
+
+    [Test]
     public void ManagedSqliteFacadeAdapterSamplesUnresolvedBlobProjectionTypes()
     {
         using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");

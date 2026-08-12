@@ -1446,14 +1446,17 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
 
     private bool ShouldMaterializeTextGuid(int ordinal, string declaredType, ReaderValue value)
     {
-        // SQLite's TEXT affinity permits a .NET Guid parameter to retain its BLOB storage class.
-        // With BinaryGUID enabled, preserve such identifier values through DataAdapter instead of
-        // letting DataColumn stringify the byte array as "System.Byte[]". Restrict this
-        // compatibility conversion to conventional identifier names so binary payloads remain blobs.
+        // SQLite's dynamic storage permits a .NET Guid parameter to retain its BLOB storage class
+        // even when the source declaration is TEXT, BLOB, or absent. With BinaryGUID enabled,
+        // preserve such identifier values through DataAdapter instead of letting DataColumn
+        // stringify the byte array as "System.Byte[]". Restrict this compatibility conversion to
+        // conventional identifier names so binary payloads remain blobs.
         return _connection.BinaryGuid
             && value.Kind == ReaderValueKind.Blob
             && value.Blob.Length == 16
-            && (IsTextType(declaredType) || IsBlobType(declaredType))
+            && (string.IsNullOrWhiteSpace(declaredType)
+                || IsTextType(declaredType)
+                || IsBlobType(declaredType))
             && IsIdentifierColumnName(GetName(ordinal));
     }
 
