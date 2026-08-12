@@ -203,6 +203,7 @@ public sealed class ManagedCoreParameterContractRegressionTests
             var schema = reader.GetSchemaTable()!;
             schema.Rows[1][SchemaTableColumn.DataType].Should().Be(typeof(string));
             reader.GetFieldType(1).Should().Be(typeof(string));
+            reader.GetDataTypeName(1).Should().Be("TEXT");
         }
 
         var users = new DataTable();
@@ -211,6 +212,50 @@ public sealed class ManagedCoreParameterContractRegressionTests
         users.Columns["name"]!.DataType.Should().Be(typeof(string));
         users.Rows[0]["name"].Should().BeOfType<string>();
         users.Rows[0]["name"].Should().Be("dvls-admin");
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeAdapterRetainsUntypedNotifierName()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE Notifier(id GUID PRIMARY KEY, name NOT NULL, content TEXT NOT NULL, type TEXT NOT NULL);
+                CREATE TABLE NotifierGroupToNotifier(notifierid GUID NOT NULL);
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        var id = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO Notifier(id, name, content, type) VALUES ($id, 'dvls-admin', 'user:admin', 'User');";
+            insert.Parameters.AddWithValue("$id", id);
+            insert.ExecuteNonQuery();
+        }
+
+        using var selectCommand = connection.CreateCommand();
+        selectCommand.CommandText = """
+            SELECT DISTINCT
+                Notifier.*,
+                NULL AS Groups,
+                NULL AS Subscriptions
+            FROM Notifier
+            LEFT JOIN NotifierGroupToNotifier ON NotifierGroupToNotifier.NotifierId = Notifier.ID
+            WHERE Content LIKE $userId AND Type IN ($subscriberType);
+            """;
+        selectCommand.Parameters.AddWithValue("$userId", "%admin%");
+        selectCommand.Parameters.AddWithValue("$subscriberType", "User");
+
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = selectCommand;
+        var notifiers = new DataTable();
+        adapter.Fill(notifiers).Should().Be(1);
+        notifiers.Columns["name"]!.DataType.Should().Be(typeof(string));
+        notifiers.Rows[0]["name"].Should().BeOfType<string>().Which.Should().Be("dvls-admin");
     }
 
     [Test]

@@ -307,7 +307,16 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         if (!string.IsNullOrEmpty(declaredType))
             return declaredType;
 
-        return CurrentValueKind(ordinal) switch
+        var valueType = CurrentValueKind(ordinal);
+        if (HasUndeclaredSelectSourceColumn(ordinal))
+        {
+            if (valueType is ReaderValueKind.Empty or ReaderValueKind.Null)
+                valueType = GetSampleValueType(ordinal);
+
+            return GetDataTypeNameFromValueType(valueType, string.Empty);
+        }
+
+        return valueType switch
         {
             ReaderValueKind.Null => "BLOB",
             ReaderValueKind.Integer => "INTEGER",
@@ -1074,7 +1083,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (match.Success && TryGetSelectSources(_currentSql, out sources))
         {
-            selections = ExpandWildcardSelections(SplitSelectList(match.Groups["select"].Value), sources);
+            selections = ExpandWildcardSelections(StripSelectModifier(SplitSelectList(match.Groups["select"].Value)), sources);
             return true;
         }
 
@@ -1104,6 +1113,14 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             selections = Enumerable.Range(0, FieldCount).Select(GetName).ToList();
 
         return true;
+    }
+
+    private static List<string> StripSelectModifier(List<string> selections)
+    {
+        if (selections.Count > 0)
+            selections[0] = Regex.Replace(selections[0], @"^\s*(?:DISTINCT|ALL)\s+", "", RegexOptions.IgnoreCase);
+
+        return selections;
     }
 
     private static bool TryGetSelectSources(string sql, out List<SelectSource> sources)
