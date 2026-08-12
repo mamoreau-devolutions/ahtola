@@ -199,7 +199,8 @@ public sealed class ManagedCoreParameterContractRegressionTests
         }
 
         using var select = connection.CreateCommand();
-        select.CommandText = "SELECT type, roleid FROM permissions;";
+        select.CommandText = "SELECT type, roleid FROM permissions WHERE $include = 1;";
+        select.Parameters.AddWithValue("$include", 1);
         using var adapter = new GenericDataAdapter();
         ((IDbDataAdapter)adapter).SelectCommand = select;
         var permissions = new DataTable();
@@ -209,6 +210,91 @@ public sealed class ManagedCoreParameterContractRegressionTests
         permissions.Columns["roleid"]!.DataType.Should().Be(typeof(object));
         permissions.Rows[0]["type"].Should().Be("USER");
         permissions.Rows[0]["roleid"].Should().Be("role");
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeAdapterRetainsMixedBlobStorageClasses()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE permissions(type BLOB NOT NULL);
+                INSERT INTO permissions(type) VALUES (X'01'), ('USER');
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT type FROM permissions;";
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = select;
+        var permissions = new DataTable();
+        adapter.Fill(permissions).Should().Be(2);
+
+        permissions.Columns["type"]!.DataType.Should().Be(typeof(object));
+        permissions.Rows[0]["type"].Should().BeOfType<byte[]>().Which.Should().Equal(1);
+        permissions.Rows[1]["type"].Should().Be("USER");
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeAdapterMaterializesGuidBlobsInIdentifierBlobColumns()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE profiles(id BLOB NOT NULL);";
+            create.ExecuteNonQuery();
+        }
+
+        var id = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO profiles(id) VALUES ($id);";
+            insert.Parameters.AddWithValue("$id", id);
+            insert.ExecuteNonQuery().Should().Be(1);
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT id FROM profiles;";
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = select;
+        var profiles = new DataTable();
+        adapter.Fill(profiles).Should().Be(1);
+
+        profiles.Columns["id"]!.DataType.Should().Be(typeof(object));
+        Guid.TryParse((string)profiles.Rows[0]["id"], out var readId).Should().BeTrue();
+        readId.Should().Be(id);
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeAdapterSamplesUnresolvedBlobProjectionTypes()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE permissions(type BLOB NOT NULL);
+                INSERT INTO permissions(type) VALUES ('USER');
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT CASE WHEN 1 THEN type END AS type FROM permissions;";
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = select;
+        var permissions = new DataTable();
+        adapter.Fill(permissions).Should().Be(1);
+
+        permissions.Columns["type"]!.DataType.Should().Be(typeof(string));
+        permissions.Rows[0]["type"].Should().Be("USER");
     }
 
     [Test]

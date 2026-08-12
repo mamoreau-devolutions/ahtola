@@ -316,6 +316,9 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             return GetDataTypeNameFromValueType(valueType, string.Empty);
         }
 
+        if (valueType is ReaderValueKind.Empty or ReaderValueKind.Null)
+            valueType = GetSampleValueType(ordinal);
+
         return valueType switch
         {
             ReaderValueKind.Null => "BLOB",
@@ -397,12 +400,10 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         {
             if (IsBlobType(declaredType))
             {
-                var sampledValueType = valueType is ReaderValueKind.Empty or ReaderValueKind.Null
-                    ? GetSampleValueType(ordinal)
-                    : valueType;
-                return sampledValueType == ReaderValueKind.Blob
-                    ? typeof(byte[])
-                    : typeof(object);
+                // BLOB affinity does not constrain SQLite storage classes. DataAdapter fixes a
+                // DataColumn's type before it reads rows, so byte[] metadata would reject a later
+                // TEXT value from the same column. Use object to preserve mixed BLOB/TEXT values.
+                return typeof(object);
             }
 
             return GetClrTypeFromSqliteType(declaredType, valueType);
@@ -424,6 +425,13 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
     public override T GetFieldValue<T>(int ordinal)
     {
         EnsureOpen();
+        if (typeof(T) == typeof(byte[]))
+        {
+            var rawValue = GetTypedValue(ordinal);
+            if (rawValue.Kind == ReaderValueKind.Blob)
+                return (T)(object)rawValue.Blob;
+        }
+
         var value = GetValue(ordinal);
         if (value == DBNull.Value)
         {
@@ -646,7 +654,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                     ? valueType == ReaderValueKind.Blob
                         ? typeof(object)
                         : GetClrTypeFromValueType(valueType)
-                    : IsBlobType(info.TypeName) && valueType != ReaderValueKind.Blob
+                    : IsBlobType(info.TypeName)
                         ? typeof(object)
                     : GetClrTypeFromSqliteType(info.TypeName, valueType)
                 : GetClrTypeFromValueType(valueType);
@@ -1445,7 +1453,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         return _connection.BinaryGuid
             && value.Kind == ReaderValueKind.Blob
             && value.Blob.Length == 16
-            && IsTextType(declaredType)
+            && (IsTextType(declaredType) || IsBlobType(declaredType))
             && IsIdentifierColumnName(GetName(ordinal));
     }
 
