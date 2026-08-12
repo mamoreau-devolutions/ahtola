@@ -66,6 +66,13 @@ public sealed class SqliteWalWriterCheckpointCoordinator : IDisposable
     [field: ThreadStatic]
     internal static Action? AfterDetachedBackfillAttemptPublicationForTesting { get; set; }
 
+    /// <summary>
+    /// Invoked on PASSIVE after read marks are released and before install/backfill
+    /// publication. Tests use this to inject a concurrent <c>walRestartLog</c>-style wrap.
+    /// </summary>
+    [field: ThreadStatic]
+    internal static Action? AfterDetachedPassiveReadMarksReleasedForTesting { get; set; }
+
     [field: ThreadStatic]
     internal static Action? AfterDetachedMainStoreBackfillForTesting { get; set; }
 
@@ -409,27 +416,59 @@ public sealed class SqliteWalWriterCheckpointCoordinator : IDisposable
                     "SQLite WAL read marks would move durable checkpoint progress backwards.");
             }
 
+            // SQLite 3.51.3-style salt re-check while we still own the read-mark
+            // set (PASSIVE may hold only a subset). Soft-skip if a peer wrapped.
+            if (!_index.TryConfirmCheckpointIncarnation(region.Header, _wal, out var confirmedRegion))
+                return SoftSkipCheckpoint(mode, confirmedRegion);
+
+            region = confirmedRegion;
+            maximumFrame = region.Header.MaximumFrame;
+            if (safeFrame > maximumFrame)
+                safeFrame = maximumFrame;
+
             var attemptedFrameCount = region.CheckpointInfo.BackfillAttemptedFrameCount;
             if (safeFrame > attemptedFrameCount)
             {
-                _index.PublishBackfillAttemptedFrameCount(region.Header, safeFrame, _wal);
-                attemptedFrameCount = safeFrame;
-                AfterDetachedBackfillAttemptPublicationForTesting?.Invoke();
+                try
+                {
+                    _index.PublishBackfillAttemptedFrameCount(region.Header, safeFrame, _wal);
+                    attemptedFrameCount = safeFrame;
+                    AfterDetachedBackfillAttemptPublicationForTesting?.Invoke();
+                }
+                catch (SqliteWalIncarnationChangedException)
+                {
+                    return SoftSkipCheckpoint(mode, _index.ReadStableHeaderRegion());
+                }
             }
 
             var backfilledFrameCount = region.CheckpointInfo.BackfilledFrameCount;
             if (safeFrame > backfilledFrameCount)
             {
                 if (mode == SqliteWalCheckpointMode.Passive)
+                {
                     readMarks.Dispose();
+                    AfterDetachedPassiveReadMarksReleasedForTesting?.Invoke();
+                }
 
-                // A checkpoint may make main-file pages visible only after the
-                // WAL recovery evidence for every copied frame is durable.
-                _wal.Flush();
-                InstallBackfill(safeFrame);
-                AfterDetachedMainStoreBackfillForTesting?.Invoke();
-                _index.PublishBackfilledFrameCount(region.Header, safeFrame, _wal);
-                backfilledFrameCount = safeFrame;
+                // Re-check after releasing PASSIVE marks and any test hook that
+                // simulates a concurrent walRestartLog.
+                if (!_index.TryConfirmCheckpointIncarnation(region.Header, _wal, out var liveBeforeInstall))
+                    return SoftSkipCheckpoint(mode, liveBeforeInstall);
+
+                try
+                {
+                    // A checkpoint may make main-file pages visible only after the
+                    // WAL recovery evidence for every copied frame is durable.
+                    _wal.Flush();
+                    InstallBackfill(safeFrame);
+                    AfterDetachedMainStoreBackfillForTesting?.Invoke();
+                    _index.PublishBackfilledFrameCount(region.Header, safeFrame, _wal);
+                    backfilledFrameCount = safeFrame;
+                }
+                catch (SqliteWalIncarnationChangedException)
+                {
+                    return SoftSkipCheckpoint(mode, _index.ReadStableHeaderRegion());
+                }
             }
 
             if (mode is SqliteWalCheckpointMode.Restart or SqliteWalCheckpointMode.Truncate)
@@ -444,6 +483,15 @@ public sealed class SqliteWalWriterCheckpointCoordinator : IDisposable
                     // A writer could append while FULL waited for read marks. It
                     // cannot do so after this point, so restart only after its
                     // complete committed state is backfilled as well.
+                    if (!_index.TryConfirmCheckpointIncarnation(
+                            confirmation.Header,
+                            _wal,
+                            out confirmation))
+                    {
+                        throw new SqliteWalIncarnationChangedException(
+                            "SQLite WAL changed incarnation while confirming a restart checkpoint boundary.");
+                    }
+
                     if (confirmation.CheckpointInfo.BackfillAttemptedFrameCount < confirmation.Header.MaximumFrame)
                     {
                         _index.PublishBackfillAttemptedFrameCount(
@@ -497,6 +545,18 @@ public sealed class SqliteWalWriterCheckpointCoordinator : IDisposable
                 ResetWal: false);
         }
     }
+
+    private static SqliteWalCheckpointResult SoftSkipCheckpoint(
+        SqliteWalCheckpointMode mode,
+        SqliteWalIndexHeaderRegion liveRegion)
+        => new(
+            mode,
+            liveRegion.Header.MaximumFrame,
+            SafeFrame: liveRegion.CheckpointInfo.BackfilledFrameCount,
+            liveRegion.CheckpointInfo.BackfilledFrameCount,
+            liveRegion.CheckpointInfo.BackfillAttemptedFrameCount,
+            IsBusy: false,
+            ResetWal: false);
 
     private void InstallBackfill(uint safeFrame)
     {

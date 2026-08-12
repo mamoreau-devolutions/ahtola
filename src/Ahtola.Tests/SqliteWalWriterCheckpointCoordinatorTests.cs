@@ -263,6 +263,54 @@ public sealed class SqliteWalWriterCheckpointCoordinatorTests
 
     [Test]
     [NonParallelizable]
+    public void PassiveCheckpointSoftSkipsWhenWalIncarnationChangesAfterReadMarksRelease()
+    {
+        // SQLite 3.51.3 / Tailscale WAL-reset race: after PASSIVE releases read marks,
+        // a peer may wrap the WAL (new salts, mxFrame=0). Soft-skip must not publish
+        // the pre-wrap safeFrame into nBackfill.
+        RequireCoordinatorSupport();
+        using var artifact = SqliteWalArtifact.Create();
+        uint preWrapMaximumFrame;
+        using (var probeWal = OpenWalCopy(artifact.DatabasePath))
+        {
+            preWrapMaximumFrame = checked((uint)probeWal.ScanRecovery().LastCommittedFrameNumber);
+            preWrapMaximumFrame.Should().BeGreaterThan(0);
+        }
+
+        try
+        {
+            SqliteWalWriterCheckpointCoordinator.AfterDetachedPassiveReadMarksReleasedForTesting =
+                () => SimulatePeerWalWrap(artifact.DatabasePath);
+
+            using var coordinator = SqliteWalWriterCheckpointCoordinator.Open(artifact.DatabasePath);
+            var result = coordinator.Checkpoint(SqliteWalCheckpointMode.Passive, TimeSpan.Zero);
+
+            result.ResetWal.Should().BeFalse();
+            result.IsBusy.Should().BeFalse();
+            result.BackfilledFrameCount.Should().Be(0);
+            result.MaximumFrame.Should().Be(0);
+            result.BackfilledFrameCount.Should().NotBe(preWrapMaximumFrame);
+        }
+        finally
+        {
+            SqliteWalWriterCheckpointCoordinator.AfterDetachedPassiveReadMarksReleasedForTesting = null;
+        }
+
+        using var verifiedWal = OpenWalCopy(artifact.DatabasePath);
+        using var verifiedMapping = ((ISqliteWalSharedMemoryFileSystem)PhysicalFileSystem.Instance).OpenSharedMemory(
+            artifact.DatabasePath + "-shm",
+            FileOpenMode.OpenExisting,
+            readOnly: true);
+        var verified = new SqliteWalIndexSharedMemory(verifiedMapping).ReadValidatedHeader(verifiedWal);
+        verified.Header.MaximumFrame.Should().Be(0);
+        verified.CheckpointInfo.BackfilledFrameCount.Should().Be(0);
+        // Attempted may have been published under the pre-wrap incarnation; durable
+        // nBackfill must never land at the stale safe frame.
+        verified.CheckpointInfo.BackfilledFrameCount.Should().NotBe(preWrapMaximumFrame);
+    }
+
+    [Test]
+    [NonParallelizable]
     public void CheckpointResetMarkerRepairsAStaleIndexOnReopen()
     {
         RequireCoordinatorSupport();
@@ -854,6 +902,27 @@ public sealed class SqliteWalWriterCheckpointCoordinatorTests
         using var command = connection.CreateCommand();
         command.CommandText = commandText;
         command.ExecuteNonQuery();
+    }
+
+    private static void SimulatePeerWalWrap(string databasePath)
+    {
+        var walPath = databasePath + "-wal";
+        var shmPath = databasePath + "-shm";
+        var fileSystem = new SqlitePagerPhysicalFileSystem(PhysicalFileSystem.Instance);
+        using var wal = SqliteWalFile.Open(fileSystem, walPath);
+        using var mapping = ((ISqliteWalSharedMemoryFileSystem)PhysicalFileSystem.Instance).OpenSharedMemory(
+            shmPath,
+            FileOpenMode.OpenExisting);
+        var index = new SqliteWalIndexSharedMemory(mapping);
+        var region = index.ReadValidatedHeader(wal);
+        region.Header.MaximumFrame.Should().BeGreaterThan(0);
+
+        wal.ResetAfterDurableCheckpoint(publishCheckpointedRecoveryMarker: true);
+        index.ResetAfterDurableRestart(
+            region.Header.WithRestartedWal(
+                region.Header.DatabasePageCount,
+                wal.Header.Salt1,
+                wal.Header.Salt2));
     }
 
     private static SqliteWalFile OpenWalCopy(string databasePath)
