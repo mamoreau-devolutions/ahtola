@@ -696,8 +696,10 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         EnsureHasCurrentRow();
         var value = ReadValue(ordinal);
         var declaredType = GetDeclaredTypeName(ordinal);
-        if (ShouldMaterializeGuid(declaredType, value))
+        if (IsGuidType(declaredType) && value.Kind is ReaderValueKind.Blob or ReaderValueKind.Text)
             return ToGuid(ordinal, value);
+        if (ShouldMaterializeTextGuid(ordinal, declaredType, value))
+            return ToGuid(ordinal, value).ToString("D", CultureInfo.InvariantCulture).ToUpperInvariant();
 
         return value.Kind switch
         {
@@ -1418,18 +1420,17 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                || normalized.Equals("UNIQUEIDENTIFIER", StringComparison.OrdinalIgnoreCase);
     }
 
-    private bool ShouldMaterializeGuid(string declaredType, ReaderValue value)
+    private bool ShouldMaterializeTextGuid(int ordinal, string declaredType, ReaderValue value)
     {
-        if (IsGuidType(declaredType))
-            return value.Kind is ReaderValueKind.Blob or ReaderValueKind.Text;
-
         // SQLite's TEXT affinity permits a .NET Guid parameter to retain its BLOB storage class.
-        // With BinaryGUID enabled, preserve that GUID through DataAdapter instead of letting
-        // DataColumn stringify the byte array as "System.Byte[]".
+        // With BinaryGUID enabled, preserve such identifier values through DataAdapter instead of
+        // letting DataColumn stringify the byte array as "System.Byte[]". Restrict this
+        // compatibility conversion to conventional identifier names so binary payloads remain blobs.
         return _connection.BinaryGuid
             && value.Kind == ReaderValueKind.Blob
             && value.Blob.Length == 16
-            && IsTextType(declaredType);
+            && IsTextType(declaredType)
+            && IsIdentifierColumnName(GetName(ordinal));
     }
 
     private static bool IsTextType(string typeName)
@@ -1438,6 +1439,15 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         return normalized.Contains("CHAR", StringComparison.OrdinalIgnoreCase)
                || normalized.Contains("CLOB", StringComparison.OrdinalIgnoreCase)
                || normalized.Contains("TEXT", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsIdentifierColumnName(string columnName)
+    {
+        var separator = columnName.LastIndexOf('.');
+        var name = separator >= 0 ? columnName[(separator + 1)..] : columnName;
+        return name.Equals("ID", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("ID", StringComparison.Ordinal)
+            || name.EndsWith("Id", StringComparison.Ordinal);
     }
 
     private sealed record SelectSource(string TableName, string Alias);

@@ -181,6 +181,33 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
+    public void ManagedSqliteFacadeRetainsNonIdentifierBlobsInTextColumns()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE documents(payload TEXT NOT NULL);";
+            create.ExecuteNonQuery();
+        }
+
+        var payload = Enumerable.Range(0, 16).Select(static value => (byte)value).ToArray();
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO documents(payload) VALUES (?);";
+            insert.Parameters.AddWithValue(null, payload);
+            insert.ExecuteNonQuery().Should().Be(1);
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT payload FROM documents;";
+        using var reader = select.ExecuteReader();
+        reader.Read().Should().BeTrue();
+        reader.GetValue(0).Should().BeOfType<byte[]>().Which.Should().Equal(payload);
+    }
+
+    [Test]
     public void ManagedSqliteFacadeReportsGuidReaderStorageWithoutValue()
     {
         using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
