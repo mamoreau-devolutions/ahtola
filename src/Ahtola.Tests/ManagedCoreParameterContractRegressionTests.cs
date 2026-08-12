@@ -120,6 +120,28 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
+    public void ManagedSqliteFacadeReportsGuidReaderStorageWithoutValue()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE users(id GUID PRIMARY KEY); INSERT INTO users(id) VALUES ('not-a-guid');";
+            create.ExecuteNonQuery();
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT id FROM users;";
+        using var reader = select.ExecuteReader();
+        reader.Read().Should().BeTrue();
+
+        var exception = Assert.Throws<InvalidOperationException>(() => reader.GetValue(0))!;
+        exception.Message.Should().Be("Unable to parse GUID for column 'id' (ordinal 0, declared type 'GUID', storage TEXT).");
+        exception.Message.Should().NotContain("not-a-guid");
+    }
+
+    [Test]
     public void ManagedSqliteFacadeAdapterUpdatesGuidAndTextColumns()
     {
         using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");

@@ -496,7 +496,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
     {
         EnsureOpen();
         var value = GetTypedValue(ordinal);
-        return ToGuid(value);
+        return ToGuid(ordinal, value);
     }
 
     public override short GetInt16(int ordinal)
@@ -696,7 +696,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         EnsureHasCurrentRow();
         var value = ReadValue(ordinal);
         if (IsGuidType(GetDeclaredTypeName(ordinal)) && value.Kind is ReaderValueKind.Blob or ReaderValueKind.Text)
-            return ToGuid(value);
+            return ToGuid(ordinal, value);
 
         return value.Kind switch
         {
@@ -1496,42 +1496,58 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             : throw new InvalidCastException("The requested value is not TEXT.");
     }
 
-    private Guid ToGuid(ReaderValue value)
+    private Guid ToGuid(int ordinal, ReaderValue value)
+    {
+        if (value.Kind == ReaderValueKind.Blob)
         {
-            if (value.Kind == ReaderValueKind.Blob)
+            if (value.Blob.Length == 16)
             {
-                if (value.Blob.Length == 16)
-                {
-                    // BinaryGUID=true (default): little-endian .NET Guid blob layout (SDS default).
-                    // BinaryGUID=false: big-endian RFC 4122 byte order.
-                    return _connection.BinaryGuid
-                        ? new Guid(value.Blob)
-                        : new Guid(
-                            (value.Blob[0] << 24) | (value.Blob[1] << 16) | (value.Blob[2] << 8) | value.Blob[3],
-                            (short)((value.Blob[4] << 8) | value.Blob[5]),
-                            (short)((value.Blob[6] << 8) | value.Blob[7]),
-                            value.Blob[8],
-                            value.Blob[9],
-                            value.Blob[10],
-                            value.Blob[11],
-                            value.Blob[12],
-                            value.Blob[13],
-                            value.Blob[14],
-                            value.Blob[15]);
-                }
-
-                return Guid.Parse(Encoding.UTF8.GetString(value.Blob));
+                // BinaryGUID=true (default): little-endian .NET Guid blob layout (SDS default).
+                // BinaryGUID=false: big-endian RFC 4122 byte order.
+                return _connection.BinaryGuid
+                    ? new Guid(value.Blob)
+                    : new Guid(
+                        (value.Blob[0] << 24) | (value.Blob[1] << 16) | (value.Blob[2] << 8) | value.Blob[3],
+                        (short)((value.Blob[4] << 8) | value.Blob[5]),
+                        (short)((value.Blob[6] << 8) | value.Blob[7]),
+                        value.Blob[8],
+                        value.Blob[9],
+                        value.Blob[10],
+                        value.Blob[11],
+                        value.Blob[12],
+                        value.Blob[13],
+                        value.Blob[14],
+                        value.Blob[15]);
             }
 
-            return Guid.Parse(value.Text);
+            if (Guid.TryParse(Encoding.UTF8.GetString(value.Blob), out var blobGuid))
+                return blobGuid;
+
+            throw CreateGuidFormatException(ordinal, value);
         }
 
-        private DateTime ApplyConfiguredDateTimeKind(DateTime value)
-        {
-            // Match Microsoft.Data.Sqlite / SDS: apply connection DateTimeKind via SpecifyKind
-            // (no zone conversion) so RDM DateTimeKind=Utc surfaces Kind=Utc on reads.
-            return DateTime.SpecifyKind(value, _connection.DateTimeKind);
-        }
+        if (value.Kind == ReaderValueKind.Text && Guid.TryParse(value.Text, out var textGuid))
+            return textGuid;
+
+        throw CreateGuidFormatException(ordinal, value);
+    }
+
+    private InvalidOperationException CreateGuidFormatException(int ordinal, ReaderValue value)
+    {
+        var storageDetails = value.Kind == ReaderValueKind.Blob
+            ? $"BLOB ({value.Blob.Length} bytes)"
+            : value.Kind.ToString().ToUpperInvariant();
+        var declaredType = GetDeclaredTypeName(ordinal);
+        return new InvalidOperationException(
+            $"Unable to parse GUID for column '{GetName(ordinal)}' (ordinal {ordinal}, declared type '{declaredType}', storage {storageDetails}).");
+    }
+
+    private DateTime ApplyConfiguredDateTimeKind(DateTime value)
+    {
+        // Match Microsoft.Data.Sqlite / SDS: apply connection DateTimeKind via SpecifyKind
+        // (no zone conversion) so RDM DateTimeKind=Utc surfaces Kind=Utc on reads.
+        return DateTime.SpecifyKind(value, _connection.DateTimeKind);
+    }
 
     private void DrainRemainingStatements()
     {
