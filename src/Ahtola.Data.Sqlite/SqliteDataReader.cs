@@ -583,19 +583,20 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         schema.Columns.Add(SchemaTableColumn.IsLong, typeof(bool));
         schema.Columns.Add(SchemaTableColumn.ProviderType, typeof(int));
 
-        var tableName = TryGetSelectSource(out var parsedTableName, out var selections) ? parsedTableName : null;
-        var tableColumns = tableName is null ? new Dictionary<string, SchemaColumnInfo>(StringComparer.OrdinalIgnoreCase) : GetTableColumns(tableName);
+        var hasSources = TryGetSelectSources(out var sources, out var selections);
+        var sourceColumns = hasSources
+            ? GetSelectSourceColumns(sources)
+            : new Dictionary<string, Dictionary<string, SchemaColumnInfo>>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < FieldCount; i++)
         {
             var columnName = GetName(i);
             var selection = i < selections.Count ? selections[i] : columnName;
-            var baseColumnName = ResolveBaseColumnName(selection, columnName, tableColumns);
-            SchemaColumnInfo? columnInfo = null;
-            var hasBaseColumn = baseColumnName is not null && tableName is not null && tableColumns.TryGetValue(baseColumnName, out columnInfo);
-            var info = hasBaseColumn
-                ? columnInfo ?? throw new InvalidOperationException(Properties.Resources.NoData)
+            var resolvedColumn = hasSources
+                ? ResolveSelectColumn(selection, columnName, sources, sourceColumns)
                 : null;
+            var info = resolvedColumn?.Column;
+            var hasBaseColumn = info is not null;
             var valueType = _hasCurrentRow ? ReadValue(i).Kind : ReaderValueKind.Empty;
             if (valueType == ReaderValueKind.Empty && !string.IsNullOrEmpty(info?.TypeName))
                 valueType = GetValueKindFromTypeName(info.TypeName);
@@ -622,7 +623,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             row["BaseCatalogName"] = info is not null ? "main" : DBNull.Value;
             row[SchemaTableColumn.BaseColumnName] = info is not null ? info.Name : DBNull.Value;
             row[SchemaTableColumn.BaseSchemaName] = DBNull.Value;
-            row[SchemaTableColumn.BaseTableName] = info is not null ? tableName : DBNull.Value;
+            row[SchemaTableColumn.BaseTableName] = resolvedColumn?.TableName ?? (object)DBNull.Value;
             row[SchemaTableColumn.DataType] = dataType;
             row["DataTypeName"] = dataTypeName;
             row[SchemaTableColumn.AllowDBNull] = info is not null ? isAliased || info.AllowNull : DBNull.Value;
@@ -962,14 +963,14 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
 
     private string GetDeclaredTypeName(int ordinal)
     {
-        if (TryGetSelectSource(out var tableName, out var selections))
+        if (TryGetSelectSources(out var sources, out var selections))
         {
-            var tableColumns = GetTableColumns(tableName);
+            var sourceColumns = GetSelectSourceColumns(sources);
             var columnName = GetName(ordinal);
             var selection = ordinal < selections.Count ? selections[ordinal] : columnName;
-            var baseColumnName = ResolveBaseColumnName(selection, columnName, tableColumns);
-            if (baseColumnName is not null && tableColumns.TryGetValue(baseColumnName, out var columnInfo))
-                return StripTypeLength(columnInfo.TypeName);
+            var resolvedColumn = ResolveSelectColumn(selection, columnName, sources, sourceColumns);
+            if (resolvedColumn is not null)
+                return StripTypeLength(resolvedColumn.Column.TypeName);
         }
 
         var match = Regex.Match(_command.CommandText, @"^\s*SELECT\s+(?<column>[\w\[\]""`]+)\s+FROM\s+(?<table>[\w\[\]""`]+)", RegexOptions.IgnoreCase);
@@ -1034,26 +1035,22 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         return index < 0 ? typeName : typeName[..index];
     }
 
-    private bool TryGetSelectSource(out string tableName, out List<string> selections)
+    private bool TryGetSelectSources(out List<SelectSource> sources, out List<string> selections)
     {
-        tableName = string.Empty;
+        sources = new List<SelectSource>();
         selections = new List<string>();
         var match = Regex.Match(
             _currentSql,
-            @"^\s*SELECT\s+(?<select>.*?)\s+FROM\s+(?<table>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)",
+            @"^\s*SELECT\s+(?<select>.*?)\s+FROM\s+",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        if (match.Success)
+        if (match.Success && TryGetSelectSources(_currentSql, out sources))
         {
-            tableName = UnquoteIdentifier(match.Groups["table"].Value);
-            selections = SplitSelectList(match.Groups["select"].Value);
-            if (selections.Count == 1 && selections[0] == "*")
-                selections = Enumerable.Range(0, FieldCount).Select(GetName).ToList();
-
+            selections = ExpandWildcardSelections(SplitSelectList(match.Groups["select"].Value), sources);
             return true;
         }
 
         // DML ... RETURNING <cols>: the result columns come from the target table, so the
-        // declared column types resolve via PRAGMA table_info of that table. Without this,
+        // declared column types resolve via PRAGMA table_info of the source table. Without this,
         // GetSchemaTable/GetDeclaredTypeName fall back to GetSampleValueType, which would
         // RE-EXECUTE the DML once per column (INSERT...RETURNING -> N+1 inserts) and report
         // Byte[]/BLOB for every column before the first Read.
@@ -1071,13 +1068,122 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         if (!tableMatch.Success)
             return false;
 
-        tableName = UnquoteIdentifier(tableMatch.Groups["table"].Value);
+        var tableName = UnquoteIdentifier(tableMatch.Groups["table"].Value);
+        sources.Add(new SelectSource(tableName, tableName));
         selections = SplitSelectList(returningMatch.Groups["cols"].Value);
         if (selections.Count == 1 && selections[0] == "*")
             selections = Enumerable.Range(0, FieldCount).Select(GetName).ToList();
 
         return true;
     }
+
+    private static bool TryGetSelectSources(string sql, out List<SelectSource> sources)
+    {
+        sources = new List<SelectSource>();
+        var matches = Regex.Matches(
+            sql,
+            @"\b(?:FROM|JOIN)\s+(?<table>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)(?:\s+(?:AS\s+)?(?<alias>[\w]+))?",
+            RegexOptions.IgnoreCase);
+        foreach (Match match in matches)
+        {
+            var tableName = UnquoteIdentifier(match.Groups["table"].Value);
+            var alias = match.Groups["alias"].Success ? match.Groups["alias"].Value : tableName;
+            if (IsJoinKeyword(alias))
+                alias = tableName;
+
+            sources.Add(new SelectSource(tableName, alias));
+        }
+
+        return sources.Count > 0;
+    }
+
+    private List<string> ExpandWildcardSelections(List<string> selections, List<SelectSource> sources)
+    {
+        var expanded = new List<string>();
+        foreach (var selection in selections)
+        {
+            var match = Regex.Match(
+                selection,
+                @"^(?:(?<alias>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)\.)?\*$",
+                RegexOptions.IgnoreCase);
+            if (!match.Success)
+            {
+                expanded.Add(selection);
+                continue;
+            }
+
+            var alias = match.Groups["alias"].Success ? UnquoteIdentifier(match.Groups["alias"].Value) : null;
+            foreach (var source in sources.Where(source => alias is null || string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase)))
+            {
+                foreach (var column in GetTableColumns(source.TableName).Values)
+                    expanded.Add($"{source.Alias}.{QuoteIdentifier(column.Name)}");
+            }
+        }
+
+        return expanded;
+    }
+
+    private Dictionary<string, Dictionary<string, SchemaColumnInfo>> GetSelectSourceColumns(List<SelectSource> sources)
+    {
+        var columns = new Dictionary<string, Dictionary<string, SchemaColumnInfo>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in sources)
+            columns[source.Alias] = GetTableColumns(source.TableName);
+
+        return columns;
+    }
+
+    private static ResolvedSchemaColumn? ResolveSelectColumn(
+        string selection,
+        string columnName,
+        List<SelectSource> sources,
+        IReadOnlyDictionary<string, Dictionary<string, SchemaColumnInfo>> sourceColumns)
+    {
+        var withoutAlias = Regex.Replace(selection, @"\s+AS\s+.*$", "", RegexOptions.IgnoreCase).Trim();
+        var qualifiedMatch = Regex.Match(
+            withoutAlias,
+            @"^(?<alias>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)\.(?<column>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)$",
+            RegexOptions.IgnoreCase);
+        if (qualifiedMatch.Success)
+        {
+            var alias = UnquoteIdentifier(qualifiedMatch.Groups["alias"].Value);
+            var column = UnquoteIdentifier(qualifiedMatch.Groups["column"].Value);
+            if (sourceColumns.TryGetValue(alias, out var columns)
+                && columns.TryGetValue(column, out var columnInfo))
+            {
+                var source = sources.First(source => string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase));
+                return new ResolvedSchemaColumn(source.TableName, columnInfo);
+            }
+        }
+
+        var candidate = UnquoteIdentifier(withoutAlias);
+        var canUseColumnName = selection.Length == withoutAlias.Length
+            && !Regex.IsMatch(selection, @"[+\-*/()]");
+        var matches = new List<ResolvedSchemaColumn>();
+        foreach (var source in sources)
+        {
+            if (sourceColumns[source.Alias].TryGetValue(candidate, out var columnInfo)
+                || sourceColumns[source.Alias].TryGetValue(columnName, out columnInfo)
+                    && canUseColumnName)
+            {
+                matches.Add(new ResolvedSchemaColumn(source.TableName, columnInfo));
+            }
+        }
+
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    private static bool IsJoinKeyword(string value)
+        => value.Equals("LEFT", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("RIGHT", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("INNER", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("OUTER", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("CROSS", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("FULL", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("WHERE", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("ORDER", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("GROUP", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("LIMIT", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("ON", StringComparison.OrdinalIgnoreCase);
 
     private static List<string> SplitSelectList(string selectList)
     {
@@ -1148,20 +1254,6 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         }
 
         return columns;
-    }
-
-    private static string? ResolveBaseColumnName(string selection, string columnName, Dictionary<string, SchemaColumnInfo> tableColumns)
-    {
-        var withoutAlias = Regex.Replace(selection, @"\s+AS\s+.*$", "", RegexOptions.IgnoreCase).Trim();
-        var candidate = UnquoteIdentifier(withoutAlias);
-        if (tableColumns.ContainsKey(candidate))
-            return candidate;
-        if (selection.Length != withoutAlias.Length)
-            return null;
-
-        return tableColumns.ContainsKey(columnName) && !Regex.IsMatch(selection, @"[+\-*/()]")
-            ? columnName
-            : null;
     }
 
     private static string GetDataTypeNameFromValueType(ReaderValueKind valueType, string selection)
@@ -1278,6 +1370,10 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         return normalized.Equals("GUID", StringComparison.OrdinalIgnoreCase)
                || normalized.Equals("UNIQUEIDENTIFIER", StringComparison.OrdinalIgnoreCase);
     }
+
+    private sealed record SelectSource(string TableName, string Alias);
+
+    private sealed record ResolvedSchemaColumn(string TableName, SchemaColumnInfo Column);
 
     private sealed record SchemaColumnInfo(string Name, string TypeName, bool AllowNull, bool IsKey, bool IsUnique);
 

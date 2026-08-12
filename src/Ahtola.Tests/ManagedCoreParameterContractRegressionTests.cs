@@ -160,6 +160,51 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
+    public void ManagedSqliteFacadeAdapterResolvesJoinedTextColumnMetadata()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = """
+                CREATE TABLE UserAccount(id GUID PRIMARY KEY);
+                CREATE TABLE UserSecurity(id GUID PRIMARY KEY, name TEXT NOT NULL, usertype INTEGER NOT NULL, isdeleted INTEGER NOT NULL);
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        var id = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT INTO UserAccount(id) VALUES ($id);
+                INSERT INTO UserSecurity(id, name, usertype, isdeleted) VALUES ($id, 'dvls-admin', 0, 0);
+                """;
+            insert.Parameters.AddWithValue("$id", id);
+            insert.ExecuteNonQuery();
+        }
+
+        using var adapter = new Ahtola.AhtolaDataAdapter(
+            """
+            SELECT a.*, s.name
+            FROM UserAccount a
+            LEFT OUTER JOIN UserSecurity s ON a.id = s.id
+            WHERE s.usertype = $userType AND a.id = $id AND s.isdeleted = 0;
+            """,
+            connection);
+        var selectCommand = (SqliteCommand)adapter.SelectCommand!;
+        selectCommand.Parameters.AddWithValue("$userType", 0);
+        selectCommand.Parameters.AddWithValue("$id", id);
+
+        var users = new DataTable();
+        adapter.Fill(users).Should().Be(1);
+        users.Columns["id"]!.DataType.Should().Be(typeof(Guid));
+        users.Columns["name"]!.DataType.Should().Be(typeof(string));
+        users.Rows[0]["name"].Should().Be("dvls-admin");
+    }
+
+    [Test]
     public void ManagedAhtolaFacadeBindsNumberedNamedAndPositionalValuesAfterRebind()
     {
         using var connection = new AhtolaConnection("Data Source=:memory:;Local Provider=Managed");
