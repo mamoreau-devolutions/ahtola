@@ -1058,14 +1058,19 @@ internal sealed class EmbeddedFileStore : IDisposable
             }
 
             childHeight = childResult.Height;
-            if (childIndex < interior.Cells.Count
-                && childResult.MaximumRowId != interior.Cells[childIndex].Cell.RowId)
-            {
-                throw new EmbeddedSqlException(
-                    $"Managed file database table rootpage {rootPage} interior page {pageNumber} separator {childIndex} does not match child page {childPage}.");
-            }
+                        // SQLite table-interior separators are search upper bounds for the left
+                        // child, not a maintained copy of that child's live maximum rowid.
+                        // After deletes, the separator can stay strictly greater than every
+                        // remaining left-child rowid (stale separator). Equality is therefore
+                        // too strong; only reject keys that would violate the bound.
+                        if (childIndex < interior.Cells.Count
+                            && childResult.MaximumRowId > interior.Cells[childIndex].Cell.RowId)
+                        {
+                            throw new EmbeddedSqlException(
+                                $"Managed file database table rootpage {rootPage} interior page {pageNumber} separator {childIndex} is below maximum rowid on child page {childPage}.");
+                        }
 
-            maximumRowId = childResult.MaximumRowId;
+                        maximumRowId = childResult.MaximumRowId;
         }
 
         return new TableTreeReadResult(
