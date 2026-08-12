@@ -245,24 +245,7 @@ public class AhtolaDataReader : DbDataReader, IConnectionOwnedReader
     }
 
     public override Guid GetGuid(int ordinal)
-    {
-        var value = GetTypedValue(ordinal);
-        if (value.Kind == ReaderValueKind.Blob)
-        {
-            if (value.Blob.Length == 16)
-                return new Guid(value.Blob);
-
-            if (Guid.TryParse(Encoding.UTF8.GetString(value.Blob), out var blobGuid))
-                return blobGuid;
-
-            throw CreateGuidFormatException(ordinal, value);
-        }
-
-        if (value.Kind == ReaderValueKind.Text && Guid.TryParse(value.Text, out var textGuid))
-            return textGuid;
-
-        throw CreateGuidFormatException(ordinal, value);
-    }
+        => ToGuid(ordinal, GetTypedValue(ordinal));
 
     public override short GetInt16(int ordinal)
     {
@@ -305,6 +288,12 @@ public class AhtolaDataReader : DbDataReader, IConnectionOwnedReader
     public override object GetValue(int ordinal)
     {
         var value = ReadValue(ordinal);
+        if (IsGuidType(DeclaredColumnType(ordinal))
+            && value.Kind is ReaderValueKind.Blob or ReaderValueKind.Text)
+        {
+            return ToGuid(ordinal, value);
+        }
+
         return value.Kind switch
         {
             ReaderValueKind.Null or ReaderValueKind.Empty => DBNull.Value,
@@ -483,6 +472,25 @@ public class AhtolaDataReader : DbDataReader, IConnectionOwnedReader
             : throw new InvalidCastException("The requested value is not TEXT.");
     }
 
+    private Guid ToGuid(int ordinal, ReaderValue value)
+    {
+        if (value.Kind == ReaderValueKind.Blob)
+        {
+            if (value.Blob.Length == 16)
+                return new Guid(value.Blob);
+
+            if (Guid.TryParse(Encoding.UTF8.GetString(value.Blob), out var blobGuid))
+                return blobGuid;
+
+            throw CreateGuidFormatException(ordinal, value);
+        }
+
+        if (value.Kind == ReaderValueKind.Text && Guid.TryParse(value.Text, out var textGuid))
+            return textGuid;
+
+        throw CreateGuidFormatException(ordinal, value);
+    }
+
     private InvalidOperationException CreateGuidFormatException(int ordinal, ReaderValue value)
     {
         var storageDetails = value.Kind == ReaderValueKind.Blob
@@ -491,6 +499,14 @@ public class AhtolaDataReader : DbDataReader, IConnectionOwnedReader
         var declaredType = DeclaredColumnType(ordinal) ?? string.Empty;
         return new InvalidOperationException(
             $"Unable to parse GUID for column '{GetName(ordinal)}' (ordinal {ordinal}, declared type '{declaredType}', storage {storageDetails}).");
+    }
+
+    private static bool IsGuidType(string? declaredType)
+    {
+        var normalized = StripDeclaredTypeLength(declaredType)?.Trim();
+        return normalized is not null
+               && (normalized.Equals("GUID", StringComparison.OrdinalIgnoreCase)
+                   || normalized.Equals("UNIQUEIDENTIFIER", StringComparison.OrdinalIgnoreCase));
     }
 
     private ReaderValue GetTypedValue(int ordinal)

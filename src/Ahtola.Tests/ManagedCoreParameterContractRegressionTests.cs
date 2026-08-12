@@ -170,6 +170,7 @@ public sealed class ManagedCoreParameterContractRegressionTests
             using var reader = select.ExecuteReader();
             reader.Read().Should().BeTrue();
             reader.GetGuid(0).Should().Be(id);
+            reader.GetValue(0).Should().Be(id);
         }
 
         using (var insert = connection.CreateCommand())
