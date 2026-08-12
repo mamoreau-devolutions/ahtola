@@ -15,7 +15,9 @@ public sealed class AhtolaConnectionStringBuilder : DbConnectionStringBuilder
         ["Mode"] = "Mode",
         ["Cache"] = "Cache",
         ["Password"] = "Password",
-        ["Foreign Keys"] = "Foreign Keys",
+                ["Password Scheme"] = "Password Scheme",
+                ["PasswordScheme"] = "Password Scheme",
+                ["Foreign Keys"] = "Foreign Keys",
         ["ForeignKeys"] = "Foreign Keys",
         ["Recursive Triggers"] = "Recursive Triggers",
         ["RecursiveTriggers"] = "Recursive Triggers",
@@ -80,7 +82,17 @@ public sealed class AhtolaConnectionStringBuilder : DbConnectionStringBuilder
         set => SetString("Password", value);
     }
 
-    public bool? ForeignKeys
+        /// <summary>
+        /// Passphrase key-derivation scheme id (for example <c>Ahtola.Password.v1</c>).
+        /// Empty selects the catalog default.
+        /// </summary>
+        public string PasswordScheme
+        {
+            get => GetString("Password Scheme");
+            set => SetString("Password Scheme", value);
+        }
+
+        public bool? ForeignKeys
     {
         get => GetNullableBool("Foreign Keys");
         set => SetNullable("Foreign Keys", value);

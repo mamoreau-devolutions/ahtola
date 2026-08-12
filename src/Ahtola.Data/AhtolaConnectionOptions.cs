@@ -293,31 +293,40 @@ public class AhtolaConnectionOptions
     {
             var password = _builder.GetOption("Password");
             var hasPassword = !string.IsNullOrEmpty(password);
-            var cipher = _builder.GetOption("Encryption Cipher");
-            var key = _builder.GetOption("Encryption Key");
-            var hasKey = !string.IsNullOrWhiteSpace(key);
+                var passwordScheme = _builder.GetOption("Password Scheme");
+                var cipher = _builder.GetOption("Encryption Cipher");
+                var key = _builder.GetOption("Encryption Key");
+                var hasKey = !string.IsNullOrWhiteSpace(key);
 
-            if (hasPassword && hasKey)
-            {
-                throw new InvalidOperationException(
-                    "Password and Encryption Key cannot be combined; use one passphrase or one hex key.");
-            }
-
-            ManagedEncryptionOptions? options;
-            if (hasPassword)
-            {
-                if (!string.IsNullOrWhiteSpace(cipher)
-                    && !cipher.Equals("aes256gcm", StringComparison.OrdinalIgnoreCase))
+                if (!hasPassword && !string.IsNullOrWhiteSpace(passwordScheme))
                 {
-                    throw new NotSupportedException(
-                        "Password= derives an AES-256-GCM key; Encryption Cipher must be omitted or Aes256Gcm.");
+                    throw new InvalidOperationException(
+                        "Password Scheme requires Password=; it only selects passphrase key derivation.");
                 }
 
-                options = AhtolaPasswordEncryption.FromPassword(password!);
-            }
-            else if (string.IsNullOrWhiteSpace(cipher))
+                if (hasPassword && hasKey)
             {
-                if (key is not null)
+                    throw new InvalidOperationException(
+                        "Password and Encryption Key cannot be combined; use one passphrase or one hex key.");
+                }
+
+                ManagedEncryptionOptions? options;
+                if (hasPassword)
+                {
+                    var scheme = AhtolaPassphraseSchemes.Resolve(passwordScheme);
+                    if (!string.IsNullOrWhiteSpace(cipher)
+                        && !CipherNameMatches(cipher, scheme.PageCipher))
+                    {
+                        throw new NotSupportedException(
+                            $"Password Scheme '{scheme.Id}' derives {scheme.PageCipher}; "
+                            + "Encryption Cipher must be omitted or match that page cipher.");
+                    }
+
+                    options = scheme.DeriveEncryptionOptions(password!);
+                }
+                else if (string.IsNullOrWhiteSpace(cipher))
+                {
+                    if (key is not null)
                 {
                     throw new InvalidOperationException(
                         "Encryption Cipher is required when Encryption Key is specified.");
@@ -353,10 +362,18 @@ public class AhtolaConnectionOptions
             }
 
             return options;
-        }
-    }
+                }
 
-internal readonly record struct ManagedLocalOpenOptions(
+                private static bool CipherNameMatches(string cipherName, Ahtola.Core.Storage.AhtolaEncryptionCipher cipher)
+                    => cipherName.ToLowerInvariant() switch
+                    {
+                        "aes128gcm" => cipher == Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm,
+                        "aes256gcm" => cipher == Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm,
+                        _ => false,
+                    };
+            }
+
+            internal readonly record struct ManagedLocalOpenOptions(
     string DataSource,
     bool ReadOnly,
     ManagedEncryptionOptions? Encryption,

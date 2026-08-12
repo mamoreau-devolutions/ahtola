@@ -16,11 +16,11 @@ or run.
 
 ## Install
 
-```bash
+``bash
 dotnet add package Devolutions.Ahtola.Data.Sqlite
 # optional EF Core 9.x provider:
 dotnet add package Devolutions.Ahtola.EntityFrameworkCore.Sqlite
-```
+``
 
 Targets: `net8.0`, `net9.0`, `net10.0`. No `net48` / .NET Framework assets.
 
@@ -40,7 +40,7 @@ Targets: `net8.0`, `net9.0`, `net10.0`. No `net48` / .NET Framework assets.
 
 **SQLite-compatible facade** (drop-in `using` swap from Microsoft.Data.Sqlite):
 
-```csharp
+``csharp
 using Ahtola.Data.Sqlite;
 
 using var connection = new SqliteConnection("Data Source=app.db");
@@ -53,24 +53,24 @@ command.CommandText = "SELECT a, b FROM t";
 using var reader = command.ExecuteReader();
 while (reader.Read())
     Console.WriteLine($"{reader.GetInt32(0)} {reader.GetString(1)}");
-```
+``
 
 **Ahtola types** (same package):
 
-```csharp
+``csharp
 using Ahtola;
 
 using var connection = new AhtolaConnection("Data Source=:memory:");
 connection.Open();
 connection.ExecuteNonQuery("CREATE TABLE t(a, b)");
 // AhtolaConnection, AhtolaCommand, AhtolaParameter, AhtolaFactory.Instance, …
-```
+``
 
 **EF Core:**
 
-```csharp
+``csharp
 options.UseAhtola("Data Source=app.db");
-```
+``
 
 Common connection-string keywords: `Data Source`, `Mode`, `Cache`, `Pooling`,
 `Foreign Keys`, `Default Timeout` / `Command Timeout`, `Foreign Read Only`,
@@ -87,14 +87,29 @@ read/write workloads.
 
 ### File encryption (not SEE / SQLCipher)
 
+Encryption is layered so new recipes can be added without rewriting the pager:
+
+| Layer | Role | Extension point |
+| --- | --- | --- |
+| **Passphrase scheme** | Password to AES key | `IAhtolaPassphraseScheme` + `AhtolaPassphraseSchemes`; CS `Password Scheme=` |
+| **Built-in AHTLA page crypto** | On-disk AES-GCM pages (`AHTLA` header) | `AhtolaEncryptionOptions` / `Encryption Cipher` + `Encryption Key` |
+| **External page codec** | Entirely different page layout | `IPageCodec` (mutually exclusive with built-in encryption) |
+
 | Mechanism | Connection string | Notes |
 | --- | --- | --- |
-| Passphrase | `Password=...` | PBKDF2-HMAC-SHA256 (`Ahtola.Password.v1`, 210k iters) → AES-256-GCM (`AHTLA` header) |
-| Raw key | `Encryption Cipher=Aes256Gcm; Encryption Key=<64 hex chars>` | Same on-disk format |
+| Passphrase (explicit scheme) | `Password=secret;Password Scheme=Ahtola.Password.v1` | **Preferred** for apps (e.g. RDM). Scheme id is a stable KDF contract. |
+| Passphrase (default scheme) | `Password=secret` | Same as `Ahtola.Password.v1` when `Password Scheme` is omitted |
+| Raw key | `Encryption Cipher=Aes256Gcm; Encryption Key=<64 hex chars>` | Same on-disk AHTLA format |
 | Rekey | `SqliteConnection.ChangePassword` / `ClearPassword` / `SetPassword` | Rewrite backup + atomic file replace; exclusive access |
 
-Do **not** combine `Password` and `Encryption Key`. Legacy SEE/SQLCipher RDM
-files are **not** opened — export/recreate under Ahtola password or plain SQLite.
+Built-in scheme `Ahtola.Password.v1`: PBKDF2-HMAC-SHA256, fixed domain salt
+`Ahtola.Password.v1`, 210k iterations to AES-256-GCM. Changing KDF bytes requires a
+**new scheme id** (via `AhtolaPassphraseSchemes.Register` or a future built-in),
+never a silent change to `v1`.
+
+Do **not** combine `Password` and `Encryption Key`. Legacy SEE/SQLCipher files are
+**not** opened by passphrase schemes — use a dedicated `IPageCodec` or
+export/recreate under Ahtola password / plain SQLite.
 
 Wrong/missing password failures include the phrase
 `file is encrypted or is not a database` for SDS-shaped detection.
@@ -154,14 +169,14 @@ id (AES-GCM page AEAD).
 
 PowerShell entrypoint (preferred):
 
-```powershell
+``powershell
 ./build.ps1 restore
 ./build.ps1 build
 ./build.ps1 test              # packaged consumer gate + managed suite
 ./build.ps1 pack
 ./build.ps1 validate-package
 ./build.ps1 format-check
-```
+``
 
 Optional parameters: `-Configuration Debug|Release`, `-Framework net10.0`,
 `-PackageVersion …`, `-PackageOutput ./artifacts/managed-packages`,
@@ -169,11 +184,11 @@ Optional parameters: `-Configuration Debug|Release`, `-Framework net10.0`,
 
 Or with the .NET SDK only:
 
-```bash
+``bash
 dotnet build Ahtola.slnx -c Release
 dotnet test src/Ahtola.Tests/Ahtola.Tests.csproj -c Release -f net10.0
 pwsh ./scripts/Validate-ManagedPackageClosure.ps1
-```
+``
 
 `scripts/Invoke-ManagedTestSuite.ps1` runs tests and fails the job if too few
 tests executed (guards against silent empty runs). Conformance gaps for the
@@ -182,7 +197,7 @@ embedded `sqlite-sqltests` corpus live in
 
 ## Layout
 
-```text
+``text
 ahtola/
 ├── src/Ahtola.Core/                      # engine
 ├── src/Ahtola.Data/                      # embedded ADO core (not a separate nupkg)
@@ -196,7 +211,7 @@ ahtola/
 ├── NuGet.config
 ├── LICENSE
 └── Ahtola.slnx
-```
+``
 
 ## License
 

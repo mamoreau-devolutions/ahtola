@@ -15,8 +15,9 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
         "Mode",
         "Cache",
         "Password",
-        "Encryption Cipher",
-        "Encryption Key",
+                "Password Scheme",
+                "Encryption Cipher",
+                "Encryption Key",
         "Foreign Keys",
         "Recursive Triggers",
         "Default Timeout",
@@ -38,10 +39,12 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
         ["Mode"] = "Mode",
         ["Cache"] = "Cache",
         ["Password"] = "Password",
-        ["Encryption Cipher"] = "Encryption Cipher",
-        ["EncryptionCipher"] = "Encryption Cipher",
-        ["Encryption Key"] = "Encryption Key",
-        ["EncryptionKey"] = "Encryption Key",
+                ["Password Scheme"] = "Password Scheme",
+                ["PasswordScheme"] = "Password Scheme",
+                ["Encryption Cipher"] = "Encryption Cipher",
+                ["EncryptionCipher"] = "Encryption Cipher",
+                ["Encryption Key"] = "Encryption Key",
+                ["EncryptionKey"] = "Encryption Key",
         ["Foreign Keys"] = "Foreign Keys",
         ["ForeignKeys"] = "Foreign Keys",
         ["Recursive Triggers"] = "Recursive Triggers",
@@ -99,11 +102,21 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
         set => SetString("Password", value);
     }
 
-    public string EncryptionCipher
-    {
-        get => GetString("Encryption Cipher");
-        set => SetString("Encryption Cipher", value);
-    }
+        /// <summary>
+        /// Passphrase key-derivation scheme id (for example <c>Ahtola.Password.v1</c>).
+        /// Empty selects the catalog default. See <see cref="AhtolaPassphraseSchemes"/>.
+        /// </summary>
+        public string PasswordScheme
+        {
+            get => GetString("Password Scheme");
+            set => SetString("Password Scheme", value);
+        }
+
+        public string EncryptionCipher
+        {
+            get => GetString("Encryption Cipher");
+            set => SetString("Encryption Cipher", value);
+        }
 
     public string EncryptionKey
     {
@@ -266,12 +279,19 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
     {
             var password = Password;
             var hasPassword = !string.IsNullOrEmpty(password);
+            var passwordScheme = PasswordScheme;
             var cipher = GetString("Encryption Cipher");
             var keyConfigured = base.TryGetValue("Encryption Key", out var keyValue);
             var key = keyConfigured
                 ? Convert.ToString(keyValue, CultureInfo.InvariantCulture)
                 : null;
             var hasKey = !string.IsNullOrWhiteSpace(key);
+
+            if (!hasPassword && !string.IsNullOrWhiteSpace(passwordScheme))
+            {
+                throw new InvalidOperationException(
+                    "Password Scheme requires Password=; it only selects passphrase key derivation.");
+            }
 
             if (hasPassword && hasKey)
             {
@@ -281,14 +301,16 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
 
             if (hasPassword)
             {
+                var scheme = AhtolaPassphraseSchemes.Resolve(passwordScheme);
                 if (!string.IsNullOrWhiteSpace(cipher)
-                    && !cipher.Equals("aes256gcm", StringComparison.OrdinalIgnoreCase))
+                    && !CipherNameMatches(cipher, scheme.PageCipher))
                 {
                     throw new NotSupportedException(
-                        "Password= derives an AES-256-GCM key; Encryption Cipher must be omitted or Aes256Gcm.");
+                        $"Password Scheme '{scheme.Id}' derives {scheme.PageCipher}; "
+                        + "Encryption Cipher must be omitted or match that page cipher.");
                 }
 
-                return AhtolaPasswordEncryption.FromPassword(password);
+                return scheme.DeriveEncryptionOptions(password);
             }
 
             if (string.IsNullOrWhiteSpace(cipher))
@@ -316,6 +338,14 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
             => base.ContainsKey("Encryption Cipher")
                || base.ContainsKey("Encryption Key")
                || !string.IsNullOrEmpty(Password);
+
+        private static bool CipherNameMatches(string cipherName, Ahtola.Core.Storage.AhtolaEncryptionCipher cipher)
+            => cipherName.ToLowerInvariant() switch
+            {
+                "aes128gcm" => cipher == Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes128Gcm,
+                "aes256gcm" => cipher == Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm,
+                _ => false,
+            };
 
     private static string NormalizeKeyword(string keyword)
     {
@@ -427,8 +457,9 @@ public class SqliteConnectionStringBuilder : DbConnectionStringBuilder
             "Mode" => SqliteOpenMode.ReadWriteCreate,
             "Cache" => SqliteCacheMode.Default,
             "Password" => string.Empty,
-            "Encryption Cipher" => string.Empty,
-            "Encryption Key" => string.Empty,
+                        "Password Scheme" => string.Empty,
+                        "Encryption Cipher" => string.Empty,
+                        "Encryption Key" => string.Empty,
             "Foreign Keys" => null!,
             "Recursive Triggers" => false,
             "Default Timeout" => 30,

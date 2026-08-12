@@ -1206,10 +1206,16 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
             builder.Remove("Encryption Cipher");
             builder.Remove("Encryption Key");
             if (string.IsNullOrEmpty(newPassword))
+            {
                 builder.Remove("Password");
+                // Scheme without Password is invalid; drop both for plaintext reopen.
+                builder.Remove("Password Scheme");
+            }
             else
+            {
                 builder.Password = newPassword;
-
+                // Keep Password Scheme from the source connection string when present.
+            }
             return builder.ConnectionString;
         }
 
@@ -1299,61 +1305,76 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
         }
 
         /// <summary>
-            /// Maps managed encryption/open authentication failures to include the SDS-shaped
-            /// phrase RDM uses for password-protected file detection.
-            /// </summary>
-            private static Exception MapManagedEncryptionOpenFailure(Exception exception, bool encryptionAttempted)
+        /// Maps managed encryption/open authentication failures to include the SDS-shaped
+        /// phrase RDM uses for password-protected file detection.
+        /// </summary>
+        private static Exception MapManagedEncryptionOpenFailure(Exception exception, bool encryptionAttempted)
+        {
+            // Configuration mistakes (unknown Password Scheme, bad CS combo) must
+            // surface as-is — do not wrap them as "encrypted or not a database".
+            if (IsManagedEncryptionConfigurationException(exception))
+                return exception;
+
+            // Map when a passphrase or Encryption Key was supplied, or the engine/file already
+            // looks encrypted/corrupt — so empty-password open of AHTLA files also gets
+            // the classic SDS detection phrase on Exception.Message.
+            if (!encryptionAttempted && !LooksLikeEncryptedOrCorruptDatabase(exception))
+                return exception;
+
+            if (AhtolaPasswordEncryption.ContainsEncryptedOrNotDatabasePhrase(exception.Message))
+                return exception;
+
+            var mapped = AhtolaPasswordEncryption.EnsureEncryptedOrNotDatabasePhrase(exception.Message);
+            return exception switch
             {
-                // Map when Password=/Encryption Key was supplied, or the engine/file already
-                // looks encrypted/corrupt — so empty-password open of AHTLA files also gets
-                // the classic SDS detection phrase on Exception.Message.
-                if (!encryptionAttempted && !LooksLikeEncryptedOrCorruptDatabase(exception))
-                    return exception;
+                SqliteException sqlite => new SqliteException(
+                    Properties.Resources.SqliteNativeError(sqlite.SqliteErrorCode, mapped),
+                    sqlite.SqliteErrorCode,
+                    sqlite.SqliteExtendedErrorCode),
+                _ => new InvalidDataException(mapped, exception),
+            };
+        }
 
-                if (AhtolaPasswordEncryption.ContainsEncryptedOrNotDatabasePhrase(exception.Message))
-                    return exception;
+        private static bool IsManagedEncryptionConfigurationException(Exception exception)
+            => exception is NotSupportedException
+                or InvalidOperationException
+                or ArgumentException;
 
-                var mapped = AhtolaPasswordEncryption.EnsureEncryptedOrNotDatabasePhrase(exception.Message);
-                return exception switch
-                {
-                    SqliteException sqlite => new SqliteException(
-                        Properties.Resources.SqliteNativeError(sqlite.SqliteErrorCode, mapped),
-                        sqlite.SqliteErrorCode,
-                        sqlite.SqliteExtendedErrorCode),
-                    _ => new InvalidDataException(mapped, exception),
-                };
-            }
-
-            private static bool LooksLikeEncryptedOrCorruptDatabase(Exception exception)
-            {
-                for (var current = exception; current is not null; current = current.InnerException)
-                {
-                    if (current is CryptographicException)
-                        return true;
-
-                    var message = current.Message;
-                    if (string.IsNullOrEmpty(message))
-                        continue;
-                    if (AhtolaPasswordEncryption.ContainsEncryptedOrNotDatabasePhrase(message))
-                        return true;
-                    if (message.Contains("failed authentication", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("authentication tag", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("not a database", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("file is not a database", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("AHTLA", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("encrypted", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("invalid database header", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("malformed database", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("AhtolaEncryptionOptions", StringComparison.OrdinalIgnoreCase)
-                        || message.Contains("plaintext fallback", StringComparison.OrdinalIgnoreCase))
-                    {
-                        return true;
-                    }
-                }
-
+        private static bool LooksLikeEncryptedOrCorruptDatabase(Exception exception)
+        {
+            if (IsManagedEncryptionConfigurationException(exception))
                 return false;
+
+            for (var current = exception; current is not null; current = current.InnerException)
+            {
+                if (IsManagedEncryptionConfigurationException(current))
+                    return false;
+
+                if (current is CryptographicException)
+                    return true;
+
+                var message = current.Message;
+                if (string.IsNullOrEmpty(message))
+                    continue;
+                if (AhtolaPasswordEncryption.ContainsEncryptedOrNotDatabasePhrase(message))
+                    return true;
+                if (message.Contains("failed authentication", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("authentication tag", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("not a database", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("file is not a database", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("AHTLA", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("encrypted", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("invalid database header", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("malformed database", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("AhtolaEncryptionOptions", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("plaintext fallback", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
             }
 
-            private bool IsManagedProvider => _connectionOptions.EffectiveLocalProvider == AhtolaLocalProvider.Managed;
+            return false;
+        }
+        private bool IsManagedProvider => _connectionOptions.EffectiveLocalProvider == AhtolaLocalProvider.Managed;
 
         }

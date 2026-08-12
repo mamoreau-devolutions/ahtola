@@ -315,9 +315,153 @@ public class ManagedEncryptedFileOpenContractTests
         }
 
     [Test]
-    public void EncryptedPhysicalPagerFactoryEncryptsWalFramesAndReopensThem()
+        public void PassphraseSchemeCatalogExposesDefaultV1AndRejectsUnknownIds()
     {
-        var databasePath = CreateDatabasePath("pager");
+            AhtolaPassphraseSchemes.Default.Id.Should().Be(AhtolaPasswordEncryption.SchemeIdV1);
+            AhtolaPassphraseSchemes.IsRegistered(AhtolaPasswordEncryption.SchemeIdV1).Should().BeTrue();
+            AhtolaPassphraseSchemes.RegisteredIds.Should().Contain(AhtolaPasswordEncryption.SchemeIdV1);
+
+            var act = () => AhtolaPassphraseSchemes.Resolve("Ahtola.Password.does-not-exist");
+            act.Should().Throw<NotSupportedException>()
+                .WithMessage("*Unknown Password Scheme*")
+                .WithMessage("*IPageCodec*");
+        }
+
+        [Test]
+        public void SqliteFacadeExplicitPasswordSchemeV1MatchesOmittedScheme()
+        {
+            var path = CreateDatabasePath("password-scheme-v1");
+            const string secret = "scheme-roundtrip";
+            try
+            {
+                var createBuilder = new SqliteConnectionStringBuilder
+                {
+                    DataSource = path,
+                    LocalProvider = AhtolaLocalProvider.Managed,
+                    Password = secret,
+                    PasswordScheme = AhtolaPasswordEncryption.SchemeIdV1,
+                    Pooling = false,
+                };
+
+                using (var create = new SqliteConnection(createBuilder.ConnectionString))
+                {
+                    create.Open();
+                    create.ExecuteNonQuery("CREATE TABLE records(id INTEGER PRIMARY KEY, value TEXT);");
+                    create.ExecuteNonQuery("INSERT INTO records VALUES (1, 'scheme-ok');");
+                }
+
+                var defaultSchemeBuilder = new SqliteConnectionStringBuilder
+                {
+                    DataSource = path,
+                    LocalProvider = AhtolaLocalProvider.Managed,
+                    Password = secret,
+                    Pooling = false,
+                };
+                using var reopen = new SqliteConnection(defaultSchemeBuilder.ConnectionString);
+                reopen.Open();
+                reopen.ExecuteScalar<string>("SELECT value FROM records WHERE id = 1;")
+                    .Should().Be("scheme-ok");
+            }
+            finally
+            {
+                DeleteDatabase(path);
+            }
+        }
+
+        [Test]
+        public void SqliteFacadeRejectsUnknownPasswordSchemeAndSchemeWithoutPassword()
+        {
+            var path = CreateDatabasePath("password-scheme-errors");
+            try
+            {
+                var unknown = new SqliteConnectionStringBuilder
+                {
+                    DataSource = path,
+                    LocalProvider = AhtolaLocalProvider.Managed,
+                    Password = "x",
+                    PasswordScheme = "not.a.real.scheme",
+                    Pooling = false,
+                };
+                Assert.Throws<NotSupportedException>(() =>
+                {
+                    using var connection = new SqliteConnection(unknown.ConnectionString);
+                    connection.Open();
+                })!.Message.Should().Contain("Unknown Password Scheme");
+
+                var schemeOnly = new SqliteConnectionStringBuilder
+                {
+                    DataSource = path,
+                    LocalProvider = AhtolaLocalProvider.Managed,
+                    PasswordScheme = AhtolaPasswordEncryption.SchemeIdV1,
+                    Pooling = false,
+                };
+                Assert.Throws<InvalidOperationException>(() =>
+                {
+                    using var connection = new SqliteConnection(schemeOnly.ConnectionString);
+                    connection.Open();
+                })!.Message.Should().Contain("Password Scheme requires Password");
+            }
+            finally
+            {
+                DeleteDatabase(path);
+            }
+        }
+
+        [Test]
+        public void AppCanRegisterPrivatePassphraseSchemeWithoutReplacingBuiltIns()
+        {
+            var scheme = new FixedKeyPassphraseScheme(
+                id: "Tests.FixedKey.v1",
+                keyHex: Aes256Key);
+
+            AhtolaPassphraseSchemes.Register(scheme).Should().BeTrue();
+            try
+            {
+                AhtolaPassphraseSchemes.Register(scheme).Should().BeFalse();
+                var replaceBuiltIn = () => AhtolaPassphraseSchemes.Register(
+                    new FixedKeyPassphraseScheme(AhtolaPasswordEncryption.SchemeIdV1, Aes256Key));
+                replaceBuiltIn.Should().Throw<InvalidOperationException>().WithMessage("*built-in*");
+
+                var path = CreateDatabasePath("custom-scheme");
+                try
+                {
+                    var builder = new SqliteConnectionStringBuilder
+                    {
+                        DataSource = path,
+                        LocalProvider = AhtolaLocalProvider.Managed,
+                        Password = "ignored-by-fixed-scheme",
+                        PasswordScheme = scheme.Id,
+                        Pooling = false,
+                    };
+                    using (var create = new SqliteConnection(builder.ConnectionString))
+                    {
+                        create.Open();
+                        create.ExecuteNonQuery("CREATE TABLE t(v TEXT);");
+                        create.ExecuteNonQuery("INSERT INTO t VALUES ('custom');");
+                    }
+
+                    // Same on-disk key as raw Encryption Key path.
+                    using var raw = new SqliteConnection(
+                        ManagedEncryptionConnectionString(path, Aes256Key) + ";Pooling=False");
+                    raw.Open();
+                    raw.ExecuteScalar<string>("SELECT v FROM t;").Should().Be("custom");
+                }
+                finally
+                {
+                    DeleteDatabase(path);
+                }
+            }
+            finally
+            {
+                AhtolaPassphraseSchemes.Unregister(scheme.Id).Should().BeTrue();
+                AhtolaPassphraseSchemes.IsRegistered(scheme.Id).Should().BeFalse();
+            }
+        }
+
+        [Test]
+        public void EncryptedPhysicalPagerFactoryEncryptsWalFramesAndReopensThem()
+        {
+            var databasePath = CreateDatabasePath("pager");
         var walPath = databasePath + "-wal";
         var page = new byte[SqlitePageSize.Default];
         page.AsSpan(0, page.Length - 28).Fill(0xA5);
@@ -368,4 +512,22 @@ public class ManagedEncryptedFileOpenContractTests
                 File.Delete(candidate);
         }
     }
-}
+
+        /// <summary>
+        /// Test-only scheme that ignores the passphrase and uses a fixed AES-256 key.
+        /// Proves app registration without depending on a second built-in KDF.
+        /// </summary>
+        private sealed class FixedKeyPassphraseScheme(string id, string keyHex) : IAhtolaPassphraseScheme
+        {
+            public string Id { get; } = id;
+            public string Description => "Test fixed-key scheme";
+            public Ahtola.Core.Storage.AhtolaEncryptionCipher PageCipher =>
+                Ahtola.Core.Storage.AhtolaEncryptionCipher.Aes256Gcm;
+
+            public AhtolaEncryptionOptions DeriveEncryptionOptions(string password)
+            {
+                _ = password;
+                return AhtolaEncryptionOptions.FromHex(PageCipher, keyHex);
+            }
+        }
+    }
