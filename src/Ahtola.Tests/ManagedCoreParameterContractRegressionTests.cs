@@ -169,7 +169,7 @@ public sealed class ManagedCoreParameterContractRegressionTests
         {
             create.CommandText = """
                 CREATE TABLE UserAccount(id GUID PRIMARY KEY);
-                CREATE TABLE UserSecurity(id GUID PRIMARY KEY, name TEXT NOT NULL, usertype INTEGER NOT NULL, isdeleted INTEGER NOT NULL);
+                CREATE TABLE UserSecurity(id GUID PRIMARY KEY, name NOT NULL, usertype INTEGER NOT NULL, isdeleted INTEGER NOT NULL);
                 """;
             create.ExecuteNonQuery();
         }
@@ -185,22 +185,31 @@ public sealed class ManagedCoreParameterContractRegressionTests
             insert.ExecuteNonQuery();
         }
 
-        using var adapter = new Ahtola.AhtolaDataAdapter(
+        using var selectCommand = connection.CreateCommand();
+        selectCommand.CommandText =
             """
             SELECT a.*, s.name
             FROM UserAccount a
             LEFT OUTER JOIN UserSecurity s ON a.id = s.id
             WHERE s.usertype = $userType AND a.id = $id AND s.isdeleted = 0;
-            """,
-            connection);
-        var selectCommand = (SqliteCommand)adapter.SelectCommand!;
+            """;
         selectCommand.Parameters.AddWithValue("$userType", 0);
         selectCommand.Parameters.AddWithValue("$id", id);
+
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = selectCommand;
+        using (var reader = selectCommand.ExecuteReader())
+        {
+            var schema = reader.GetSchemaTable()!;
+            schema.Rows[1][SchemaTableColumn.DataType].Should().Be(typeof(string));
+            reader.GetFieldType(1).Should().Be(typeof(string));
+        }
 
         var users = new DataTable();
         adapter.Fill(users).Should().Be(1);
         users.Columns["id"]!.DataType.Should().Be(typeof(Guid));
         users.Columns["name"]!.DataType.Should().Be(typeof(string));
+        users.Rows[0]["name"].Should().BeOfType<string>();
         users.Rows[0]["name"].Should().Be("dvls-admin");
     }
 
@@ -284,5 +293,9 @@ public sealed class ManagedCoreParameterContractRegressionTests
         var field = instance.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException($"Expected {instance.GetType().Name}.{fieldName}.");
         return field.GetValue(instance);
+    }
+
+    private sealed class GenericDataAdapter : DbDataAdapter
+    {
     }
 }

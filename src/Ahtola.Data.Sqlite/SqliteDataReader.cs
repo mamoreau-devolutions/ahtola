@@ -387,6 +387,16 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         if (!string.IsNullOrEmpty(declaredType))
             return GetClrTypeFromSqliteType(declaredType, valueType);
 
+        if (HasUndeclaredSelectSourceColumn(ordinal))
+        {
+            var sampledValueType = valueType is ReaderValueKind.Empty or ReaderValueKind.Null
+                ? GetSampleValueType(ordinal)
+                : valueType;
+            return sampledValueType == ReaderValueKind.Blob
+                ? typeof(object)
+                : GetClrTypeFromValueType(sampledValueType);
+        }
+
         return GetClrTypeFromSqliteType(GetDataTypeName(ordinal), valueType);
     }
 
@@ -606,7 +616,14 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                 ? StripTypeLength(info.TypeName)
                 : GetDataTypeNameFromValueType(valueType, selection);
             var dataType = info is not null
-                ? GetClrTypeFromSqliteType(info.TypeName, valueType)
+                // SQLite columns without a declared type have BLOB affinity, but their values are
+                // dynamically typed. Preserve a sampled runtime type; otherwise use object so
+                // DataTable can retain the value instead of rejecting text as byte[].
+                ? string.IsNullOrEmpty(info.TypeName)
+                    ? valueType == ReaderValueKind.Blob
+                        ? typeof(object)
+                        : GetClrTypeFromValueType(valueType)
+                    : GetClrTypeFromSqliteType(info.TypeName, valueType)
                 : GetClrTypeFromValueType(valueType);
             var isExpression = info is null;
             var isAliased = info is null
@@ -993,6 +1010,18 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         }
 
         return string.Empty;
+    }
+
+    private bool HasUndeclaredSelectSourceColumn(int ordinal)
+    {
+        if (!TryGetSelectSources(out var sources, out var selections))
+            return false;
+
+        var sourceColumns = GetSelectSourceColumns(sources);
+        var columnName = GetName(ordinal);
+        var selection = ordinal < selections.Count ? selections[ordinal] : columnName;
+        var resolvedColumn = ResolveSelectColumn(selection, columnName, sources, sourceColumns);
+        return resolvedColumn is not null && string.IsNullOrEmpty(resolvedColumn.Column.TypeName);
     }
 
     private static string InferDataTypeName(string expression)
