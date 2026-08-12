@@ -272,7 +272,7 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
-    public void ManagedSqliteFacadeAdapterMaterializesGuidBlobsInAliasedUndeclaredIdentifierColumns()
+    public void ManagedSqliteFacadeAdapterMaterializesGuidBlobsInProductionStyleAliasedUndeclaredIdentifierColumns()
     {
         using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
         connection.Open();
@@ -280,8 +280,9 @@ public sealed class ManagedCoreParameterContractRegressionTests
         using (var create = connection.CreateCommand())
         {
             create.CommandText = """
-                CREATE TABLE UserAccount(ID);
-                CREATE TABLE UserProfile(ID, UserID);
+                CREATE TABLE UserAccount(ID, Name);
+                CREATE TABLE UserSecurity(ID, Name, UserType);
+                CREATE TABLE UserProfile(ID, UserID, FirstName);
                 """;
             create.ExecuteNonQuery();
         }
@@ -291,18 +292,20 @@ public sealed class ManagedCoreParameterContractRegressionTests
         using (var insert = connection.CreateCommand())
         {
             insert.CommandText = """
-                INSERT INTO UserAccount(ID) VALUES ($userId);
-                INSERT INTO UserProfile(ID, UserID) VALUES ($profileId, $userId);
+                INSERT INTO UserAccount(ID, Name) VALUES ($userId, 'account');
+                INSERT INTO UserSecurity(ID, Name, UserType) VALUES ($userId, 'security', 0);
+                INSERT INTO UserProfile(ID, UserID, FirstName) VALUES ($profileId, $userId, 'profile');
                 """;
             insert.Parameters.AddWithValue("$userId", userId);
             insert.Parameters.AddWithValue("$profileId", profileId);
-            insert.ExecuteNonQuery().Should().Be(2);
+            insert.ExecuteNonQuery().Should().Be(3);
         }
 
         using var select = connection.CreateCommand();
         select.CommandText = """
-            SELECT a.ID, p.UserID, p.ID AS [UserProfile.ID]
+            SELECT a.*, s.Name, s.UserType, p.FirstName, p.userid, p.ID AS [UserProfile.ID]
             FROM UserAccount a
+            LEFT OUTER JOIN UserSecurity s ON s.ID = a.ID
             LEFT OUTER JOIN UserProfile p ON p.UserID = a.ID
             WHERE a.ID = $userId;
             """;
@@ -312,8 +315,14 @@ public sealed class ManagedCoreParameterContractRegressionTests
         var users = new DataTable();
         adapter.Fill(users).Should().Be(1);
 
+        users.Columns["ID"]!.DataType.Should().Be(typeof(object));
+        users.Columns["userid"]!.DataType.Should().Be(typeof(object));
         users.Columns["UserProfile.ID"]!.DataType.Should().Be(typeof(object));
+        Guid.TryParse((string)users.Rows[0]["ID"], out var readAccountId).Should().BeTrue();
+        Guid.TryParse((string)users.Rows[0]["userid"], out var readUserId).Should().BeTrue();
         Guid.TryParse((string)users.Rows[0]["UserProfile.ID"], out var readProfileId).Should().BeTrue();
+        readAccountId.Should().Be(userId);
+        readUserId.Should().Be(userId);
         readProfileId.Should().Be(profileId);
     }
 

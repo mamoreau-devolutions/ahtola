@@ -1476,8 +1476,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         var separator = columnName.LastIndexOf('.');
         var name = separator >= 0 ? columnName[(separator + 1)..] : columnName;
         return name.Equals("ID", StringComparison.OrdinalIgnoreCase)
-            || name.EndsWith("ID", StringComparison.Ordinal)
-            || name.EndsWith("Id", StringComparison.Ordinal);
+            || name.EndsWith("ID", StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed record SelectSource(string TableName, string Alias);
