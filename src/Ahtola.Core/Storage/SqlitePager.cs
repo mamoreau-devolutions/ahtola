@@ -1555,11 +1555,34 @@ public sealed class SqlitePager : IDisposable
                                             "SQLite WAL read marks would move durable checkpoint progress backwards.");
                                     }
 
+                                    // Salt re-check while marks are still held (SQLite 3.51.3).
+                                    if (!_walIndex.TryConfirmCheckpointIncarnation(
+                                            region.Header,
+                                            _wal,
+                                            out var confirmedRegion))
+                                    {
+                                        return SoftSkipWalIndexCheckpoint(readMarkLeases);
+                                    }
+
+                                    region = confirmedRegion;
+                                    if (safeFrame > region.Header.MaximumFrame)
+                                        safeFrame = region.Header.MaximumFrame;
+
                                     var attempted = region.CheckpointInfo.BackfillAttemptedFrameCount;
                                     if (safeFrame > attempted)
                                     {
-                                        _walIndex.PublishBackfillAttemptedFrameCount(region.Header, safeFrame, _wal);
-                                        attempted = safeFrame;
+                                        try
+                                        {
+                                            _walIndex.PublishBackfillAttemptedFrameCount(
+                                                region.Header,
+                                                safeFrame,
+                                                _wal);
+                                            attempted = safeFrame;
+                                        }
+                                        catch (SqliteWalIncarnationChangedException)
+                                        {
+                                            return SoftSkipWalIndexCheckpoint(readMarkLeases);
+                                        }
                                     }
 
                                     var installedPageCount = 0;
@@ -1574,13 +1597,31 @@ public sealed class SqlitePager : IDisposable
                                             readMarkLeases = null;
                                         }
 
-                                        RequireWal().Flush();
-                                        _walPageOverlay.TryGetValue(1, out committedPageOne);
-                                        installedPageCount = safeFrame == (uint)_committedFrameCount
-                                            ? InstallCommittedOverlayIntoMainStore()
-                                            : InstallWalFramesIntoMainStore(safeFrame);
-                                        _walIndex.PublishBackfilledFrameCount(region.Header, safeFrame, _wal);
-                                        backfilled = safeFrame;
+                                        if (!_walIndex.TryConfirmCheckpointIncarnation(
+                                                region.Header,
+                                                _wal,
+                                                out _))
+                                        {
+                                            return SoftSkipWalIndexCheckpoint(readMarkLeases);
+                                        }
+
+                                        try
+                                        {
+                                            RequireWal().Flush();
+                                            _walPageOverlay.TryGetValue(1, out committedPageOne);
+                                            installedPageCount = safeFrame == (uint)_committedFrameCount
+                                                ? InstallCommittedOverlayIntoMainStore()
+                                                : InstallWalFramesIntoMainStore(safeFrame);
+                                            _walIndex.PublishBackfilledFrameCount(
+                                                region.Header,
+                                                safeFrame,
+                                                _wal);
+                                            backfilled = safeFrame;
+                                        }
+                                        catch (SqliteWalIncarnationChangedException)
+                                        {
+                                            return SoftSkipWalIndexCheckpoint(readMarkLeases);
+                                        }
                                     }
 
                                     var retainedCommittedFrameCount = _committedFrameCount;
@@ -1600,6 +1641,15 @@ public sealed class SqlitePager : IDisposable
 
                                         ValidateWalHasNotChanged();
                                         var confirmation = _walIndex.ReadValidatedHeader(_wal);
+                                        if (!_walIndex.TryConfirmCheckpointIncarnation(
+                                                confirmation.Header,
+                                                _wal,
+                                                out confirmation))
+                                        {
+                                            throw new SqliteWalIncarnationChangedException(
+                                                "SQLite WAL changed incarnation while confirming a restart checkpoint boundary.");
+                                        }
+
                                         // Capture before overlay clear when install path did not run.
                                         committedPageOne ??= _walPageOverlay.TryGetValue(1, out var pageOne)
                                             ? pageOne
@@ -1634,6 +1684,13 @@ public sealed class SqlitePager : IDisposable
                                         installedPageCount,
                                         retainedCommittedFrameCount);
                                 }
+                                catch (SqliteWalIncarnationChangedException)
+                                {
+                                    // Soft-skip: do not fault the pager for a peer wrap race.
+                                    if (_state == SqlitePagerState.Checkpointing)
+                                        _state = SqlitePagerState.Ready;
+                                    return SoftSkipWalIndexCheckpoint(readMarkLeases);
+                                }
                                 catch
                                 {
                                     TransitionToFaulted();
@@ -1662,6 +1719,35 @@ public sealed class SqlitePager : IDisposable
         {
             throw new SqlitePagerBusyException(SqlitePagerLockOperation.Checkpoint, timeout, exception);
         }
+    }
+
+    /// <summary>
+    /// Soft-skips a WAL-index checkpoint after a peer wrap/reset race without
+    /// advancing <c>nBackfill</c> or faulting the pager (SQLite 3.51.3 salt path).
+    /// </summary>
+    private SqliteCheckpointResult SoftSkipWalIndexCheckpoint(
+        List<SqliteWalByteRangeLockLease>? readMarkLeases)
+    {
+        DisposeWalIndexLeases(readMarkLeases);
+        if (_state == SqlitePagerState.Checkpointing)
+            _state = SqlitePagerState.Ready;
+
+        if (_walIndex is not null)
+        {
+            try
+            {
+                ObserveWalIndexIdentity(_walIndex.ReadStableHeaderRegion().Header);
+            }
+            catch (InvalidDataException)
+            {
+                ClearObservedWalIndexIdentity();
+            }
+        }
+
+        return new SqliteCheckpointResult(
+            _committedPageCount,
+            InstalledPageCount: 0,
+            RetainedCommittedFrameCount: _committedFrameCount);
     }
 
     private int InstallCommittedOverlayIntoMainStore()

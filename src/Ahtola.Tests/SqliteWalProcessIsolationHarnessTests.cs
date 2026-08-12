@@ -589,21 +589,50 @@ public sealed class SqliteWalProcessIsolationHarnessTests
 
     private static void AssertSqliteCanReopen(string databasePath)
     {
-        SqliteConnection.ClearAllPools();
-        try
-        {
-            using var connection = new SqliteConnection(
-                $"Data Source={databasePath};Mode=ReadWrite;Pooling=False");
-            connection.Open();
+            // After abrupt worker kills and managed SHM unmap, Windows can briefly surface
+            // SQLITE_BUSY/LOCKED/IOERR while the kernel releases byte-range locks and
+            // section objects. Retry only those transient codes; real corruption fails closed.
+            const int sqliteBusy = 5;
+            const int sqliteLocked = 6;
+            const int sqliteIoErr = 10;
+            const int maxAttempts = 8;
+            Exception? lastFailure = null;
 
-            ExecuteScalar(connection, "PRAGMA integrity_check;").Should().Be("ok");
-            ExecuteScalar(connection, "SELECT count(*) FROM data;").Should().Be("3");
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                SqliteConnection.ClearAllPools();
+                // Drop any leftover finalizers holding -shm/-wal handles from the prior attempt.
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+
+                try
+                {
+                    using var connection = new SqliteConnection(
+                        $"Data Source={databasePath};Mode=ReadWrite;Pooling=False");
+                    connection.Open();
+
+                    ExecuteScalar(connection, "PRAGMA integrity_check;").Should().Be("ok");
+                    ExecuteScalar(connection, "SELECT count(*) FROM data;").Should().Be("3");
+                    return;
+                }
+                catch (SqliteException exception)
+                    when (exception.SqliteErrorCode is sqliteBusy or sqliteLocked or sqliteIoErr
+                          && attempt < maxAttempts)
+                {
+                    lastFailure = exception;
+                    Thread.Sleep(TimeSpan.FromMilliseconds(25 * attempt * attempt));
+                }
+                finally
+                {
+                    SqliteConnection.ClearAllPools();
+                }
+            }
+
+            throw new IOException(
+                $"Stock SQLite could not reopen the recovered database after {maxAttempts} attempts.",
+                lastFailure);
         }
-        finally
-        {
-            SqliteConnection.ClearAllPools();
-        }
-    }
 
     private static string ExecuteScalar(SqliteConnection connection, string commandText)
     {
@@ -898,9 +927,14 @@ public sealed class SqliteWalProcessIsolationHarnessTests
                 _process.Kill(entireProcessTree: true);
             if (!_process.WaitForExit(WorkerTimeout))
                 Assert.Fail($"The WAL process harness worker did not terminate:{Environment.NewLine}{DrainOutput()}");
-            _process.WaitForExit();
-            _completed = true;
-        }
+                    // Drain async stdout/stderr callbacks after the kill so Dispose is quiet.
+                    _process.WaitForExit();
+                    _completed = true;
+                    // Windows can retain byte-range locks and section objects briefly after the
+                    // process image exits; give the kernel a moment before the parent reopens.
+                    if (OperatingSystem.IsWindows())
+                        Thread.Sleep(TimeSpan.FromMilliseconds(50));
+                }
 
         internal void WaitForExit()
         {

@@ -443,6 +443,27 @@ public sealed class SqliteWalFile : IDisposable
         }
     }
 
+    /// <summary>
+    /// Reads the on-disk WAL header without mutating this instance's cached
+    /// header. Used by checkpoint paths that must observe a peer wrap/reset.
+    /// </summary>
+    public SqliteWalHeader ReadDurableHeader()
+    {
+        ThrowIfDisposed();
+        if (_truncatedAfterCheckpoint && _file.Length == 0)
+            return _header;
+        if (_file.Length < SqliteWalHeader.Size)
+        {
+            throw new InvalidDataException(
+                "File is too small to contain a SQLite WAL header.");
+        }
+
+        Span<byte> headerBytes = stackalloc byte[SqliteWalHeader.Size];
+        if (_file.Read(0, headerBytes) != headerBytes.Length)
+            throw new InvalidDataException("Failed to read the complete SQLite WAL header.");
+        return SqliteWalHeader.Parse(headerBytes);
+    }
+
     /// <summary>The fixed database page size used by every WAL frame.</summary>
     public int PageSize
     {

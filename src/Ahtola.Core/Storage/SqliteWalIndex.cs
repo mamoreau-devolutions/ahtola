@@ -938,6 +938,35 @@ public sealed class SqliteWalIndexSharedMemory
     }
 
     /// <summary>
+    /// Confirms the selected checkpoint boundary still describes the live WAL
+    /// incarnation (SHM salts plus the durable on-disk WAL header). Returns
+    /// <see langword="false"/> when a concurrent writer has wrapped or reset the
+    /// WAL — the SQLite <c>walRestartLog</c> race fixed in 3.51.3.
+    /// </summary>
+    /// <remarks>
+    /// Call this after exclusive ownership of read-mark 0 (or immediately before
+    /// install/backfill publication) and soft-skip the checkpoint when it fails.
+    /// <paramref name="liveRegion"/> always receives the latest stable SHM view.
+    /// </remarks>
+    public bool TryConfirmCheckpointIncarnation(
+        SqliteWalIndexHeader selectedHeader,
+        SqliteWalFile wal,
+        out SqliteWalIndexHeaderRegion liveRegion)
+    {
+        ArgumentNullException.ThrowIfNull(selectedHeader);
+        ArgumentNullException.ThrowIfNull(wal);
+        lock (_gate)
+        {
+            liveRegion = ReadStableHeaderRegion();
+            if (!HasMatchingWalIncarnation(selectedHeader, liveRegion.Header))
+                return false;
+
+            var durableWalHeader = wal.ReadDurableHeader();
+            return HasMatchingWalFileIncarnation(selectedHeader, durableWalHeader);
+        }
+    }
+
+    /// <summary>
     /// Records how far the active checkpointer attempted to backfill. Callers
     /// must own <c>WAL_CKPT_LOCK</c>, provide an independently authenticated
     /// selected boundary, and must not move the value backwards.
@@ -1143,7 +1172,12 @@ public sealed class SqliteWalIndexSharedMemory
             "SQLite WAL-index header changed while resolving a page number; refusing a stale lookup.");
     }
 
-    private SqliteWalIndexHeaderRegion ReadStableHeaderRegion()
+    /// <summary>
+    /// Reads a stable dual-copy SHM header region without authenticating it
+    /// against a WAL file. Used after an incarnation race when the open WAL
+    /// handle may still cache the pre-wrap header.
+    /// </summary>
+    public SqliteWalIndexHeaderRegion ReadStableHeaderRegion()
     {
         EnsureMappedBlocks(blockCount: 1);
         InvalidDataException? failure = null;
@@ -1484,29 +1518,19 @@ public sealed class SqliteWalIndexSharedMemory
         SqliteWalIndexHeader currentHeader,
         SqliteWalFile wal)
     {
-        if (selectedHeader.PageSize != currentHeader.PageSize
-            || selectedHeader.WalChecksumByteOrder != currentHeader.WalChecksumByteOrder
-            || selectedHeader.Salt1 != currentHeader.Salt1
-            || selectedHeader.Salt2 != currentHeader.Salt2)
-        {
-            throw new InvalidDataException(
-                "SQLite WAL changed incarnation while checkpoint progress was being published.");
-        }
+        if (!HasMatchingWalIncarnation(selectedHeader, currentHeader))
+            throw new SqliteWalIncarnationChangedException();
         if (currentHeader.MaximumFrame < selectedHeader.MaximumFrame)
         {
             throw new InvalidDataException(
                 "SQLite WAL committed boundary moved backwards while checkpoint progress was being published.");
         }
 
-        var walHeader = wal.Header;
-        if (selectedHeader.PageSize != walHeader.PageSize
-            || selectedHeader.WalChecksumByteOrder != walHeader.ChecksumByteOrder
-            || selectedHeader.Salt1 != walHeader.Salt1
-            || selectedHeader.Salt2 != walHeader.Salt2)
-        {
-            throw new InvalidDataException(
-                "SQLite WAL changed incarnation while checkpoint progress was being published.");
-        }
+        // Prefer the durable on-disk header so a peer wrap is visible even when
+        // this connection still caches the pre-wrap WAL header.
+        var durableWalHeader = wal.ReadDurableHeader();
+        if (!HasMatchingWalFileIncarnation(selectedHeader, durableWalHeader))
+            throw new SqliteWalIncarnationChangedException();
 
         var recovery = wal.ScanRecovery();
         if (recovery.LastCommittedFrameNumber < selectedHeader.MaximumFrame
@@ -1536,6 +1560,14 @@ public sealed class SqliteWalIndexSharedMemory
            && expectedHeader.WalChecksumByteOrder == actualHeader.WalChecksumByteOrder
            && expectedHeader.Salt1 == actualHeader.Salt1
            && expectedHeader.Salt2 == actualHeader.Salt2;
+
+    private static bool HasMatchingWalFileIncarnation(
+        SqliteWalIndexHeader expectedHeader,
+        SqliteWalHeader walHeader)
+        => expectedHeader.PageSize == walHeader.PageSize
+           && expectedHeader.WalChecksumByteOrder == walHeader.ChecksumByteOrder
+           && expectedHeader.Salt1 == walHeader.Salt1
+           && expectedHeader.Salt2 == walHeader.Salt2;
 
     private uint ReadUInt32(long position)
     {
@@ -1595,4 +1627,32 @@ public sealed class SqliteWalIndexSharedMemory
         => checked((ushort)(blockIndex == 0
             ? SqliteWalIndexLayout.FirstBlockFrameCapacity
             : SqliteWalIndexLayout.SubsequentBlockFrameCapacity));
+}
+
+/// <summary>
+/// Raised when a concurrent peer wraps or resets the WAL while this connection
+/// is publishing checkpoint progress. Callers should soft-skip the checkpoint
+/// rather than advancing <c>nBackfill</c> or faulting the pager.
+/// </summary>
+/// <remarks>
+/// Mirrors the SQLite 3.51.3 salt re-check after exclusive ownership of
+/// <c>WAL_READ_LOCK(0)</c> (check-in <c>7168988acbec2d8d</c>): when salts diverge,
+/// the checkpointer abandons the backfill instead of writing a stale frame count.
+/// </remarks>
+public sealed class SqliteWalIncarnationChangedException : IOException
+{
+    public SqliteWalIncarnationChangedException()
+        : base("SQLite WAL changed incarnation while checkpoint progress was being published.")
+    {
+    }
+
+    public SqliteWalIncarnationChangedException(string message)
+        : base(message)
+    {
+    }
+
+    public SqliteWalIncarnationChangedException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
 }

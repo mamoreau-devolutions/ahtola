@@ -510,6 +510,18 @@ lock or establish any stock-SQLite concurrent interoperability claim.
   checkpointer that obtains exclusive locks on every read mark may reset the WAL.
 - Managed must stop demanding the whole `[120, 8)` range for checkpoints and for
   `SqlitePager.Create`.
+- **WAL-reset / salt race (SQLite ≤ 3.51.2, Tailscale blog):** a concurrent peer
+  may call `walRestartLog` (new salts, `mxFrame = 0`) while a PASSIVE checkpointer
+  still holds a stale local `mxFrame`/`nBackfill` view. Stock SQLite before
+  3.51.3 could publish the stale safe frame into `nBackfill` and later skip new
+  frames. Managed Ahtola does **not** wrap the WAL on ordinary writer commit
+  (reset only via RESTART/TRUNCATE / `ResetAfterDurableCheckpoint`). Against a
+  multi-engine peer that can wrap mid-PASSIVE, both the pager and detached
+  coordinator re-check SHM + durable on-disk WAL salts
+  (`TryConfirmCheckpointIncarnation`) after acquiring marks and again after
+  PASSIVE releases them; on mismatch they **soft-skip** (no install, no
+  `nBackfill` advance, no pager fault) rather than failing closed into a faulted
+  state. Prefer SQLite ≥ 3.51.3 when the peer is the checkpointer.
 
 *Exit criteria:* an ordinary SQLite writer and a managed reader (and the reverse)
 interleave correctly under a differential stress harness, and `PRAGMA
