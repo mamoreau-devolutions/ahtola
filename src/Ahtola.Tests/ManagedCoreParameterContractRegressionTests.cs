@@ -120,6 +120,67 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
+    public void ManagedSqliteFacadeBindsNamedParametersToAnonymousPlaceholdersInOrder()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE users(id BLOB NOT NULL, name TEXT NOT NULL);";
+            create.ExecuteNonQuery();
+        }
+
+        var id = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO users(id, name) VALUES (?, ?);";
+            insert.Parameters.AddWithValue("@ID", id);
+            insert.Parameters.AddWithValue("@Name", "dvls-admin");
+            insert.ExecuteNonQuery().Should().Be(1);
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT id, name FROM users;";
+        using var reader = select.ExecuteReader();
+        reader.Read().Should().BeTrue();
+        reader.GetFieldValue<byte[]>(0).Should().Equal(id.ToByteArray());
+        reader.GetString(1).Should().Be("dvls-admin");
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeAdapterPreservesGuidBlobsInTextColumns()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE users(id TEXT NOT NULL);";
+            create.ExecuteNonQuery();
+        }
+
+        var id = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO users(id) VALUES (?);";
+            insert.Parameters.AddWithValue(null, id);
+            insert.ExecuteNonQuery().Should().Be(1);
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT id FROM users;";
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = select;
+        var users = new DataTable();
+        adapter.Fill(users).Should().Be(1);
+
+        users.Columns["id"]!.DataType.Should().Be(typeof(string));
+        Guid.TryParse((string)users.Rows[0]["id"], out var readId).Should().BeTrue();
+        readId.Should().Be(id);
+    }
+
+    [Test]
     public void ManagedSqliteFacadeReportsGuidReaderStorageWithoutValue()
     {
         using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");

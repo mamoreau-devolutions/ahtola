@@ -490,6 +490,7 @@ public class SqliteCommand : DbCommand
     {
         var parameterCount = statement.NativeParameterCount;
         var boundParameters = new bool[parameterCount + 1];
+        List<SqliteParameter>? positionalParameters = null;
 
         for (var i = 0; i < Parameters.Count; i++)
         {
@@ -501,14 +502,29 @@ public class SqliteCommand : DbCommand
 
             var parameterIndex = FindNativeParameterIndex(statement, parameter.ParameterName, parameterCount);
             if (parameterIndex == 0)
+            {
+                // Legacy ADO.NET callers commonly assign descriptive parameter names even when
+                // their SQL uses anonymous placeholders. SQLite binds those in collection order.
+                if (HasAnonymousNativeParameters(statement, parameterCount))
+                    (positionalParameters ??= []).Add(parameter);
                 continue;
+            }
 
             statement.BindNative(parameterIndex, parameter.ToNativeValue());
             boundParameters[parameterIndex] = true;
         }
 
+        var positionalParameterIndex = 0;
         for (var i = 1; i <= parameterCount; i++)
         {
+            if (statement.GetNativeParameterName(i) is null
+                && positionalParameters is not null
+                && positionalParameterIndex < positionalParameters.Count)
+            {
+                statement.BindNative(i, positionalParameters[positionalParameterIndex++].ToNativeValue());
+                boundParameters[i] = true;
+            }
+
             if (!boundParameters[i])
             {
                 var parameterName = statement.GetNativeParameterName(i);
@@ -517,6 +533,12 @@ public class SqliteCommand : DbCommand
                         ? Properties.Resources.MissingParameters(i)
                         : Properties.Resources.MissingParameters(parameterName));
             }
+        }
+
+        if (positionalParameters is not null && positionalParameterIndex != positionalParameters.Count)
+        {
+            throw new InvalidOperationException(
+                Properties.Resources.ParameterNotFound($"at position {positionalParameterIndex + 1}"));
         }
     }
 
@@ -562,7 +584,13 @@ public class SqliteCommand : DbCommand
                 ? parameterMetadata.GetParameterIndex(parameter.ParameterName)
                 : FindManagedParameterIndex(parameterMetadata, parameter.ParameterName);
             if (parameterIndex == 0)
+            {
+                // See BindNativeParameters: named ADO.NET parameters bind anonymous SQLite
+                // placeholders in collection order when no exact placeholder name exists.
+                if (statementParameterNames.Any(static name => name is null))
+                    (positionalParameters ??= []).Add(parameter);
                 continue;
+            }
 
             statement.Bind(parameterIndex, parameter.ToSqlValue());
             boundParameters[parameterIndex] = true;
@@ -598,6 +626,17 @@ public class SqliteCommand : DbCommand
                         : Properties.Resources.MissingParameters(parameterName));
             }
         }
+    }
+
+    private static bool HasAnonymousNativeParameters(SqliteStatementAdapter statement, int parameterCount)
+    {
+        for (var i = 1; i <= parameterCount; i++)
+        {
+            if (statement.GetNativeParameterName(i) is null)
+                return true;
+        }
+
+        return false;
     }
 
     private static bool IsEmptyCommand(string commandText)

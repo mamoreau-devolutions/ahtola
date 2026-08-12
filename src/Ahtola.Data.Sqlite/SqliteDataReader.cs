@@ -695,7 +695,8 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         EnsureOpen();
         EnsureHasCurrentRow();
         var value = ReadValue(ordinal);
-        if (IsGuidType(GetDeclaredTypeName(ordinal)) && value.Kind is ReaderValueKind.Blob or ReaderValueKind.Text)
+        var declaredType = GetDeclaredTypeName(ordinal);
+        if (ShouldMaterializeGuid(declaredType, value))
             return ToGuid(ordinal, value);
 
         return value.Kind switch
@@ -1415,6 +1416,28 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         var normalized = StripTypeLength(typeName).Trim();
         return normalized.Equals("GUID", StringComparison.OrdinalIgnoreCase)
                || normalized.Equals("UNIQUEIDENTIFIER", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool ShouldMaterializeGuid(string declaredType, ReaderValue value)
+    {
+        if (IsGuidType(declaredType))
+            return value.Kind is ReaderValueKind.Blob or ReaderValueKind.Text;
+
+        // SQLite's TEXT affinity permits a .NET Guid parameter to retain its BLOB storage class.
+        // With BinaryGUID enabled, preserve that GUID through DataAdapter instead of letting
+        // DataColumn stringify the byte array as "System.Byte[]".
+        return _connection.BinaryGuid
+            && value.Kind == ReaderValueKind.Blob
+            && value.Blob.Length == 16
+            && IsTextType(declaredType);
+    }
+
+    private static bool IsTextType(string typeName)
+    {
+        var normalized = StripTypeLength(typeName).Trim();
+        return normalized.Contains("CHAR", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("CLOB", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("TEXT", StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed record SelectSource(string TableName, string Alias);
