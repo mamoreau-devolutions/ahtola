@@ -420,10 +420,10 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         }
 
         var dataTypeName = GetDataTypeName(ordinal);
-        // Expression results have no declared affinity. A sampled BLOB can surface as a text
-        // GUID or another storage class on a later row, so expose object for DataAdapter-safe
-        // materialization instead of committing it to byte[].
-        return IsBlobType(dataTypeName)
+        // Identifier-shaped expressions can materialize a binary GUID as text in GetValue.
+        // Keep ordinary BLOB expressions binary, but make those adapter-facing GUID projections
+        // object-typed so DataAdapter does not commit to byte[] before reading the value.
+        return IsBlobType(dataTypeName) && IsIdentifierColumnName(GetName(ordinal))
             ? typeof(object)
             : GetClrTypeFromSqliteType(dataTypeName, valueType);
     }
@@ -663,9 +663,9 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                     : IsBlobType(info.TypeName)
                         ? typeof(object)
                     : GetClrTypeFromSqliteType(info.TypeName, valueType)
-                // Expressions have no declared affinity. A sampled BLOB may be materialized as
-                // a GUID string by GetValue, so object is the only DataAdapter-safe schema type.
-                : valueType == ReaderValueKind.Blob
+                // Identifier-shaped expressions can materialize a binary GUID as text in
+                // GetValue, so DataAdapter must not commit their schema to byte[].
+                : valueType == ReaderValueKind.Blob && IsIdentifierColumnName(columnName)
                     ? typeof(object)
                     : GetClrTypeFromValueType(valueType);
             var isExpression = info is null;
