@@ -42,8 +42,12 @@ param(
 
     [string]$PackageConsumerOutput = './artifacts/managed-package-consumer',
 
-    [int]$MinimumExecutedTests = 2500
-)
+    [int]$MinimumExecutedTests = 2500,
+
+        # Floor for Pester module tests (test-powershell). Keep in sync with
+        # tests/PowerShell/Devolutions.Ahtola.Sqlite/Module.Tests.ps1.
+        [int]$PowerShellMinimumExecutedTests = 11
+    )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -183,19 +187,25 @@ function Invoke-Build {
     }
 
     function Invoke-TestPowerShell {
-        param([string]$BuildConfiguration = $Configuration)
+            param(
+                [string]$BuildConfiguration = $Configuration,
+                [int]$MinimumPesterTests = $PowerShellMinimumExecutedTests
+            )
 
-        Invoke-PackPowerShell -BuildConfiguration $BuildConfiguration
-        Write-Step "Running Pester 6 tests for $PowerShellModuleName"
-        if (-not (Test-Path -LiteralPath $PowerShellTestRunner -PathType Leaf)) {
-            throw "PowerShell module test runner not found: $PowerShellTestRunner"
-        }
+            Invoke-PackPowerShell -BuildConfiguration $BuildConfiguration
+            Write-Step "Running Pester 6 tests for $PowerShellModuleName (min $MinimumPesterTests)"
+            if (-not (Test-Path -LiteralPath $PowerShellTestRunner -PathType Leaf)) {
+                throw "PowerShell module test runner not found: $PowerShellTestRunner"
+            }
 
-        & $PowerShellTestRunner -ModulePath (Get-AbsolutePath $PowerShellModuleOutput) -Configuration $BuildConfiguration
-        if ($LASTEXITCODE -ne 0) {
-            throw "PowerShell module tests failed with exit code $LASTEXITCODE"
+            & $PowerShellTestRunner `
+                -ModulePath (Get-AbsolutePath $PowerShellModuleOutput) `
+                -Configuration $BuildConfiguration `
+                -MinimumExecutedTests $MinimumPesterTests
+            if ($LASTEXITCODE -ne 0) {
+                throw "PowerShell module tests failed with exit code $LASTEXITCODE"
+            }
         }
-    }
 
 function Invoke-Pack {
     param(
