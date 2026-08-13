@@ -174,6 +174,8 @@ PowerShell entrypoint (preferred):
 ./build.ps1 build
 ./build.ps1 test              # packaged consumer gate + managed suite
 ./build.ps1 pack
+./build.ps1 pack-powershell   # stage Devolutions.Ahtola.Sqlite module
+./build.ps1 test-powershell   # Pester 6 module tests (requires Pester 6+)
 ./build.ps1 validate-package
 ./build.ps1 format-check
 ``
@@ -203,11 +205,13 @@ ahtola/
 ├── src/Ahtola.Data/                      # embedded ADO core (not a separate nupkg)
 ├── src/Ahtola.Data.Sqlite/               # provider + MDS facade
 ├── src/Ahtola.EntityFrameworkCore.Sqlite/
+├── src/Devolutions.Ahtola.PowerShell/    # assembly; publishes Devolutions.Ahtola.Sqlite module
 ├── src/Ahtola.Tests/
+├── tests/PowerShell/                     # Pester 6 module tests
 ├── samples/                              # ManagedPackageConsumer, PSSqlite.Managed
 ├── docs/                                 # WAL interop contract (Turso target)
 ├── scripts/                              # test + package closure validators
-├── build.ps1                             # restore / build / test / pack
+├── build.ps1                             # restore / build / test / pack / pack-powershell
 ├── NuGet.config
 ├── LICENSE
 └── Ahtola.slnx
