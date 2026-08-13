@@ -2,6 +2,7 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Ahtola;
 using Ahtola.Core;
@@ -490,6 +491,7 @@ public class SqliteCommand : DbCommand
     {
         var parameterCount = statement.NativeParameterCount;
         var boundParameters = new bool[parameterCount + 1];
+        List<SqliteParameter>? positionalParameters = null;
 
         for (var i = 0; i < Parameters.Count; i++)
         {
@@ -501,14 +503,29 @@ public class SqliteCommand : DbCommand
 
             var parameterIndex = FindNativeParameterIndex(statement, parameter.ParameterName, parameterCount);
             if (parameterIndex == 0)
+            {
+                // Legacy ADO.NET callers commonly assign descriptive parameter names even when
+                // their SQL uses anonymous placeholders. SQLite binds those in collection order.
+                if (HasAnonymousNativeParameters(statement, parameterCount))
+                    (positionalParameters ??= []).Add(parameter);
                 continue;
+            }
 
             statement.BindNative(parameterIndex, parameter.ToNativeValue());
             boundParameters[parameterIndex] = true;
         }
 
+        var positionalParameterIndex = 0;
         for (var i = 1; i <= parameterCount; i++)
         {
+            if (statement.GetNativeParameterName(i) is null
+                && positionalParameters is not null
+                && positionalParameterIndex < positionalParameters.Count)
+            {
+                statement.BindNative(i, positionalParameters[positionalParameterIndex++].ToNativeValue());
+                boundParameters[i] = true;
+            }
+
             if (!boundParameters[i])
             {
                 var parameterName = statement.GetNativeParameterName(i);
@@ -517,6 +534,12 @@ public class SqliteCommand : DbCommand
                         ? Properties.Resources.MissingParameters(i)
                         : Properties.Resources.MissingParameters(parameterName));
             }
+        }
+
+        if (positionalParameters is not null && positionalParameterIndex != positionalParameters.Count)
+        {
+            throw new InvalidOperationException(
+                Properties.Resources.ParameterNotFound($"at position {positionalParameterIndex + 1}"));
         }
     }
 
@@ -562,7 +585,13 @@ public class SqliteCommand : DbCommand
                 ? parameterMetadata.GetParameterIndex(parameter.ParameterName)
                 : FindManagedParameterIndex(parameterMetadata, parameter.ParameterName);
             if (parameterIndex == 0)
+            {
+                // See BindNativeParameters: named ADO.NET parameters bind anonymous SQLite
+                // placeholders in collection order when no exact placeholder name exists.
+                if (statementParameterNames.Skip(1).Any(static name => name is null))
+                    (positionalParameters ??= []).Add(parameter);
                 continue;
+            }
 
             statement.Bind(parameterIndex, parameter.ToSqlValue());
             boundParameters[parameterIndex] = true;
@@ -598,6 +627,17 @@ public class SqliteCommand : DbCommand
                         : Properties.Resources.MissingParameters(parameterName));
             }
         }
+    }
+
+    private static bool HasAnonymousNativeParameters(SqliteStatementAdapter statement, int parameterCount)
+    {
+        for (var i = 1; i <= parameterCount; i++)
+        {
+            if (statement.GetNativeParameterName(i) is null)
+                return true;
+        }
+
+        return false;
     }
 
     private static bool IsEmptyCommand(string commandText)
@@ -683,7 +723,113 @@ public class SqliteCommand : DbCommand
                 : "SELECT CAST(NULL AS TEXT) AS compile_options WHERE 0";
         }
 
-        return sql;
+        return RewriteBinaryGuidTextCasts(sql, connection);
+    }
+
+    private static string RewriteBinaryGuidTextCasts(string sql, SqliteConnection connection)
+    {
+        if (!connection.BinaryGuid)
+            return sql;
+
+        StringBuilder? rewritten = null;
+        var copiedThrough = 0;
+        var offset = 0;
+        while (TryReadScriptToken(sql, ref offset, out var token))
+        {
+            if (!IsKeyword(sql, token, "CAST")
+                || !TryReadBinaryGuidTextCast(sql, token, out var column, out var castEnd))
+            {
+                continue;
+            }
+
+            rewritten ??= new StringBuilder(sql.Length + 96);
+            rewritten.Append(sql, copiedThrough, token.Offset - copiedThrough);
+            rewritten.Append(CreateBinaryGuidTextExpression(column));
+            copiedThrough = castEnd;
+            offset = castEnd;
+        }
+
+        if (rewritten is null)
+            return sql;
+
+        rewritten.Append(sql, copiedThrough, sql.Length - copiedThrough);
+        return rewritten.ToString();
+    }
+
+    private static bool TryReadBinaryGuidTextCast(
+        string sql,
+        ScriptToken cast,
+        out string column,
+        out int castEnd)
+    {
+        column = string.Empty;
+        castEnd = cast.Offset;
+        var offset = cast.Offset + cast.Length;
+        if (!TryReadScriptToken(sql, ref offset, out var token)
+            || !IsCharacter(sql, token, '(')
+            || !TryReadScriptToken(sql, ref offset, out var firstColumnToken)
+            || !IsIdentifier(firstColumnToken))
+        {
+            return false;
+        }
+
+        var columnStart = firstColumnToken.Offset;
+        var terminalColumnToken = firstColumnToken;
+        while (TryReadScriptToken(sql, ref offset, out token) && IsDot(sql, token))
+        {
+            if (!TryReadScriptToken(sql, ref offset, out terminalColumnToken)
+                || !IsIdentifier(terminalColumnToken))
+            {
+                return false;
+            }
+        }
+
+        if (!IsKeyword(sql, token, "AS")
+            || !TryReadScriptToken(sql, ref offset, out token)
+            || !IsKeyword(sql, token, "TEXT")
+            || !TryReadScriptToken(sql, ref offset, out token)
+            || !IsCharacter(sql, token, ')'))
+        {
+            return false;
+        }
+
+        var identifier = UnquoteIdentifier(sql.AsSpan(terminalColumnToken.Offset, terminalColumnToken.Length));
+        if (!identifier.EndsWith("ID", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        column = sql[columnStart..(terminalColumnToken.Offset + terminalColumnToken.Length)];
+        castEnd = token.Offset + token.Length;
+        return true;
+    }
+
+    private static string CreateBinaryGuidTextExpression(string column)
+    {
+        var hex = $"hex({column})";
+        return $"CASE WHEN typeof({column}) = 'blob' AND length({column}) = 16 THEN lower("
+            + $"substr({hex}, 7, 2) || substr({hex}, 5, 2) || substr({hex}, 3, 2) || substr({hex}, 1, 2) || '-' || "
+            + $"substr({hex}, 11, 2) || substr({hex}, 9, 2) || '-' || "
+            + $"substr({hex}, 15, 2) || substr({hex}, 13, 2) || '-' || "
+            + $"substr({hex}, 17, 4) || '-' || substr({hex}, 21, 12)) "
+            + $"ELSE CAST({column} AS TEXT) END";
+    }
+
+    private static bool IsCharacter(string sql, ScriptToken token, char value)
+        => token.Kind == ScriptTokenKind.Other
+           && token.Length == 1
+           && sql[token.Offset] == value;
+
+    private static string UnquoteIdentifier(ReadOnlySpan<char> identifier)
+    {
+        if (identifier.Length < 2)
+            return identifier.ToString();
+
+        return (identifier[0], identifier[^1]) switch
+        {
+            ('"', '"') => identifier[1..^1].ToString().Replace("\"\"", "\"", StringComparison.Ordinal),
+            ('[', ']') => identifier[1..^1].ToString().Replace("]]", "]", StringComparison.Ordinal),
+            ('`', '`') => identifier[1..^1].ToString().Replace("``", "`", StringComparison.Ordinal),
+            _ => identifier.ToString()
+        };
     }
 
     private static string NormalizeSql(string sql)

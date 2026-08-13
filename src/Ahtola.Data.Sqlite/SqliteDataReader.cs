@@ -307,7 +307,19 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         if (!string.IsNullOrEmpty(declaredType))
             return declaredType;
 
-        return CurrentValueKind(ordinal) switch
+        var valueType = CurrentValueKind(ordinal);
+        if (HasUndeclaredSelectSourceColumn(ordinal))
+        {
+            if (valueType is ReaderValueKind.Empty or ReaderValueKind.Null)
+                valueType = GetSampleValueType(ordinal);
+
+            return GetDataTypeNameFromValueType(valueType, string.Empty);
+        }
+
+        if (valueType is ReaderValueKind.Empty or ReaderValueKind.Null)
+            valueType = GetSampleValueType(ordinal);
+
+        return valueType switch
         {
             ReaderValueKind.Null => "BLOB",
             ReaderValueKind.Integer => "INTEGER",
@@ -385,14 +397,47 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         var valueType = CurrentValueKind(ordinal);
         var declaredType = GetDeclaredTypeName(ordinal);
         if (!string.IsNullOrEmpty(declaredType))
-            return GetClrTypeFromSqliteType(declaredType, valueType);
+        {
+            if (IsBlobType(declaredType))
+            {
+                // BLOB affinity does not constrain SQLite storage classes. DataAdapter fixes a
+                // DataColumn's type before it reads rows, so byte[] metadata would reject a later
+                // TEXT value from the same column. Use object to preserve mixed BLOB/TEXT values.
+                return typeof(object);
+            }
 
-        return GetClrTypeFromSqliteType(GetDataTypeName(ordinal), valueType);
+            return GetClrTypeFromSqliteType(declaredType, valueType);
+        }
+
+        if (HasUndeclaredSelectSourceColumn(ordinal))
+        {
+            var sampledValueType = valueType is ReaderValueKind.Empty or ReaderValueKind.Null
+                ? GetSampleValueType(ordinal)
+                : valueType;
+            return sampledValueType == ReaderValueKind.Blob
+                ? typeof(object)
+                : GetClrTypeFromValueType(sampledValueType);
+        }
+
+        var dataTypeName = GetDataTypeName(ordinal);
+        // Identifier-shaped expressions can materialize a binary GUID as text in GetValue.
+        // Keep ordinary BLOB expressions binary, but make those adapter-facing GUID projections
+        // object-typed so DataAdapter does not commit to byte[] before reading the value.
+        return IsBlobType(dataTypeName) && IsIdentifierColumnName(GetName(ordinal))
+            ? typeof(object)
+            : GetClrTypeFromSqliteType(dataTypeName, valueType);
     }
 
     public override T GetFieldValue<T>(int ordinal)
     {
         EnsureOpen();
+        if (typeof(T) == typeof(byte[]))
+        {
+            var rawValue = GetTypedValue(ordinal);
+            if (rawValue.Kind == ReaderValueKind.Blob)
+                return (T)(object)rawValue.Blob;
+        }
+
         var value = GetValue(ordinal);
         if (value == DBNull.Value)
         {
@@ -477,7 +522,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
     {
         EnsureOpen();
         var value = GetTypedValue(ordinal);
-        return ToGuid(value);
+        return ToGuid(ordinal, value);
     }
 
     public override short GetInt16(int ordinal)
@@ -583,21 +628,24 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         schema.Columns.Add(SchemaTableColumn.IsLong, typeof(bool));
         schema.Columns.Add(SchemaTableColumn.ProviderType, typeof(int));
 
-        var tableName = TryGetSelectSource(out var parsedTableName, out var selections) ? parsedTableName : null;
-        var tableColumns = tableName is null ? new Dictionary<string, SchemaColumnInfo>(StringComparer.OrdinalIgnoreCase) : GetTableColumns(tableName);
+        var hasSources = TryGetSelectSources(out var sources, out var selections);
+        var sourceColumns = hasSources
+            ? GetSelectSourceColumns(sources)
+            : new Dictionary<string, Dictionary<string, SchemaColumnInfo>>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < FieldCount; i++)
         {
             var columnName = GetName(i);
             var selection = i < selections.Count ? selections[i] : columnName;
-            var baseColumnName = ResolveBaseColumnName(selection, columnName, tableColumns);
-            SchemaColumnInfo? columnInfo = null;
-            var hasBaseColumn = baseColumnName is not null && tableName is not null && tableColumns.TryGetValue(baseColumnName, out columnInfo);
-            var info = hasBaseColumn
-                ? columnInfo ?? throw new InvalidOperationException(Properties.Resources.NoData)
+            var resolvedColumn = hasSources
+                ? ResolveSelectColumn(selection, columnName, sources, sourceColumns)
                 : null;
+            var info = resolvedColumn?.Column;
+            var hasBaseColumn = info is not null;
             var valueType = _hasCurrentRow ? ReadValue(i).Kind : ReaderValueKind.Empty;
-            if (valueType == ReaderValueKind.Empty && !string.IsNullOrEmpty(info?.TypeName))
+            if (valueType == ReaderValueKind.Empty
+                && !string.IsNullOrEmpty(info?.TypeName)
+                && !IsBlobType(info.TypeName))
                 valueType = GetValueKindFromTypeName(info.TypeName);
             else if (valueType is ReaderValueKind.Empty or ReaderValueKind.Null)
                 valueType = GetSampleValueType(i);
@@ -605,8 +653,21 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                 ? StripTypeLength(info.TypeName)
                 : GetDataTypeNameFromValueType(valueType, selection);
             var dataType = info is not null
-                ? GetClrTypeFromSqliteType(info.TypeName, valueType)
-                : GetClrTypeFromValueType(valueType);
+                // SQLite columns without a declared type have BLOB affinity, but their values are
+                // dynamically typed. Preserve a sampled runtime type; otherwise use object so
+                // DataTable can retain the value instead of rejecting text as byte[].
+                ? string.IsNullOrEmpty(info.TypeName)
+                    ? valueType == ReaderValueKind.Blob
+                        ? typeof(object)
+                        : GetClrTypeFromValueType(valueType)
+                    : IsBlobType(info.TypeName)
+                        ? typeof(object)
+                    : GetClrTypeFromSqliteType(info.TypeName, valueType)
+                // Identifier-shaped expressions can materialize a binary GUID as text in
+                // GetValue, so DataAdapter must not commit their schema to byte[].
+                : valueType == ReaderValueKind.Blob && IsIdentifierColumnName(columnName)
+                    ? typeof(object)
+                    : GetClrTypeFromValueType(valueType);
             var isExpression = info is null;
             var isAliased = info is null
                 || !string.Equals(info.Name, columnName, StringComparison.Ordinal);
@@ -622,7 +683,7 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             row["BaseCatalogName"] = info is not null ? "main" : DBNull.Value;
             row[SchemaTableColumn.BaseColumnName] = info is not null ? info.Name : DBNull.Value;
             row[SchemaTableColumn.BaseSchemaName] = DBNull.Value;
-            row[SchemaTableColumn.BaseTableName] = info is not null ? tableName : DBNull.Value;
+            row[SchemaTableColumn.BaseTableName] = resolvedColumn?.TableName ?? (object)DBNull.Value;
             row[SchemaTableColumn.DataType] = dataType;
             row["DataTypeName"] = dataTypeName;
             row[SchemaTableColumn.AllowDBNull] = info is not null ? isAliased || info.AllowNull : DBNull.Value;
@@ -668,8 +729,11 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         EnsureOpen();
         EnsureHasCurrentRow();
         var value = ReadValue(ordinal);
-        if (IsGuidType(GetDeclaredTypeName(ordinal)) && value.Kind is ReaderValueKind.Blob or ReaderValueKind.Text)
-            return ToGuid(value);
+        var declaredType = GetDeclaredTypeName(ordinal);
+        if (IsGuidType(declaredType) && value.Kind is ReaderValueKind.Blob or ReaderValueKind.Text)
+            return ToGuid(ordinal, value);
+        if (ShouldMaterializeTextGuid(ordinal, declaredType, value))
+            return ToGuid(ordinal, value).ToString("D", CultureInfo.InvariantCulture).ToUpperInvariant();
 
         return value.Kind switch
         {
@@ -962,14 +1026,14 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
 
     private string GetDeclaredTypeName(int ordinal)
     {
-        if (TryGetSelectSource(out var tableName, out var selections))
+        if (TryGetSelectSources(out var sources, out var selections))
         {
-            var tableColumns = GetTableColumns(tableName);
+            var sourceColumns = GetSelectSourceColumns(sources);
             var columnName = GetName(ordinal);
             var selection = ordinal < selections.Count ? selections[ordinal] : columnName;
-            var baseColumnName = ResolveBaseColumnName(selection, columnName, tableColumns);
-            if (baseColumnName is not null && tableColumns.TryGetValue(baseColumnName, out var columnInfo))
-                return StripTypeLength(columnInfo.TypeName);
+            var resolvedColumn = ResolveSelectColumn(selection, columnName, sources, sourceColumns);
+            if (resolvedColumn is not null)
+                return StripTypeLength(resolvedColumn.Column.TypeName);
         }
 
         var match = Regex.Match(_command.CommandText, @"^\s*SELECT\s+(?<column>[\w\[\]""`]+)\s+FROM\s+(?<table>[\w\[\]""`]+)", RegexOptions.IgnoreCase);
@@ -992,6 +1056,18 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         }
 
         return string.Empty;
+    }
+
+    private bool HasUndeclaredSelectSourceColumn(int ordinal)
+    {
+        if (!TryGetSelectSources(out var sources, out var selections))
+            return false;
+
+        var sourceColumns = GetSelectSourceColumns(sources);
+        var columnName = GetName(ordinal);
+        var selection = ordinal < selections.Count ? selections[ordinal] : columnName;
+        var resolvedColumn = ResolveSelectColumn(selection, columnName, sources, sourceColumns);
+        return resolvedColumn is not null && string.IsNullOrEmpty(resolvedColumn.Column.TypeName);
     }
 
     private static string InferDataTypeName(string expression)
@@ -1034,26 +1110,22 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         return index < 0 ? typeName : typeName[..index];
     }
 
-    private bool TryGetSelectSource(out string tableName, out List<string> selections)
+    private bool TryGetSelectSources(out List<SelectSource> sources, out List<string> selections)
     {
-        tableName = string.Empty;
+        sources = new List<SelectSource>();
         selections = new List<string>();
         var match = Regex.Match(
             _currentSql,
-            @"^\s*SELECT\s+(?<select>.*?)\s+FROM\s+(?<table>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)",
+            @"^\s*SELECT\s+(?<select>.*?)\s+FROM\s+",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        if (match.Success)
+        if (match.Success && TryGetSelectSources(_currentSql, out sources))
         {
-            tableName = UnquoteIdentifier(match.Groups["table"].Value);
-            selections = SplitSelectList(match.Groups["select"].Value);
-            if (selections.Count == 1 && selections[0] == "*")
-                selections = Enumerable.Range(0, FieldCount).Select(GetName).ToList();
-
+            selections = ExpandWildcardSelections(StripSelectModifier(SplitSelectList(match.Groups["select"].Value)), sources);
             return true;
         }
 
         // DML ... RETURNING <cols>: the result columns come from the target table, so the
-        // declared column types resolve via PRAGMA table_info of that table. Without this,
+        // declared column types resolve via PRAGMA table_info of the source table. Without this,
         // GetSchemaTable/GetDeclaredTypeName fall back to GetSampleValueType, which would
         // RE-EXECUTE the DML once per column (INSERT...RETURNING -> N+1 inserts) and report
         // Byte[]/BLOB for every column before the first Read.
@@ -1071,13 +1143,130 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         if (!tableMatch.Success)
             return false;
 
-        tableName = UnquoteIdentifier(tableMatch.Groups["table"].Value);
+        var tableName = UnquoteIdentifier(tableMatch.Groups["table"].Value);
+        sources.Add(new SelectSource(tableName, tableName));
         selections = SplitSelectList(returningMatch.Groups["cols"].Value);
         if (selections.Count == 1 && selections[0] == "*")
             selections = Enumerable.Range(0, FieldCount).Select(GetName).ToList();
 
         return true;
     }
+
+    private static List<string> StripSelectModifier(List<string> selections)
+    {
+        if (selections.Count > 0)
+            selections[0] = Regex.Replace(selections[0], @"^\s*(?:DISTINCT|ALL)\s+", "", RegexOptions.IgnoreCase);
+
+        return selections;
+    }
+
+    private static bool TryGetSelectSources(string sql, out List<SelectSource> sources)
+    {
+        sources = new List<SelectSource>();
+        var matches = Regex.Matches(
+            sql,
+            @"\b(?:FROM|JOIN)\s+(?<table>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)(?:\s+(?:AS\s+)?(?<alias>[\w]+))?",
+            RegexOptions.IgnoreCase);
+        foreach (Match match in matches)
+        {
+            var tableName = UnquoteIdentifier(match.Groups["table"].Value);
+            var alias = match.Groups["alias"].Success ? match.Groups["alias"].Value : tableName;
+            if (IsJoinKeyword(alias))
+                alias = tableName;
+
+            sources.Add(new SelectSource(tableName, alias));
+        }
+
+        return sources.Count > 0;
+    }
+
+    private List<string> ExpandWildcardSelections(List<string> selections, List<SelectSource> sources)
+    {
+        var expanded = new List<string>();
+        foreach (var selection in selections)
+        {
+            var match = Regex.Match(
+                selection,
+                @"^(?:(?<alias>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)\.)?\*$",
+                RegexOptions.IgnoreCase);
+            if (!match.Success)
+            {
+                expanded.Add(selection);
+                continue;
+            }
+
+            var alias = match.Groups["alias"].Success ? UnquoteIdentifier(match.Groups["alias"].Value) : null;
+            foreach (var source in sources.Where(source => alias is null || string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase)))
+            {
+                foreach (var column in GetTableColumns(source.TableName).Values)
+                    expanded.Add($"{source.Alias}.{QuoteIdentifier(column.Name)}");
+            }
+        }
+
+        return expanded;
+    }
+
+    private Dictionary<string, Dictionary<string, SchemaColumnInfo>> GetSelectSourceColumns(List<SelectSource> sources)
+    {
+        var columns = new Dictionary<string, Dictionary<string, SchemaColumnInfo>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in sources)
+            columns[source.Alias] = GetTableColumns(source.TableName);
+
+        return columns;
+    }
+
+    private static ResolvedSchemaColumn? ResolveSelectColumn(
+        string selection,
+        string columnName,
+        List<SelectSource> sources,
+        IReadOnlyDictionary<string, Dictionary<string, SchemaColumnInfo>> sourceColumns)
+    {
+        var withoutAlias = Regex.Replace(selection, @"\s+AS\s+.*$", "", RegexOptions.IgnoreCase).Trim();
+        var qualifiedMatch = Regex.Match(
+            withoutAlias,
+            @"^(?<alias>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)\.(?<column>""(?:[^""]|"""")+""|\[[^\]]+\]|`[^`]+`|[\w]+)$",
+            RegexOptions.IgnoreCase);
+        if (qualifiedMatch.Success)
+        {
+            var alias = UnquoteIdentifier(qualifiedMatch.Groups["alias"].Value);
+            var column = UnquoteIdentifier(qualifiedMatch.Groups["column"].Value);
+            if (sourceColumns.TryGetValue(alias, out var columns)
+                && columns.TryGetValue(column, out var columnInfo))
+            {
+                var source = sources.First(source => string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase));
+                return new ResolvedSchemaColumn(source.TableName, columnInfo);
+            }
+        }
+
+        var candidate = UnquoteIdentifier(withoutAlias);
+        var canUseColumnName = selection.Length == withoutAlias.Length
+            && !Regex.IsMatch(selection, @"[+\-*/()]");
+        var matches = new List<ResolvedSchemaColumn>();
+        foreach (var source in sources)
+        {
+            if (sourceColumns[source.Alias].TryGetValue(candidate, out var columnInfo)
+                || sourceColumns[source.Alias].TryGetValue(columnName, out columnInfo)
+                    && canUseColumnName)
+            {
+                matches.Add(new ResolvedSchemaColumn(source.TableName, columnInfo));
+            }
+        }
+
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    private static bool IsJoinKeyword(string value)
+        => value.Equals("LEFT", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("RIGHT", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("INNER", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("OUTER", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("CROSS", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("FULL", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("WHERE", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("ORDER", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("GROUP", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("LIMIT", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("ON", StringComparison.OrdinalIgnoreCase);
 
     private static List<string> SplitSelectList(string selectList)
     {
@@ -1150,20 +1339,6 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         return columns;
     }
 
-    private static string? ResolveBaseColumnName(string selection, string columnName, Dictionary<string, SchemaColumnInfo> tableColumns)
-    {
-        var withoutAlias = Regex.Replace(selection, @"\s+AS\s+.*$", "", RegexOptions.IgnoreCase).Trim();
-        var candidate = UnquoteIdentifier(withoutAlias);
-        if (tableColumns.ContainsKey(candidate))
-            return candidate;
-        if (selection.Length != withoutAlias.Length)
-            return null;
-
-        return tableColumns.ContainsKey(columnName) && !Regex.IsMatch(selection, @"[+\-*/()]")
-            ? columnName
-            : null;
-    }
-
     private static string GetDataTypeNameFromValueType(ReaderValueKind valueType, string selection)
     {
         if (valueType == ReaderValueKind.Blob && Regex.IsMatch(selection, @"[+\-*/]"))
@@ -1225,14 +1400,20 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
     private static ReaderValueKind GetValueKindFromTypeName(string typeName)
     {
         var normalized = StripTypeLength(typeName).ToUpperInvariant();
+        if (IsGuidType(normalized))
+            return ReaderValueKind.Blob;
         if (normalized.Contains("INT"))
             return ReaderValueKind.Integer;
         if (normalized.Contains("CHAR") || normalized.Contains("CLOB") || normalized.Contains("TEXT"))
             return ReaderValueKind.Text;
         if (normalized.Contains("REAL") || normalized.Contains("FLOA") || normalized.Contains("DOUB"))
             return ReaderValueKind.Real;
+        if (normalized.Length == 0 || normalized.Contains("BLOB"))
+            return ReaderValueKind.Blob;
 
-        return ReaderValueKind.Blob;
+        // Unknown declared types have NUMERIC affinity in SQLite. The provider surfaces them
+        // as text, matching GetClrTypeFromSqliteType and avoiding conflicting BLOB metadata.
+        return ReaderValueKind.Text;
     }
 
     [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
@@ -1272,6 +1453,45 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
         return normalized.Equals("GUID", StringComparison.OrdinalIgnoreCase)
                || normalized.Equals("UNIQUEIDENTIFIER", StringComparison.OrdinalIgnoreCase);
     }
+
+    private bool ShouldMaterializeTextGuid(int ordinal, string declaredType, ReaderValue value)
+    {
+        // SQLite's dynamic storage permits a .NET Guid parameter to retain its BLOB storage class
+        // even when the source declaration is TEXT, BLOB, or absent. With BinaryGUID enabled,
+        // preserve such identifier values through DataAdapter instead of letting DataColumn
+        // stringify the byte array as "System.Byte[]". Restrict this compatibility conversion to
+        // conventional identifier names so binary payloads remain blobs.
+        return _connection.BinaryGuid
+            && value.Kind == ReaderValueKind.Blob
+            && value.Blob.Length == 16
+            && (string.IsNullOrWhiteSpace(declaredType)
+                || IsTextType(declaredType)
+                || IsBlobType(declaredType))
+            && IsIdentifierColumnName(GetName(ordinal));
+    }
+
+    private static bool IsTextType(string typeName)
+    {
+        var normalized = StripTypeLength(typeName).Trim();
+        return normalized.Contains("CHAR", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("CLOB", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("TEXT", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsBlobType(string typeName)
+        => StripTypeLength(typeName).Contains("BLOB", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsIdentifierColumnName(string columnName)
+    {
+        var separator = columnName.LastIndexOf('.');
+        var name = separator >= 0 ? columnName[(separator + 1)..] : columnName;
+        return name.Equals("ID", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("ID", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed record SelectSource(string TableName, string Alias);
+
+    private sealed record ResolvedSchemaColumn(string TableName, SchemaColumnInfo Column);
 
     private sealed record SchemaColumnInfo(string Name, string TypeName, bool AllowNull, bool IsKey, bool IsUnique);
 
@@ -1348,42 +1568,58 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
             : throw new InvalidCastException("The requested value is not TEXT.");
     }
 
-    private Guid ToGuid(ReaderValue value)
+    private Guid ToGuid(int ordinal, ReaderValue value)
+    {
+        if (value.Kind == ReaderValueKind.Blob)
         {
-            if (value.Kind == ReaderValueKind.Blob)
+            if (value.Blob.Length == 16)
             {
-                if (value.Blob.Length == 16)
-                {
-                    // BinaryGUID=true (default): little-endian .NET Guid blob layout (SDS default).
-                    // BinaryGUID=false: big-endian RFC 4122 byte order.
-                    return _connection.BinaryGuid
-                        ? new Guid(value.Blob)
-                        : new Guid(
-                            (value.Blob[0] << 24) | (value.Blob[1] << 16) | (value.Blob[2] << 8) | value.Blob[3],
-                            (short)((value.Blob[4] << 8) | value.Blob[5]),
-                            (short)((value.Blob[6] << 8) | value.Blob[7]),
-                            value.Blob[8],
-                            value.Blob[9],
-                            value.Blob[10],
-                            value.Blob[11],
-                            value.Blob[12],
-                            value.Blob[13],
-                            value.Blob[14],
-                            value.Blob[15]);
-                }
-
-                return Guid.Parse(Encoding.UTF8.GetString(value.Blob));
+                // BinaryGUID=true (default): little-endian .NET Guid blob layout (SDS default).
+                // BinaryGUID=false: big-endian RFC 4122 byte order.
+                return _connection.BinaryGuid
+                    ? new Guid(value.Blob)
+                    : new Guid(
+                        (value.Blob[0] << 24) | (value.Blob[1] << 16) | (value.Blob[2] << 8) | value.Blob[3],
+                        (short)((value.Blob[4] << 8) | value.Blob[5]),
+                        (short)((value.Blob[6] << 8) | value.Blob[7]),
+                        value.Blob[8],
+                        value.Blob[9],
+                        value.Blob[10],
+                        value.Blob[11],
+                        value.Blob[12],
+                        value.Blob[13],
+                        value.Blob[14],
+                        value.Blob[15]);
             }
 
-            return Guid.Parse(value.Text);
+            if (Guid.TryParse(Encoding.UTF8.GetString(value.Blob), out var blobGuid))
+                return blobGuid;
+
+            throw CreateGuidFormatException(ordinal, value);
         }
 
-        private DateTime ApplyConfiguredDateTimeKind(DateTime value)
-        {
-            // Match Microsoft.Data.Sqlite / SDS: apply connection DateTimeKind via SpecifyKind
-            // (no zone conversion) so RDM DateTimeKind=Utc surfaces Kind=Utc on reads.
-            return DateTime.SpecifyKind(value, _connection.DateTimeKind);
-        }
+        if (value.Kind == ReaderValueKind.Text && Guid.TryParse(value.Text, out var textGuid))
+            return textGuid;
+
+        throw CreateGuidFormatException(ordinal, value);
+    }
+
+    private InvalidOperationException CreateGuidFormatException(int ordinal, ReaderValue value)
+    {
+        var storageDetails = value.Kind == ReaderValueKind.Blob
+            ? $"BLOB ({value.Blob.Length} bytes)"
+            : value.Kind.ToString().ToUpperInvariant();
+        var declaredType = GetDeclaredTypeName(ordinal);
+        return new InvalidOperationException(
+            $"Unable to parse GUID for column '{GetName(ordinal)}' (ordinal {ordinal}, declared type '{declaredType}', storage {storageDetails}).");
+    }
+
+    private DateTime ApplyConfiguredDateTimeKind(DateTime value)
+    {
+        // Match Microsoft.Data.Sqlite / SDS: apply connection DateTimeKind via SpecifyKind
+        // (no zone conversion) so RDM DateTimeKind=Utc surfaces Kind=Utc on reads.
+        return DateTime.SpecifyKind(value, _connection.DateTimeKind);
+    }
 
     private void DrainRemainingStatements()
     {
