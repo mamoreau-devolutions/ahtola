@@ -2,9 +2,14 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Data;
+using System.Data.Common;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Management.Automation;
+using System.Security;
+using System.Text;
+using System.Text.Json;
 using Ahtola.Data.Sqlite;
 
 namespace Ahtola.PSSqlite;
@@ -43,23 +48,27 @@ public abstract class PSSqliteCmdlet : PSCmdlet
         return SessionState.InvokeCommand.ExpandString(value);
     }
 
-    protected void CloseIfNeeded(SqliteConnection? connection, bool keepAlive)
+    protected static void DisposeOwnedConnection(SqliteConnection connection)
     {
-        if (connection is null || keepAlive)
-        {
-            return;
-        }
-
-        if (connection.State == System.Data.ConnectionState.Open)
+        if (connection.State == ConnectionState.Open)
         {
             connection.Close();
         }
 
         SqliteConnection.ClearPool(connection);
+        connection.Dispose();
+    }
+
+    protected static void OpenIfNeeded(SqliteConnection connection)
+    {
+        if (connection.State != ConnectionState.Open)
+        {
+            connection.Open();
+        }
     }
 }
 
-[Cmdlet(VerbsCommon.New, "PSSqliteConnection")]
+[Cmdlet(VerbsCommon.New, "AhtolaSqliteConnection")]
 [OutputType(typeof(SqliteConnection))]
 public sealed class NewPSSqliteConnectionCommand : PSSqliteCmdlet
 {
@@ -72,28 +81,42 @@ public sealed class NewPSSqliteConnectionCommand : PSSqliteCmdlet
     [Parameter(Mandatory = true, ParameterSetName = "byDatabasePath")]
     public string? DatabaseFile { get; set; }
 
+    [Parameter]
+    public SwitchParameter ReadOnly { get; set; }
+
     protected override void ProcessRecord()
     {
         var connection = ParameterSetName == "byDatabasePath"
             ? ConnectionFactory.Create(ExpandString(DatabasePath), ExpandString(DatabaseFile!))
             : ConnectionFactory.Create(ExpandString(ConnectionString));
+        if (ReadOnly.IsPresent)
+        {
+            var builder = new SqliteConnectionStringBuilder(connection.ConnectionString)
+            {
+                Mode = SqliteOpenMode.ReadOnly
+            };
+            connection.ConnectionString = builder.ToString();
+        }
+
+        connection.Open();
         WriteObject(connection);
     }
 }
 
-[Cmdlet(VerbsLifecycle.Invoke, "PSSqliteQuery")]
+[Cmdlet(VerbsLifecycle.Invoke, "AhtolaSqliteQuery")]
 public sealed class InvokePSSqliteQueryCommand : PSSqliteCmdlet
 {
-    [Parameter(Mandatory = true)]
-    public SqliteConnection SqliteConnection { get; set; } = null!;
+    [Parameter(Mandatory = true, ValueFromPipeline = true)]
+    [Alias("SqliteConnection")]
+    public SqliteConnection Connection { get; set; } = null!;
 
     [Parameter(Mandatory = true)]
     [Alias("Query")]
     public string CommandText { get; set; } = string.Empty;
 
     [Parameter]
-    [ValidateSet("DataTable", "DataReader", "DataSet", "OrderedDictionary", "PSCustomObject")]
-    public string As { get; set; } = "DataTable";
+    [ValidateSet("DataTable", "DetachedDataReader", "DataReader", "DataSet", "OrderedDictionary", "PSCustomObject", "Scalar", "NonQuery")]
+    public string As { get; set; } = "PSCustomObject";
 
     [Parameter]
     public Type? CastAs { get; set; }
@@ -105,19 +128,19 @@ public sealed class InvokePSSqliteQueryCommand : PSSqliteCmdlet
     public int CommandTimeout { get; set; } = 30;
 
     [Parameter]
-    public SwitchParameter KeepAlive { get; set; }
+    public SqliteTransaction? Transaction { get; set; }
 
     protected override void ProcessRecord()
     {
         var result = QueryExecutor.Execute(
-            SqliteConnection,
+            Connection,
             CommandText,
             Parameters,
             new QueryOptions
             {
                 OutputFormat = As,
                 CommandTimeout = CommandTimeout,
-                KeepAlive = KeepAlive.IsPresent
+                Transaction = Transaction
             });
 
         if (CastAs is not null && result is not null)
@@ -129,27 +152,31 @@ public sealed class InvokePSSqliteQueryCommand : PSSqliteCmdlet
     }
 }
 
-[Cmdlet(VerbsCommon.Get, "PSSqliteRow")]
+[Cmdlet(VerbsCommon.Get, "AhtolaSqliteRow")]
 public sealed class GetPSSqliteRowCommand : PSSqliteCmdlet
 {
     [Parameter(Mandatory = true)]
-    public SQLiteDBConfig SqliteDBConfig { get; set; } = null!;
+    [Alias("SqliteDBConfig")]
+    public SQLiteDBConfig Configuration { get; set; } = null!;
 
     [Parameter(Mandatory = true)]
-    public string TableName { get; set; } = string.Empty;
+    [Alias("TableName")]
+    public string Table { get; set; } = string.Empty;
 
     [Parameter]
-    public IDictionary? ClauseData { get; set; }
+    [Alias("ClauseData")]
+    public IDictionary? Where { get; set; }
 
-    [Parameter]
+    [Parameter(ValueFromPipeline = true)]
     [ValidateNotNull]
-    public SqliteConnection? SqliteConnection { get; set; }
-
-    [Parameter]
-    public SwitchParameter KeepAlive { get; set; }
+    [Alias("SqliteConnection")]
+    public SqliteConnection? Connection { get; set; }
 
     [Parameter]
     public SwitchParameter CaseSensitive { get; set; }
+
+    [Parameter]
+    public SqliteTransaction? Transaction { get; set; }
 
     [Parameter(DontShow = true)]
     [ValidateSet("DataTable", "DataReader", "DataSet", "OrderedDictionary", "PSCustomObject")]
@@ -157,160 +184,204 @@ public sealed class GetPSSqliteRowCommand : PSSqliteCmdlet
 
     protected override void ProcessRecord()
     {
-        var connection = SqliteConnection ?? ConnectionFactory.Create(SqliteDBConfig.ConnectionString!);
-        var result = CrudSqlBuilder.ExecuteSelect(
-            SqliteDBConfig,
-            TableName,
-            ClauseData,
-            connection,
-            As,
-            CaseSensitive.IsPresent,
-            KeepAlive.IsPresent,
-            message => WriteWarning(message + $" for table or view '{TableName}'."));
-
+        var ownsConnection = Connection is null;
+        var connection = Connection ?? ConnectionFactory.Create(Configuration.ConnectionString!);
         try
         {
+            var result = CrudSqlBuilder.ExecuteSelect(
+                Configuration,
+                Table,
+                Where,
+                connection,
+                As,
+                CaseSensitive.IsPresent,
+                Transaction,
+                message => WriteWarning(message + $" for table or view '{Table}'."));
             WriteResult(result);
         }
         finally
         {
-            CloseIfNeeded(connection, KeepAlive.IsPresent);
+            if (ownsConnection)
+            {
+                DisposeOwnedConnection(connection);
+            }
         }
     }
 }
 
-[Cmdlet(VerbsCommon.New, "PSSqliteRow")]
+[Cmdlet(VerbsCommon.New, "AhtolaSqliteRow", SupportsShouldProcess = true)]
 public sealed class NewPSSqliteRowCommand : PSSqliteCmdlet
 {
     [Parameter(Mandatory = true)]
-    public SQLiteDBConfig SqliteDBConfig { get; set; } = null!;
+    [Alias("SqliteDBConfig")]
+    public SQLiteDBConfig Configuration { get; set; } = null!;
 
     [Parameter(Mandatory = true)]
-    public string TableName { get; set; } = string.Empty;
+    [Alias("TableName")]
+    public string Table { get; set; } = string.Empty;
 
     [Parameter(Mandatory = true)]
-    public IDictionary RowData { get; set; } = null!;
+    [Alias("RowData")]
+    public IDictionary Values { get; set; } = null!;
+
+    [Parameter(ValueFromPipeline = true)]
+    [Alias("SqliteConnection")]
+    public SqliteConnection? Connection { get; set; }
 
     [Parameter]
-    public SqliteConnection? SqliteConnection { get; set; }
-
-    [Parameter]
-    public SwitchParameter KeepAlive { get; set; }
+    public SqliteTransaction? Transaction { get; set; }
 
     protected override void ProcessRecord()
     {
-        var connection = SqliteConnection ?? ConnectionFactory.Create(SqliteDBConfig.ConnectionString!);
+        if (!ShouldProcess(Table, "Insert row"))
+        {
+            return;
+        }
+
+        var ownsConnection = Connection is null;
+        var connection = Connection ?? ConnectionFactory.Create(Configuration.ConnectionString!);
         try
         {
             var result = CrudSqlBuilder.ExecuteInsert(
-                SqliteDBConfig,
-                TableName,
-                RowData,
+                Configuration,
+                Table,
+                Values,
                 connection,
-                KeepAlive.IsPresent,
-                message => WriteWarning(message + $" for table '{TableName}'."));
+                Transaction,
+                message => WriteWarning(message + $" for table '{Table}'."));
             WriteResult(result);
         }
         finally
         {
-            CloseIfNeeded(connection, KeepAlive.IsPresent);
+            if (ownsConnection)
+            {
+                DisposeOwnedConnection(connection);
+            }
         }
     }
 }
 
-[Cmdlet(VerbsCommon.Set, "PSSqliteRow")]
+[Cmdlet(VerbsCommon.Set, "AhtolaSqliteRow", SupportsShouldProcess = true)]
 public sealed class SetPSSqliteRowCommand : PSSqliteCmdlet
 {
     [Parameter(Mandatory = true)]
-    public SQLiteDBConfig SqliteDBConfig { get; set; } = null!;
+    [Alias("SqliteDBConfig")]
+    public SQLiteDBConfig Configuration { get; set; } = null!;
 
     [Parameter(Mandatory = true)]
-    public string TableName { get; set; } = string.Empty;
+    [Alias("TableName")]
+    public string Table { get; set; } = string.Empty;
 
     [Parameter(Mandatory = true)]
-    public IDictionary RowData { get; set; } = null!;
+    [Alias("RowData")]
+    public IDictionary Values { get; set; } = null!;
 
     [Parameter]
-    public IDictionary? ClauseData { get; set; }
+    [Alias("ClauseData")]
+    public IDictionary? Where { get; set; }
 
     [Parameter]
     public SwitchParameter CaseSensitive { get; set; }
 
-    [Parameter]
-    public SqliteConnection? SqliteConnection { get; set; }
-
-    [Parameter]
-    public SwitchParameter KeepAlive { get; set; }
+    [Parameter(ValueFromPipeline = true)]
+    [Alias("SqliteConnection")]
+    public SqliteConnection? Connection { get; set; }
 
     [Parameter]
     [ValidateSet("UPDATE", "UPSERT")]
     public string OnConflict { get; set; } = "UPDATE";
 
+    [Parameter]
+    public SqliteTransaction? Transaction { get; set; }
+
     protected override void ProcessRecord()
     {
-        var connection = SqliteConnection ?? ConnectionFactory.Create(SqliteDBConfig.ConnectionString!);
+        if (!ShouldProcess(Table, $"{OnConflict.ToLowerInvariant()} row"))
+        {
+            return;
+        }
+
+        var ownsConnection = Connection is null;
+        var connection = Connection ?? ConnectionFactory.Create(Configuration.ConnectionString!);
         try
         {
-            CrudSqlBuilder.ExecuteUpdate(
-                SqliteDBConfig,
-                TableName,
-                RowData,
-                ClauseData,
+            WriteObject(CrudSqlBuilder.ExecuteUpdate(
+                Configuration,
+                Table,
+                Values,
+                Where,
                 connection,
                 CaseSensitive.IsPresent,
-                KeepAlive.IsPresent,
-                message => WriteWarning(message + $" for table '{TableName}'."));
+                OnConflict,
+                Transaction,
+                message => WriteWarning(message + $" for table '{Table}'.")));
         }
         finally
         {
-            CloseIfNeeded(connection, KeepAlive.IsPresent);
+            if (ownsConnection)
+            {
+                DisposeOwnedConnection(connection);
+            }
         }
     }
 }
 
-[Cmdlet(VerbsCommon.Remove, "PSSqliteRow")]
+[Cmdlet(VerbsCommon.Remove, "AhtolaSqliteRow", SupportsShouldProcess = true)]
 public sealed class RemovePSSqliteRowCommand : PSSqliteCmdlet
 {
     [Parameter(Mandatory = true)]
-    public SQLiteDBConfig SqliteDBConfig { get; set; } = null!;
+    [Alias("SqliteDBConfig")]
+    public SQLiteDBConfig Configuration { get; set; } = null!;
 
     [Parameter(Mandatory = true)]
-    public string TableName { get; set; } = string.Empty;
+    [Alias("TableName")]
+    public string Table { get; set; } = string.Empty;
 
     [Parameter]
-    public IDictionary? ClauseData { get; set; }
+    [Alias("ClauseData")]
+    public IDictionary? Where { get; set; }
 
     [Parameter]
     public SwitchParameter CaseSensitive { get; set; }
 
-    [Parameter]
-    public SqliteConnection? SqliteConnection { get; set; }
+    [Parameter(ValueFromPipeline = true)]
+    [Alias("SqliteConnection")]
+    public SqliteConnection? Connection { get; set; }
 
     [Parameter]
-    public SwitchParameter KeepAlive { get; set; }
+    public SqliteTransaction? Transaction { get; set; }
 
     protected override void ProcessRecord()
     {
-        var connection = SqliteConnection ?? ConnectionFactory.Create(SqliteDBConfig.ConnectionString!);
+        if (!ShouldProcess(Table, "Delete row"))
+        {
+            return;
+        }
+
+        var ownsConnection = Connection is null;
+        var connection = Connection ?? ConnectionFactory.Create(Configuration.ConnectionString!);
         try
         {
-            CrudSqlBuilder.ExecuteDelete(
-                SqliteDBConfig,
-                TableName,
-                ClauseData,
+            WriteObject(CrudSqlBuilder.ExecuteDelete(
+                Configuration,
+                Table,
+                Where,
                 connection,
                 CaseSensitive.IsPresent,
-                KeepAlive.IsPresent,
-                message => WriteWarning(message + $" for table '{TableName}'."));
+                Transaction,
+                message => WriteWarning(message + $" for table '{Table}'.")));
         }
         finally
         {
-            CloseIfNeeded(connection, KeepAlive.IsPresent);
+            if (ownsConnection)
+            {
+                DisposeOwnedConnection(connection);
+            }
         }
     }
 }
 
-[Cmdlet(VerbsCommon.Get, "PSSqliteDBConfig")]
+[Cmdlet(VerbsData.Import, "AhtolaSqliteConfiguration")]
 public sealed class GetPSSqliteDBConfigCommand : PSSqliteCmdlet
 {
     [Parameter(Mandatory = true, Position = 0)]
@@ -328,7 +399,7 @@ public sealed class GetPSSqliteDBConfigCommand : PSSqliteCmdlet
     }
 }
 
-[Cmdlet(VerbsCommon.Get, "PSSqliteDBConfigFile")]
+[Cmdlet(VerbsCommon.Find, "AhtolaSqliteConfigurationFile")]
 [OutputType(typeof(string))]
 public sealed class GetPSSqliteDBConfigFileCommand : PSSqliteCmdlet
 {
@@ -345,10 +416,10 @@ public sealed class GetPSSqliteDBConfigFileCommand : PSSqliteCmdlet
     {
         var baseFolder = string.IsNullOrWhiteSpace(ParentModuleBaseFolder)
             ? Directory.GetCurrentDirectory()
-            : PathUtilities.GetPSSqliteAbsolutePath(ParentModuleBaseFolder!, null);
+            : PathUtilities.GetAbsolutePath(ParentModuleBaseFolder!, null);
         var folder = string.IsNullOrWhiteSpace(ConfigFolder)
             ? System.IO.Path.Combine(baseFolder, "config")
-            : PathUtilities.GetPSSqliteAbsolutePath(ConfigFolder!, baseFolder);
+            : PathUtilities.GetAbsolutePath(ConfigFolder!, baseFolder);
         if (!Directory.Exists(folder))
         {
             throw new DirectoryNotFoundException($"Configuration folder not found: {folder}");
@@ -356,7 +427,7 @@ public sealed class GetPSSqliteDBConfigFileCommand : PSSqliteCmdlet
 
         var moduleName = SessionState.Module?.Name;
         var pattern = string.IsNullOrWhiteSpace(ConfigFileName)
-            ? $"{(string.IsNullOrWhiteSpace(moduleName) ? "*" : moduleName)}.PSSqliteConfig.y*ml"
+            ? $"{(string.IsNullOrWhiteSpace(moduleName) ? "*" : moduleName)}.AhtolaSqliteConfig.y*ml"
             : ConfigFileName!;
         var wildcard = new WildcardPattern(pattern, WildcardOptions.IgnoreCase);
         var match = Directory.EnumerateFiles(folder)
@@ -370,7 +441,7 @@ public sealed class GetPSSqliteDBConfigFileCommand : PSSqliteCmdlet
     }
 }
 
-[Cmdlet("Initialize", "PSSqliteDatabase")]
+[Cmdlet("Initialize", "AhtolaSqliteDatabase", SupportsShouldProcess = true)]
 public sealed class InitializePSSqliteDatabaseCommand : PSSqliteCmdlet
 {
     [Parameter(Mandatory = true, ParameterSetName = "byPath")]
@@ -378,8 +449,8 @@ public sealed class InitializePSSqliteDatabaseCommand : PSSqliteCmdlet
     public string? Path { get; set; }
 
     [Parameter(Mandatory = true, ParameterSetName = "byConfig")]
-    [Alias("SqliteDBConfig")]
-    public SQLiteDBConfig? DatabaseConfig { get; set; }
+    [Alias("DatabaseConfig", "SqliteDBConfig")]
+    public SQLiteDBConfig? Configuration { get; set; }
 
     [Parameter]
     public DBMigrationMode MigrationMode { get; set; } = DBMigrationMode.INCREMENTAL;
@@ -391,38 +462,77 @@ public sealed class InitializePSSqliteDatabaseCommand : PSSqliteCmdlet
     {
         var config = ParameterSetName == "byPath"
             ? SQLiteDBConfig.Load(Path!, ExpandString)
-            : DatabaseConfig ?? throw new ArgumentException("DatabaseConfig is required.");
+            : Configuration ?? throw new ArgumentException("Configuration is required.");
         if (config.Schema is null)
         {
             throw new ArgumentException("Invalid SQLiteDBConfig object provided.");
         }
 
         config.Schema.ValidateDefinition();
-        DatabaseInitializer.Initialize(config, MigrationMode, Force.IsPresent);
+        if (ShouldProcess(config.GetDatabaseFilePath() ?? config.ConnectionString!, $"Initialize database ({MigrationMode})"))
+        {
+            DatabaseInitializer.Initialize(config, MigrationMode, Force.IsPresent);
+        }
     }
 }
 
-[Cmdlet(VerbsCommon.Close, "PSSqliteConnection")]
+[Cmdlet(VerbsCommon.Close, "AhtolaSqliteConnection", SupportsShouldProcess = true)]
 public sealed class ClosePSSqliteConnectionCommand : PSSqliteCmdlet
 {
+    [Parameter(ValueFromPipeline = true)]
+    [Alias("SqliteConnection")]
+    public SqliteConnection? Connection { get; set; }
+
+    [Parameter]
+    public SwitchParameter ClearPool { get; set; }
+
+    [Parameter]
+    public SwitchParameter AllPools { get; set; }
+
     protected override void ProcessRecord()
     {
-        SqliteConnection.ClearAllPools();
+        if (Connection is null)
+        {
+            if (ShouldProcess("all Ahtola SQLite connection pools", "Clear"))
+            {
+                Ahtola.Data.Sqlite.SqliteConnection.ClearAllPools();
+            }
+
+            return;
+        }
+
+        if (!ShouldProcess(Connection.DataSource, "Close and dispose connection"))
+        {
+            return;
+        }
+
+        Connection.Close();
+        if (ClearPool.IsPresent)
+        {
+            Ahtola.Data.Sqlite.SqliteConnection.ClearPool(Connection);
+        }
+
+        Connection.Dispose();
+        if (AllPools.IsPresent)
+        {
+            Ahtola.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
     }
 }
 
-[Cmdlet(VerbsCommon.Get, "PSSqliteDBMetadata")]
+[Cmdlet(VerbsCommon.Get, "AhtolaSqliteDatabaseMetadata")]
 public sealed class GetPSSqliteDBMetadataCommand : PSSqliteCmdlet
 {
-    [Parameter(Mandatory = true)]
-    public SqliteConnection SqliteConnection { get; set; } = null!;
+    [Parameter(Mandatory = true, ValueFromPipeline = true)]
+    [Alias("SqliteConnection")]
+    public SqliteConnection Connection { get; set; } = null!;
 
     [Parameter]
     public string[] MetadataKey { get; set; } = new[] { "*" };
 
     protected override void ProcessRecord()
     {
-        var connectionString = SqliteConnection.ConnectionString;
+        var connectionString = Connection.ConnectionString;
         var metadata = MetadataStore.Get(connectionString, MetadataKey);
         if (metadata is not null)
         {
@@ -431,54 +541,25 @@ public sealed class GetPSSqliteDBMetadataCommand : PSSqliteCmdlet
     }
 }
 
-[Cmdlet("Compare", "PSSqliteDBVersion")]
+[Cmdlet("Compare", "AhtolaSqliteDatabaseVersion")]
 public sealed class ComparePSSqliteDBVersionCommand : PSSqliteCmdlet
 {
     [Parameter(Mandatory = true, Position = 0)]
-    public SQLiteDBConfig DatabaseConfig { get; set; } = null!;
+    [Alias("DatabaseConfig", "SqliteDBConfig")]
+    public SQLiteDBConfig Configuration { get; set; } = null!;
 
     [Parameter]
     public string? ExpectedVersion { get; set; }
 
     protected override void ProcessRecord()
     {
-        WriteObject(DatabaseVersion.Compare(DatabaseConfig, ExpectedVersion ?? DatabaseConfig.Version));
+        WriteObject(DatabaseVersion.Compare(Configuration, ExpectedVersion ?? Configuration.Version));
     }
 }
 
-[Cmdlet(VerbsCommon.Get, "ExpandedString")]
-[OutputType(typeof(string))]
-public sealed class GetExpandedStringCommand : PSSqliteCmdlet
+internal static class PathUtilities
 {
-    [Parameter(Mandatory = true)]
-    public string String { get; set; } = string.Empty;
-
-    protected override void ProcessRecord()
-    {
-        WriteObject(ExpandString(String));
-    }
-}
-
-[Cmdlet(VerbsCommon.Get, "PSSqliteAbsolutePath")]
-[OutputType(typeof(string))]
-public sealed class GetPSSqliteAbsolutePathCommand : PSSqliteCmdlet
-{
-    [Parameter]
-    [AllowNull]
-    public string? Path { get; set; }
-
-    [Parameter]
-    public string? RelativeTo { get; set; }
-
-    protected override void ProcessRecord()
-    {
-        WriteObject(PathUtilities.GetPSSqliteAbsolutePath(Path, RelativeTo));
-    }
-}
-
-public static class PathUtilities
-{
-    public static string GetPSSqliteAbsolutePath(string? path, string? relativeTo)
+    public static string GetAbsolutePath(string? path, string? relativeTo)
     {
         var basePath = string.IsNullOrWhiteSpace(relativeTo)
             ? Directory.GetCurrentDirectory()

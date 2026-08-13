@@ -404,10 +404,10 @@ public static class ConnectionFactory
 
 public sealed class QueryOptions
 {
-    public string OutputFormat { get; set; } = "DataTable";
+    public string OutputFormat { get; set; } = "PSCustomObject";
     public int CommandTimeout { get; set; } = 30;
-    public bool KeepAlive { get; set; }
     public string? TableName { get; set; }
+    public SqliteTransaction? Transaction { get; set; }
 }
 
 public static class QueryExecutor
@@ -419,56 +419,68 @@ public static class QueryExecutor
         QueryOptions? options = null)
     {
         options ??= new QueryOptions();
-        var wasOpen = connection.State == ConnectionState.Open;
-        if (!wasOpen)
+        if (connection.State != ConnectionState.Open)
         {
             connection.Open();
         }
 
-        try
+        using var command = connection.CreateCommand();
+        command.CommandText = commandText;
+        command.CommandTimeout = options.CommandTimeout;
+        if (options.Transaction is not null)
         {
-            using var command = connection.CreateCommand();
-            command.CommandText = commandText;
-            command.CommandTimeout = options.CommandTimeout;
-            AddParameters(command, parameters);
-
-            using var readerForTable = command.ExecuteReader();
-            var dataTable = new DataTable();
-            dataTable.Load(readerForTable);
-            if (!string.IsNullOrWhiteSpace(options.TableName))
-            {
-                dataTable.TableName = options.TableName;
-            }
-
-            if (string.Equals(options.OutputFormat, "DataReader", StringComparison.OrdinalIgnoreCase))
-            {
-                // Return a detached reader so the command and connection can follow KeepAlive.
-                return dataTable.CreateDataReader();
-            }
-
-            return ConvertResult(dataTable, options.OutputFormat);
+            command.Transaction = options.Transaction;
         }
-        finally
+
+        AddParameters(command, parameters);
+        var outputFormat = options.OutputFormat.ToUpperInvariant();
+        if (outputFormat == "SCALAR")
         {
-            if (!options.KeepAlive && connection.State == ConnectionState.Open)
-            {
-                connection.Close();
-                SqliteConnection.ClearPool(connection);
-            }
+            return command.ExecuteScalar();
         }
+
+        if (outputFormat == "NONQUERY")
+        {
+            return command.ExecuteNonQuery();
+        }
+
+        using var readerForTable = command.ExecuteReader();
+        if (outputFormat == "DATASET")
+        {
+            return ToDataSet(readerForTable, options.TableName);
+        }
+
+        var dataTable = new DataTable();
+        dataTable.Load(readerForTable);
+        if (!string.IsNullOrWhiteSpace(options.TableName))
+        {
+            dataTable.TableName = options.TableName;
+        }
+
+        if (outputFormat is "DATAREADER" or "DETACHEDDATAREADER")
+        {
+            // A command-owned reader cannot outlive this method safely, so this is a snapshot.
+            return dataTable.CreateDataReader();
+        }
+
+        return ConvertResult(dataTable, outputFormat);
     }
 
     public static DataTable ExecuteDataTable(
         SqliteConnection connection,
         string commandText,
         IDictionary? parameters = null,
-        bool keepAlive = false)
+        SqliteTransaction? transaction = null)
     {
         return (DataTable)Execute(
             connection,
             commandText,
             parameters,
-            new QueryOptions { OutputFormat = "DataTable", KeepAlive = keepAlive })!;
+            new QueryOptions
+            {
+                OutputFormat = "DataTable",
+                Transaction = transaction
+            })!;
     }
 
     private static void AddParameters(SqliteCommand command, IDictionary? parameters)
@@ -492,22 +504,35 @@ public static class QueryExecutor
         }
     }
 
-    private static object ConvertResult(DataTable table, string outputFormat)
+    public static object ConvertResult(DataTable table, string outputFormat)
     {
         return outputFormat.ToUpperInvariant() switch
         {
             "DATATABLE" => table,
-            "DATASET" => ToDataSet(table),
             "ORDEREDDICTIONARY" => ToOrderedDictionaries(table),
             "PSCUSTOMOBJECT" => ToPowerShellObjects(table),
             _ => table
         };
     }
 
-    private static DataSet ToDataSet(DataTable table)
+    private static DataSet ToDataSet(IDataReader reader, string? tableName)
     {
         var dataSet = new DataSet();
-        dataSet.Tables.Add(table);
+        var resultSet = 0;
+        do
+        {
+            var table = new DataTable();
+            table.Load(reader);
+            table.TableName = string.IsNullOrWhiteSpace(tableName)
+                ? $"Result{resultSet}"
+                : resultSet == 0
+                    ? tableName
+                    : $"{tableName}{resultSet}";
+            dataSet.Tables.Add(table);
+            resultSet++;
+        }
+        while (!reader.IsClosed && reader.NextResult());
+
         return dataSet;
     }
 
@@ -731,7 +756,7 @@ public static class CrudSqlBuilder
         SqliteConnection connection,
         string outputFormat,
         bool caseSensitive,
-        bool keepAlive,
+        SqliteTransaction? transaction = null,
         Action<string>? warning = null)
     {
         var selectable = config.Schema?.GetSelectable(tableName)
@@ -748,8 +773,8 @@ public static class CrudSqlBuilder
             new QueryOptions
             {
                 OutputFormat = outputFormat,
-                KeepAlive = keepAlive,
-                TableName = tableName
+                TableName = tableName,
+                Transaction = transaction
             });
 
         if (result is IEnumerable enumerable &&
@@ -768,7 +793,7 @@ public static class CrudSqlBuilder
         string tableName,
         IDictionary rowData,
         SqliteConnection connection,
-        bool keepAlive,
+        SqliteTransaction? transaction = null,
         Action<string>? warning = null)
     {
         var table = config.Schema?.GetTable(tableName)
@@ -795,19 +820,20 @@ public static class CrudSqlBuilder
             new QueryOptions
             {
                 OutputFormat = "PSCustomObject",
-                KeepAlive = keepAlive,
-                TableName = tableName
+                TableName = tableName,
+                Transaction = transaction
             });
     }
 
-    public static void ExecuteUpdate(
+    public static int ExecuteUpdate(
         SQLiteDBConfig config,
         string tableName,
         IDictionary rowData,
         IDictionary? clauses,
         SqliteConnection connection,
         bool caseSensitive,
-        bool keepAlive,
+        string onConflict = "UPDATE",
+        SqliteTransaction? transaction = null,
         Action<string>? warning = null)
     {
         var table = config.Schema?.GetTable(tableName)
@@ -816,6 +842,11 @@ public static class CrudSqlBuilder
         if (values.Count == 0)
         {
             throw new ArgumentException($"No valid row data was provided for table '{tableName}'.");
+        }
+
+        if (string.Equals(onConflict, "UPSERT", StringComparison.OrdinalIgnoreCase))
+        {
+            return ExecuteUpsert(table, tableName, values, clauses, connection, transaction, warning);
         }
 
         var parameters = new OrderedDictionary();
@@ -835,30 +866,116 @@ public static class CrudSqlBuilder
         }
 
         var commandText = $"UPDATE {SqlIdentifier.QuoteQualified(tableName)} SET {string.Join(", ", assignments)} WHERE {filter.PredicateSql};";
-        QueryExecutor.Execute(
+        return Convert.ToInt32(QueryExecutor.Execute(
             connection,
             commandText,
             parameters,
-            new QueryOptions { OutputFormat = "DataTable", KeepAlive = keepAlive });
+            new QueryOptions
+            {
+                OutputFormat = "NonQuery",
+                Transaction = transaction
+            }));
     }
 
-    public static void ExecuteDelete(
+    private static int ExecuteUpsert(
+        SqliteTable table,
+        string tableName,
+        OrderedDictionary values,
+        IDictionary? clauses,
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        Action<string>? warning)
+    {
+        var primaryKeyColumns = table.Columns
+            .Where(column => column.PrimaryKey)
+            .Select(column => column.Name!)
+            .Concat(table.Constraints.OfType<SqlitePrimaryKeyTableConstraint>().SelectMany(constraint => constraint.Columns))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (primaryKeyColumns.Length == 0)
+        {
+            throw new ArgumentException($"Table '{tableName}' does not define a primary key required for UPSERT.");
+        }
+
+        var insertValues = new OrderedDictionary();
+        foreach (DictionaryEntry value in values)
+        {
+            insertValues[value.Key] = value.Value;
+        }
+
+        if (clauses is not null)
+        {
+            foreach (DictionaryEntry clause in GetKnownValues(
+                         clauses,
+                         table.Columns.Select(column => column.Name!).ToArray(),
+                         warning))
+            {
+                if (!insertValues.Contains(clause.Key))
+                {
+                    insertValues[clause.Key] = clause.Value;
+                }
+            }
+        }
+
+        foreach (var primaryKeyColumn in primaryKeyColumns)
+        {
+            if (!insertValues.Contains(primaryKeyColumn))
+            {
+                throw new ArgumentException(
+                    $"UPSERT requires a value for primary key column '{primaryKeyColumn}' in RowData or ClauseData.");
+            }
+        }
+
+        var names = insertValues.Keys.Cast<string>().ToArray();
+        var parameterNames = names.Select((_, index) => "$value" + index).ToArray();
+        var parameters = new OrderedDictionary();
+        for (var index = 0; index < names.Length; index++)
+        {
+            parameters[parameterNames[index]] = insertValues[names[index]];
+        }
+
+        var updates = names
+            .Where(name => !primaryKeyColumns.Contains(name, StringComparer.OrdinalIgnoreCase))
+            .Select((name, index) => $"{SqlIdentifier.Quote(name)} = excluded.{SqlIdentifier.Quote(name)}")
+            .ToArray();
+        var conflictAction = updates.Length == 0
+            ? "DO NOTHING"
+            : "DO UPDATE SET " + string.Join(", ", updates);
+        var commandText =
+            $"INSERT INTO {SqlIdentifier.QuoteQualified(tableName)} ({string.Join(", ", names.Select(SqlIdentifier.Quote))}) " +
+            $"VALUES ({string.Join(", ", parameterNames)}) ON CONFLICT ({string.Join(", ", primaryKeyColumns.Select(SqlIdentifier.Quote))}) {conflictAction};";
+        return Convert.ToInt32(QueryExecutor.Execute(
+            connection,
+            commandText,
+            parameters,
+            new QueryOptions
+            {
+                OutputFormat = "NonQuery",
+                Transaction = transaction
+            }));
+    }
+
+    public static int ExecuteDelete(
         SQLiteDBConfig config,
         string tableName,
         IDictionary? clauses,
         SqliteConnection connection,
         bool caseSensitive,
-        bool keepAlive,
+        SqliteTransaction? transaction = null,
         Action<string>? warning = null)
     {
         var table = config.Schema?.GetTable(tableName)
             ?? throw new ArgumentException($"Table '{tableName}' does not exist in the database schema.");
         var filter = BuildFilter(clauses, table.Columns.Select(column => column.Name!).ToArray(), caseSensitive, warning);
-        QueryExecutor.Execute(
+        return Convert.ToInt32(QueryExecutor.Execute(
             connection,
             $"DELETE FROM {SqlIdentifier.QuoteQualified(tableName)} WHERE {filter.PredicateSql};",
             filter.Parameters,
-            new QueryOptions { OutputFormat = "DataTable", KeepAlive = keepAlive });
+            new QueryOptions
+            {
+                OutputFormat = "NonQuery",
+                Transaction = transaction
+            }));
     }
 
     private static OrderedDictionary GetKnownValues(
@@ -873,12 +990,6 @@ public static class CrudSqlBuilder
             if (!TryFindColumn(columns, key, out var column))
             {
                 warning?.Invoke($"Column '{key}' is not a valid column.");
-                continue;
-            }
-
-            if (entry.Value is null)
-            {
-                warning?.Invoke($"Column '{column}' in row data is null. It will be ignored.");
                 continue;
             }
 

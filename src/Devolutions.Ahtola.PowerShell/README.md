@@ -8,12 +8,21 @@ Microsoft.Data.Sqlite / SQLitePCLRaw.
 | --- | --- |
 | Project / assembly | `Devolutions.Ahtola.PowerShell` |
 | Published module | `Devolutions.Ahtola.Sqlite` |
-| CLR type namespace | `Ahtola.PSSqlite` (cmdlet surface remains `*-PSSqlite*`) |
+| CLR type namespace | `Ahtola.PSSqlite` (cmdlet surface is `*-AhtolaSqlite*`) |
 
 ## Scope
 
-- Same public cmdlet names (`*-PSSqlite*`) and YAML config / migration model as the C# port of synedgy.PSSqlite.
+- YAML config / migration model ported from the C# port of synedgy.PSSqlite, with a collision-resistant `*-AhtolaSqlite*` public command surface.
 - Targets PowerShell 7+ only (`net8.0` / `net9.0` / `net10.0`). No Windows PowerShell 5.1 / netstandard2.0 path.
+- Adds managed operational cmdlets for connections, transactions, backups, schema
+  inspection, maintenance, bulk copy, JSON/CSV table interchange, and Ahtola
+  file-password rotation.
+- `DataReader` is a backward-compatible name for a detached materialized result
+  reader. It is not a live streaming reader and does not retain command or
+  connection ownership.
+- File-password cmdlets are available only for Ahtola's file-backed managed
+  AES-256-GCM format. They do not support SQLCipher, SEE, or loadable
+  extensions.
 
 ## Build / stage
 
@@ -59,4 +68,19 @@ pwsh ./scripts/Invoke-PowerShellModuleTests.ps1
 ## Notes
 
 - `PowerShellStandard.Library` is compile-only; the PowerShell host supplies real `System.Management.Automation` at import time. Unit tests fall back to `OrderedDictionary` when SMA is absent.
-- Cmdlet parameter names follow the upstream binary port (`-Path`, `-SqliteDBConfig`, `-SqliteConnection`, `-As`, …).
+- New scripts should use `-Connection`, `-Configuration`, `-Table`, `-Values`,
+  and `-Where`. The former `-SqliteConnection`, `-SqliteDBConfig`,
+  `-TableName`, `-RowData`, and `-ClauseData` names remain aliases for
+  compatibility.
+- A connection passed to a cmdlet is caller-owned: a cmdlet may open it, but
+  never closes or disposes it. `New-AhtolaSqliteConnection` returns an open
+  connection, and `Close-AhtolaSqliteConnection` is the explicit disposal
+  command.
+- `Invoke-AhtolaSqliteQuery` emits `PSCustomObject` rows by default. Use
+  `-As Scalar` or `-As NonQuery` for direct values/counts and `-As DataTable`
+  or `-As DataSet` only when those ADO.NET containers are required.
+- `Export-AhtolaSqliteTable` and `Import-AhtolaSqliteTable` infer `Json` or
+  `Csv` from the file extension when `-Format` is omitted. Export can select a
+  table or a parameterized `-Query`.
+- Destructive cmdlets implement `SupportsShouldProcess`, so use `-WhatIf` to
+  preview database writes, imports, backups, maintenance, and password changes.
