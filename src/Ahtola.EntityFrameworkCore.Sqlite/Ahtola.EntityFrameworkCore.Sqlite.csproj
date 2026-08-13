@@ -10,7 +10,7 @@
 
     <PackageId>Devolutions.Ahtola.EntityFrameworkCore.Sqlite</PackageId>
     <Title>Ahtola Entity Framework Core SQLite Provider</Title>
-    <Description>Entity Framework Core 9.x provider for Ahtola.Data.Sqlite, the managed ADO.NET facade over the pure managed Ahtola Core engine. No native companion required. Ahtola is a Devolutions project.</Description>
+    <Description>Entity Framework Core provider for Ahtola.Data.Sqlite (EF Core 9.x on net8.0/net9.0, EF Core 10.x on net10.0), the managed ADO.NET facade over the pure managed Ahtola Core engine. No native companion required. Ahtola is a Devolutions project.</Description>
     <Authors>Devolutions</Authors>
     <PackageTags>ahtola;sqlite;database;entity-framework-core;efcore;linq;devolutions</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

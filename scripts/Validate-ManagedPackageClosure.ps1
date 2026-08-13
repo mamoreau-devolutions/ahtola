@@ -22,23 +22,28 @@ function Test-EfCorePackageContract([xml]$Nuspec, [string]$PackageName) {
         return
     }
 
-    $expectedFrameworks = @('net8.0', 'net9.0', 'net10.0')
-    $dependencyGroups = @($Nuspec.SelectNodes("//*[local-name()='dependencies']/*[local-name()='group']"))
-    foreach ($expectedFramework in $expectedFrameworks) {
-        $groups = @($dependencyGroups | Where-Object { $_.targetFramework -eq $expectedFramework })
-        if ($groups.Count -ne 1) {
-            Fail "package '$PackageName' must declare exactly one EF Core dependency group for '$expectedFramework'."
+    $expectedFrameworkRanges = [ordered]@{
+            'net8.0'  = '[9.0.9,10.0.0)'
+            'net9.0'  = '[9.0.9,10.0.0)'
+            'net10.0' = '[10.0.0,11.0.0)'
+        }
+        $dependencyGroups = @($Nuspec.SelectNodes("//*[local-name()='dependencies']/*[local-name()='group']"))
+        foreach ($expectedFramework in $expectedFrameworkRanges.Keys) {
+            $expectedRange = $expectedFrameworkRanges[$expectedFramework]
+            $groups = @($dependencyGroups | Where-Object { $_.targetFramework -eq $expectedFramework })
+            if ($groups.Count -ne 1) {
+                    Fail "package '$PackageName' must declare exactly one EF Core dependency group for '$expectedFramework'."
         }
 
-        $dependencies = @($groups[0].SelectNodes("*[local-name()='dependency' and @id='Microsoft.EntityFrameworkCore.Sqlite.Core']"))
-        if ($dependencies.Count -ne 1) {
-            Fail "package '$PackageName' must declare exactly one Microsoft.EntityFrameworkCore.Sqlite.Core dependency for '$expectedFramework'."
-        }
+            $dependencies = @($groups[0].SelectNodes("*[local-name()='dependency' and @id='Microsoft.EntityFrameworkCore.Sqlite.Core']"))
+            if ($dependencies.Count -ne 1) {
+                    Fail "package '$PackageName' must declare exactly one Microsoft.EntityFrameworkCore.Sqlite.Core dependency for '$expectedFramework'."
+            }
 
-        if (($dependencies[0].version -replace '\s', '') -ne '[9.0.9,10.0.0)') {
-            Fail "package '$PackageName' must constrain Microsoft.EntityFrameworkCore.Sqlite.Core to '[9.0.9,10.0.0)' for '$expectedFramework'."
+            if (($dependencies[0].version -replace '\s', '') -ne $expectedRange) {
+                    Fail "package '$PackageName' must constrain Microsoft.EntityFrameworkCore.Sqlite.Core to '$expectedRange' for '$expectedFramework'."
+            }
         }
-    }
 }
 
 function Test-PackageDirectory([string]$Path) {

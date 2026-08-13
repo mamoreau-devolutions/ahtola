@@ -315,142 +315,167 @@ public sealed class AhtolaSqliteQueryableMethodTranslatingExpressionVisitor : Re
         if (!_areJsonEachFunctionsSupported)
             throw new InvalidOperationException(SqliteStrings.QueryingIntoJsonCollectionsNotSupported("3.38.0"));
 
-        var entityType = jsonQueryExpression.EntityType;
-        var textTypeMapping = _typeMappingSource.FindMapping(typeof(string));
+    #if NET10_0_OR_GREATER
+            var structuralType = jsonQueryExpression.StructuralType;
+    #else
+            var structuralType = (ITypeBase)jsonQueryExpression.EntityType;
+    #endif
+            var textTypeMapping = _typeMappingSource.FindMapping(typeof(string));
 
-        // TODO: Refactor this out
-        // Calculate the table alias for the json_each expression based on the last named path segment
-        // (or the JSON column name if there are none)
-        var lastNamedPathSegment = jsonQueryExpression.Path.LastOrDefault(ps => ps.PropertyName is not null);
-        var tableAlias = _sqlAliasManager.GenerateTableAlias(lastNamedPathSegment.PropertyName ?? jsonQueryExpression.JsonColumn.Name);
+            // TODO: Refactor this out
+            // Calculate the table alias for the json_each expression based on the last named path segment
+            // (or the JSON column name if there are none)
+            var lastNamedPathSegment = jsonQueryExpression.Path.LastOrDefault(ps => ps.PropertyName is not null);
+            var tableAlias = _sqlAliasManager.GenerateTableAlias(lastNamedPathSegment.PropertyName ?? jsonQueryExpression.JsonColumn.Name);
 
-        // Handling a non-primitive JSON array is complicated on SQLite; unlike SQL Server OPENJSON and PostgreSQL jsonb_to_recordset,
-        // SQLite's json_each can only project elements of the array, and not properties within those elements. For example:
-        // SELECT value FROM json_each('[{"a":1,"b":"foo"}, {"a":2,"b":"bar"}]')
-        // This will return two rows, each with a string column representing an array element (i.e. {"a":1,"b":"foo"}). To decompose that
-        // into a and b columns, a further extraction is needed:
-        // SELECT value ->> 'a' AS a, value ->> 'b' AS b FROM json_each('[{"a":1,"b":"foo"}, {"a":2,"b":"bar"}]')
+            // Handling a non-primitive JSON array is complicated on SQLite; unlike SQL Server OPENJSON and PostgreSQL jsonb_to_recordset,
+            // SQLite's json_each can only project elements of the array, and not properties within those elements. For example:
+            // SELECT value FROM json_each('[{"a":1,"b":"foo"}, {"a":2,"b":"bar"}]')
+            // This will return two rows, each with a string column representing an array element (i.e. {"a":1,"b":"foo"}). To decompose that
+            // into a and b columns, a further extraction is needed:
+            // SELECT value ->> 'a' AS a, value ->> 'b' AS b FROM json_each('[{"a":1,"b":"foo"}, {"a":2,"b":"bar"}]')
 
-        // We therefore generate a minimal subquery projecting out all the properties and navigations, wrapped by a SelectExpression
-        // containing that:
-        // SELECT ...
-        // FROM (SELECT value ->> 'a' AS a, value ->> 'b' AS b FROM json_each(<JSON column>, <path>)) AS j
-        // WHERE j.a = 8;
+            // We therefore generate a minimal subquery projecting out all the properties and navigations, wrapped by a SelectExpression
+            // containing that:
+            // SELECT ...
+            // FROM (SELECT value ->> 'a' AS a, value ->> 'b' AS b FROM json_each(<JSON column>, <path>)) AS j
+            // WHERE j.a = 8;
 
-        // Unfortunately, while the subquery projects the entity, our EntityProjectionExpression currently supports only bare
-        // ColumnExpression (the above requires JsonScalarExpression). So we hack as if the subquery projects an anonymous type instead,
-        // with a member for each JSON property that needs to be projected. We then wrap it with a SelectExpression the projects a proper
-        // EntityProjectionExpression.
+            // Unfortunately, while the subquery projects the entity, our EntityProjectionExpression currently supports only bare
+            // ColumnExpression (the above requires JsonScalarExpression). So we hack as if the subquery projects an anonymous type instead,
+            // with a member for each JSON property that needs to be projected. We then wrap it with a SelectExpression the projects a proper
+            // EntityProjectionExpression.
 
-        var jsonEachExpression = new JsonEachExpression(tableAlias, jsonQueryExpression.JsonColumn, jsonQueryExpression.Path);
+            var jsonEachExpression = new JsonEachExpression(tableAlias, jsonQueryExpression.JsonColumn, jsonQueryExpression.Path);
 
-#pragma warning disable EF1001 // Internal EF Core API usage.
-        var selectExpression = CreateSelect(
-            jsonQueryExpression,
-            jsonEachExpression,
-            JsonEachKeyColumnName,
-            typeof(int),
-            _typeMappingSource.FindMapping(typeof(int))!);
-#pragma warning restore EF1001 // Internal EF Core API usage.
+    #pragma warning disable EF1001 // Internal EF Core API usage.
+            var selectExpression = CreateSelect(
+                jsonQueryExpression,
+                jsonEachExpression,
+                JsonEachKeyColumnName,
+                typeof(int),
+                _typeMappingSource.FindMapping(typeof(int))!);
+    #pragma warning restore EF1001 // Internal EF Core API usage.
 
-        selectExpression.AppendOrdering(
-            new OrderingExpression(
-                selectExpression.CreateColumnExpression(
-                    jsonEachExpression,
-                    JsonEachKeyColumnName,
-                    typeof(int),
-                    typeMapping: _typeMappingSource.FindMapping(typeof(int)),
-                    columnNullable: false),
-                ascending: true));
+            selectExpression.AppendOrdering(
+                new OrderingExpression(
+                    selectExpression.CreateColumnExpression(
+                        jsonEachExpression,
+                        JsonEachKeyColumnName,
+                        typeof(int),
+                        typeMapping: _typeMappingSource.FindMapping(typeof(int)),
+                        columnNullable: false),
+                    ascending: true));
 
-        var propertyJsonScalarExpression = new Dictionary<ProjectionMember, Expression>();
+            var propertyJsonScalarExpression = new Dictionary<ProjectionMember, Expression>();
 
-        var jsonColumn = selectExpression.CreateColumnExpression(
-            jsonEachExpression, JsonEachValueColumnName, typeof(string), _typeMappingSource.FindMapping(typeof(string))); // TODO: nullable?
+            var jsonColumn = selectExpression.CreateColumnExpression(
+                jsonEachExpression, JsonEachValueColumnName, typeof(string), _typeMappingSource.FindMapping(typeof(string))); // TODO: nullable?
 
-        var containerColumnName = entityType.GetContainerColumnName();
-        Debug.Assert(containerColumnName is not null, "JsonQueryExpression to entity type without a container column name");
+            // First step: build a SelectExpression that will execute json_each and project all properties and navigations out, e.g.
+            // (SELECT value ->> 'a' AS a, value ->> 'b' AS b FROM json_each(c."JsonColumn", '$.Something.SomeCollection')
 
-        // First step: build a SelectExpression that will execute json_each and project all properties and navigations out, e.g.
-        // (SELECT value ->> 'a' AS a, value ->> 'b' AS b FROM json_each(c."JsonColumn", '$.Something.SomeCollection')
-
-        // We're only interested in properties which actually exist in the JSON, filter out uninteresting shadow keys
-        foreach (var property in entityType.GetPropertiesInHierarchy())
-        {
-            if (property.GetJsonPropertyName() is string jsonPropertyName)
+            // We're only interested in properties which actually exist in the JSON, filter out uninteresting synthetic keys
+            foreach (var property in structuralType.GetPropertiesInHierarchy())
             {
-                // HACK: currently the only way to project multiple values from a SelectExpression is to simulate a Select out to an anonymous
-                // type; this requires the MethodInfos of the anonymous type properties, from which the projection alias gets taken.
-                // So we create fake members to hold the JSON property name for the alias.
-                var projectionMember = new ProjectionMember().Append(new FakeMemberInfo(jsonPropertyName));
+                if (property.GetJsonPropertyName() is string jsonPropertyName)
+                {
+                    // HACK: currently the only way to project multiple values from a SelectExpression is to simulate a Select out to an anonymous
+                    // type; this requires the MethodInfos of the anonymous type properties, from which the projection alias gets taken.
+                    // So we create fake members to hold the JSON property name for the alias.
+                    var projectionMember = new ProjectionMember().Append(new FakeMemberInfo(jsonPropertyName));
+
+                    propertyJsonScalarExpression[projectionMember] = new JsonScalarExpression(
+                        jsonColumn,
+                        new[] { new PathSegment(property.GetJsonPropertyName()!) },
+                        UnwrapNullableType(property.ClrType),
+                        property.GetRelationalTypeMapping(),
+                        property.IsNullable);
+                }
+            }
+
+            if (structuralType is IEntityType entityType)
+            {
+                foreach (var navigation in entityType.GetNavigationsInHierarchy()
+                             .Where(
+                                 n => n.ForeignKey.IsOwnership
+                                     && n.TargetEntityType.IsMappedToJson()
+                                     && n.ForeignKey.PrincipalToDependent == n))
+                {
+                    var jsonNavigationName = navigation.TargetEntityType.GetJsonPropertyName();
+                    Debug.Assert(jsonNavigationName is not null, "Invalid navigation found on JSON-mapped entity");
+
+                    var projectionMember = new ProjectionMember().Append(new FakeMemberInfo(jsonNavigationName));
+
+                    propertyJsonScalarExpression[projectionMember] = new JsonScalarExpression(
+                        jsonColumn,
+                        new[] { new PathSegment(jsonNavigationName) },
+                        typeof(string),
+                        textTypeMapping,
+                        !navigation.ForeignKey.IsRequiredDependent);
+                }
+            }
+
+    #if NET10_0_OR_GREATER
+            foreach (var complexProperty in structuralType.GetComplexProperties())
+            {
+                var jsonNavigationName = complexProperty.ComplexType.GetJsonPropertyName();
+                Debug.Assert(jsonNavigationName is not null, "Invalid complex property found on JSON-mapped structural type");
+
+                var projectionMember = new ProjectionMember().Append(new FakeMemberInfo(jsonNavigationName));
 
                 propertyJsonScalarExpression[projectionMember] = new JsonScalarExpression(
                     jsonColumn,
-                    new[] { new PathSegment(property.GetJsonPropertyName()!) },
-                    UnwrapNullableType(property.ClrType),
-                    property.GetRelationalTypeMapping(),
-                    property.IsNullable);
+                    new[] { new PathSegment(jsonNavigationName) },
+                    typeof(string),
+                    textTypeMapping,
+                    jsonQueryExpression.IsNullable || complexProperty.IsNullable);
             }
+    #endif
+
+            selectExpression.ReplaceProjection(propertyJsonScalarExpression);
+
+            // Second step: push the above SelectExpression down to a subquery, and project an entity projection from the outer
+            // SelectExpression, i.e.
+            // SELECT "t"."a", "t"."b"
+            // FROM (SELECT value ->> 'a' ... FROM json_each(...))
+
+            selectExpression.PushdownIntoSubquery();
+            var subquery = selectExpression.Tables[0];
+
+    #pragma warning disable EF1001 // Internal EF Core API usage.
+            var newOuterSelectExpression = CreateSelect(
+                jsonQueryExpression,
+                subquery,
+                JsonEachKeyColumnName,
+                typeof(int),
+                _typeMappingSource.FindMapping(typeof(int))!);
+    #pragma warning restore EF1001 // Internal EF Core API usage.
+
+            newOuterSelectExpression.AppendOrdering(
+                new OrderingExpression(
+                    selectExpression.CreateColumnExpression(
+                        subquery,
+                        JsonEachKeyColumnName,
+                        typeof(int),
+                        typeMapping: _typeMappingSource.FindMapping(typeof(int)),
+                        columnNullable: false),
+                    ascending: true));
+
+            return new ShapedQueryExpression(
+                newOuterSelectExpression,
+                new RelationalStructuralTypeShaperExpression(
+    #if NET10_0_OR_GREATER
+                    jsonQueryExpression.StructuralType,
+    #else
+                    jsonQueryExpression.EntityType,
+    #endif
+                    new ProjectionBindingExpression(
+                        newOuterSelectExpression,
+                        new ProjectionMember(),
+                        typeof(ValueBuffer)),
+                    false));
         }
-
-        foreach (var navigation in jsonQueryExpression.EntityType.GetNavigationsInHierarchy()
-                     .Where(
-                         n => n.ForeignKey.IsOwnership
-                             && n.TargetEntityType.IsMappedToJson()
-                             && n.ForeignKey.PrincipalToDependent == n))
-        {
-            var jsonNavigationName = navigation.TargetEntityType.GetJsonPropertyName();
-            Debug.Assert(jsonNavigationName is not null, "Invalid navigation found on JSON-mapped entity");
-
-            var projectionMember = new ProjectionMember().Append(new FakeMemberInfo(jsonNavigationName));
-
-            propertyJsonScalarExpression[projectionMember] = new JsonScalarExpression(
-                jsonColumn,
-                new[] { new PathSegment(jsonNavigationName) },
-                typeof(string),
-                textTypeMapping,
-                !navigation.ForeignKey.IsRequiredDependent);
-        }
-
-        selectExpression.ReplaceProjection(propertyJsonScalarExpression);
-
-        // Second step: push the above SelectExpression down to a subquery, and project an entity projection from the outer
-        // SelectExpression, i.e.
-        // SELECT "t"."a", "t"."b"
-        // FROM (SELECT value ->> 'a' ... FROM json_each(...))
-
-        selectExpression.PushdownIntoSubquery();
-        var subquery = selectExpression.Tables[0];
-
-#pragma warning disable EF1001 // Internal EF Core API usage.
-        var newOuterSelectExpression = CreateSelect(
-            jsonQueryExpression,
-            subquery,
-            JsonEachKeyColumnName,
-            typeof(int),
-            _typeMappingSource.FindMapping(typeof(int))!);
-#pragma warning restore EF1001 // Internal EF Core API usage.
-
-        newOuterSelectExpression.AppendOrdering(
-            new OrderingExpression(
-                selectExpression.CreateColumnExpression(
-                    subquery,
-                    JsonEachKeyColumnName,
-                    typeof(int),
-                    typeMapping: _typeMappingSource.FindMapping(typeof(int)),
-                    columnNullable: false),
-                ascending: true));
-
-        return new ShapedQueryExpression(
-            newOuterSelectExpression,
-            new RelationalStructuralTypeShaperExpression(
-                jsonQueryExpression.EntityType,
-                new ProjectionBindingExpression(
-                    newOuterSelectExpression,
-                    new ProjectionMember(),
-                    typeof(ValueBuffer)),
-                false));
-    }
 
     /// <summary>
     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to

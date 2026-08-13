@@ -39,8 +39,14 @@ try
             throw new InvalidOperationException("The packaged Ahtola EF Core provider returned an unexpected result.");
     }
 
-    if (typeof(DbContext).Assembly.GetName().Version?.Major != 9)
-        throw new InvalidOperationException("The managed Ahtola package consumer must run against EF Core 9.x.");
+    var expectedEfMajor =
+    #if NET10_0_OR_GREATER
+            10;
+    #else
+            9;
+    #endif
+        if (typeof(DbContext).Assembly.GetName().Version?.Major != expectedEfMajor)
+            throw new InvalidOperationException($"The managed Ahtola package consumer must run against EF Core {expectedEfMajor}.x.");
 
     try
     {

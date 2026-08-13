@@ -18,7 +18,7 @@ or run.
 
 ``bash
 dotnet add package Devolutions.Ahtola.Data.Sqlite
-# optional EF Core 9.x provider:
+# optional EF Core provider (9.x on net8/net9, 10.x on net10):
 dotnet add package Devolutions.Ahtola.EntityFrameworkCore.Sqlite
 ``
 
