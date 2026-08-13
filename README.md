@@ -14,13 +14,20 @@ automatically vibe-ported from Turso’s Rust core, as a fun experiment. It is
 companion, P/Invoke SDK, or Rust toolchain is required to restore, build, pack,
 or run.
 
+- [Install](#install)
+- [Quick start](#quick-start)
+- [PowerShell module](#powershell-module)
+- [What this is good for](#what-this-is-good-for)
+- [Important limits](#important-limits)
+- [Building from source](#building-from-source)
+
 ## Install
 
-``bash
+```bash
 dotnet add package Devolutions.Ahtola.Data.Sqlite
 # optional EF Core 9.x provider:
 dotnet add package Devolutions.Ahtola.EntityFrameworkCore.Sqlite
-``
+```
 
 Targets: `net8.0`, `net9.0`, `net10.0`. No `net48` / .NET Framework assets.
 
@@ -40,7 +47,7 @@ Targets: `net8.0`, `net9.0`, `net10.0`. No `net48` / .NET Framework assets.
 
 **SQLite-compatible facade** (drop-in `using` swap from Microsoft.Data.Sqlite):
 
-``csharp
+```csharp
 using Ahtola.Data.Sqlite;
 
 using var connection = new SqliteConnection("Data Source=app.db");
@@ -53,24 +60,24 @@ command.CommandText = "SELECT a, b FROM t";
 using var reader = command.ExecuteReader();
 while (reader.Read())
     Console.WriteLine($"{reader.GetInt32(0)} {reader.GetString(1)}");
-``
+```
 
 **Ahtola types** (same package):
 
-``csharp
+```csharp
 using Ahtola;
 
 using var connection = new AhtolaConnection("Data Source=:memory:");
 connection.Open();
 connection.ExecuteNonQuery("CREATE TABLE t(a, b)");
 // AhtolaConnection, AhtolaCommand, AhtolaParameter, AhtolaFactory.Instance, …
-``
+```
 
 **EF Core:**
 
-``csharp
+```csharp
 options.UseAhtola("Data Source=app.db");
-``
+```
 
 Common connection-string keywords: `Data Source`, `Mode`, `Cache`, `Pooling`,
 `Foreign Keys`, `Default Timeout` / `Command Timeout`, `Foreign Read Only`,
@@ -113,6 +120,73 @@ export/recreate under Ahtola password / plain SQLite.
 
 Wrong/missing password failures include the phrase
 `file is encrypted or is not a database` for SDS-shaped detection.
+
+## PowerShell module
+
+`Devolutions.Ahtola.Sqlite` is a binary PowerShell module that exposes the
+Ahtola engine through `*-PSSqlite*` cmdlets, including a YAML-driven schema /
+migration model. It is a clone of the synedgy.PSSqlite C# port, re-backed onto
+`Ahtola.Data.Sqlite` instead of Microsoft.Data.Sqlite / SQLitePCLRaw — so
+importing it pulls in **no native SQLite assets**. Cmdlet names and YAML config
+shapes are preserved, so existing PSSqlite scripts migrate with minimal changes.
+
+Requires PowerShell **7.4+**. Windows PowerShell 5.1 is not supported.
+
+### Getting the module
+
+It isn't on the PowerShell Gallery yet, so build it from a clone:
+
+```powershell
+./build.ps1 pack-powershell
+# -> artifacts/powershell-modules/Devolutions.Ahtola.Sqlite
+```
+
+Then import it from anywhere pwsh 7 runs — no native SQLite binary, no .NET SDK
+needed at import time:
+
+```powershell
+Import-Module ./artifacts/powershell-modules/Devolutions.Ahtola.Sqlite
+Get-Command -Module Devolutions.Ahtola.Sqlite
+```
+
+Model types are available as module-qualified type accelerators, e.g.
+`[Devolutions.Ahtola.Sqlite.SqliteDBConfig]`.
+
+### Cmdlets
+
+| Cmdlet | Purpose |
+| --- | --- |
+| `New-PSSqliteConnection` | Open a connection by `-ConnectionString` or `-DatabasePath` + `-DatabaseFile` |
+| `Close-PSSqliteConnection` | Close/dispose the tracked connection |
+| `Invoke-PSSqliteQuery` | Run SQL with `-Parameters`, `-CommandTimeout`, `-KeepAlive`, `-CastAs` |
+| `Get-PSSqliteRow` / `New-PSSqliteRow` / `Set-PSSqliteRow` / `Remove-PSSqliteRow` | CRUD driven by a `SQLiteDBConfig` + `-TableName` (+ `-RowData` / `-ClauseData`) |
+| `Get-PSSqliteDBConfig` / `Get-PSSqliteDBConfigFile` | Load / locate the YAML database config |
+| `Initialize-PSSqliteDatabase` | Apply the YAML schema (`-MigrationMode INCREMENTAL\|CREATE\|OVERWRITE`) |
+| `Get-PSSqliteDBMetadata` / `Compare-PSSqliteDBVersion` | Read stored metadata; compare deployed vs expected version |
+| `Get-ExpandedString` / `Get-PSSqliteAbsolutePath` | Expand `$env:`-style strings; resolve paths |
+
+`Invoke-PSSqliteQuery` and the `Get-PSSqliteRow` family support
+`-As DataTable | DataReader | DataSet | OrderedDictionary | PSCustomObject`.
+
+### Example
+
+```powershell
+# Ad hoc query
+$connection = New-PSSqliteConnection -ConnectionString 'Data Source=:memory:'
+Invoke-PSSqliteQuery -SqliteConnection $connection `
+    -CommandText 'SELECT id, name FROM t WHERE name = $name' `
+    -Parameters @{ '$name' = 'b' } -KeepAlive -As PSCustomObject
+
+# YAML-defined schema + CRUD
+Initialize-PSSqliteDatabase -Path ./Database.yml -MigrationMode CREATE
+$config = Get-PSSqliteDBConfig -Path ./Database.yml
+New-PSSqliteRow -SqliteDBConfig $config -TableName Items -RowData @{ Id = 1; Name = 'widget' }
+Get-PSSqliteRow  -SqliteDBConfig $config -TableName Items -ClauseData @{ Id = 1 }
+Close-PSSqliteConnection
+```
+
+If you'd rather call the ADO.NET provider from a plain script module instead of
+using these cmdlets, see [samples/PSSqlite.Managed](samples/PSSqlite.Managed).
 
 ## What this is good for
 
@@ -165,57 +239,19 @@ Treat Ahtola as SQLite-*compatible*, not a full SQLite replacement:
 Encryption format v0 uses a fixed 5-byte magic `AHTLA`, then version and cipher
 id (AES-GCM page AEAD).
 
-## Build and test
+## Building from source
 
-PowerShell entrypoint (preferred):
+Requires the .NET SDK and PowerShell 7+:
 
-``powershell
-./build.ps1 restore
+```powershell
 ./build.ps1 build
-./build.ps1 test              # packaged consumer gate + managed suite
-./build.ps1 pack
-./build.ps1 pack-powershell   # stage Devolutions.Ahtola.Sqlite module
-./build.ps1 test-powershell   # Pester 6 module tests (requires Pester 6+)
-./build.ps1 validate-package
-./build.ps1 format-check
-``
+./build.ps1 test
+./build.ps1 pack              # -> ./artifacts/managed-packages
+./build.ps1 pack-powershell   # -> ./artifacts/powershell-modules
+```
 
-Optional parameters: `-Configuration Debug|Release`, `-Framework net10.0`,
-`-PackageVersion …`, `-PackageOutput ./artifacts/managed-packages`,
-`-MinimumExecutedTests 2500`.
-
-Or with the .NET SDK only:
-
-``bash
-dotnet build Ahtola.slnx -c Release
-dotnet test src/Ahtola.Tests/Ahtola.Tests.csproj -c Release -f net10.0
-pwsh ./scripts/Validate-ManagedPackageClosure.ps1
-``
-
-`scripts/Invoke-ManagedTestSuite.ps1` runs tests and fails the job if too few
-tests executed (guards against silent empty runs). Conformance gaps for the
-embedded `sqlite-sqltests` corpus live in
-`src/Ahtola.Tests/Conformance/managed-sqltest-expected-failures.txt`.
-
-## Layout
-
-``text
-ahtola/
-├── src/Ahtola.Core/                      # engine
-├── src/Ahtola.Data/                      # embedded ADO core (not a separate nupkg)
-├── src/Ahtola.Data.Sqlite/               # provider + MDS facade
-├── src/Ahtola.EntityFrameworkCore.Sqlite/
-├── src/Devolutions.Ahtola.PowerShell/    # assembly; publishes Devolutions.Ahtola.Sqlite module
-├── src/Ahtola.Tests/
-├── tests/PowerShell/                     # Pester 6 module tests
-├── samples/                              # ManagedPackageConsumer, PSSqlite.Managed
-├── docs/                                 # WAL interop contract (Turso target)
-├── scripts/                              # test + package closure validators
-├── build.ps1                             # restore / build / test / pack / pack-powershell
-├── NuGet.config
-├── LICENSE
-└── Ahtola.slnx
-``
+Contributor details — the full task list, validation gates, conformance suite,
+and repo layout — live in [AGENTS.md](AGENTS.md) and [docs/](docs).
 
 ## License
 
