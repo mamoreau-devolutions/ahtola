@@ -35,14 +35,9 @@ jobs:
             9.0.x
             10.0.x
 
-      - name: Restore full solution
+      - name: Restore package roots
         shell: pwsh
-        run: |
-          # ConsumerBenchmarks declares a local package source that is created
-          # by pack. Create it for format's implicit restore on a clean checkout.
-          New-Item -ItemType Directory -Force -Path artifacts/nupkg | Out-Null
-          ./build.ps1 restore
-          dotnet restore ./Ahtola.slnx
+        run: ./build.ps1 restore
 
       - name: Check formatting
         shell: pwsh
