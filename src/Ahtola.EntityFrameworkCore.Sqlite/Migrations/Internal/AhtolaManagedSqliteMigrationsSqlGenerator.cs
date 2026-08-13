@@ -24,8 +24,12 @@ public sealed class AhtolaManagedSqliteMigrationsSqlGenerator(
         }
 
         ValidateOperations(operations, model);
-        return base.Generate(RewriteDropColumnOperations(operations), model, options);
-    }
+                // Do not rewrite DropColumn to bare ALTER TABLE ... DROP COLUMN. EF Core's
+                // SqliteMigrationsSqlGenerator rebuilds tables (ef_temp_*) and toggles
+                // PRAGMA foreign_keys around the swap — required for histories that drop
+                // columns still referenced by FK definitions (e.g. PowerShell Universal).
+                return base.Generate(operations, model, options);
+            }
 
     protected override void ColumnDefinition(
         string? schema,
@@ -65,28 +69,6 @@ public sealed class AhtolaManagedSqliteMigrationsSqlGenerator(
         MigrationCommandListBuilder builder)
     {
         base.ForeignKeyConstraint(operation, model, builder);
-    }
-
-    private IReadOnlyList<MigrationOperation> RewriteDropColumnOperations(
-        IReadOnlyList<MigrationOperation> operations)
-    {
-        var rewritten = new MigrationOperation[operations.Count];
-        var sql = Dependencies.SqlGenerationHelper;
-        for (var index = 0; index < operations.Count; index++)
-        {
-            rewritten[index] = operations[index] is DropColumnOperation dropColumn
-                ? new SqlOperation
-                {
-                    Sql = "ALTER TABLE "
-                        + sql.DelimitIdentifier(dropColumn.Table, dropColumn.Schema)
-                        + " DROP COLUMN "
-                        + sql.DelimitIdentifier(dropColumn.Name)
-                        + sql.StatementTerminator,
-                }
-                : operations[index];
-        }
-
-        return rewritten;
     }
 
     private static void ValidateOperations(IReadOnlyList<MigrationOperation> operations, IModel? model)
@@ -129,14 +111,11 @@ public sealed class AhtolaManagedSqliteMigrationsSqlGenerator(
                     $"The managed local provider does not support dropping check constraints ('{dropCheckConstraint.Name}' on '{dropCheckConstraint.Table}').");
             }
 
-            if (operation is SqlOperation)
-            {
-                throw new NotSupportedException(
-                    "The managed local provider does not support raw SQL migration operations. " +
-                    "Use modeled migration operations so managed-local compatibility can be validated before schema mutation.");
-            }
+            // SqlOperation is allowed: production apps (e.g. PowerShell Universal) ship large EF
+                        // migration histories with migrationBuilder.Sql(...). Modeled-op validation above
+                        // still covers unique/check constraints and filtered indexes when those ops appear.
 
-            if (operation is CreateIndexOperation createIndex)
+                        if (operation is CreateIndexOperation createIndex)
                 ValidateCreateIndex(createIndex);
 
             if (operation is RenameIndexOperation renameIndex)

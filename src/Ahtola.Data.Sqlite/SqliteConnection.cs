@@ -1042,9 +1042,11 @@ public partial class SqliteConnection : DbConnection, ILocalReaderConnection
             return;
         }
 
-        if (HasManagedCallbacks)
-            throw new NotSupportedException(Properties.Resources.ManagedSharedCacheCallbacksNotSupported);
-    }
+                // Functions/aggregates/collations are catalog-scoped on shared memory (see
+                // Register* paths). Only connection-style hooks remain unsupported.
+                if (HasHooks)
+                    throw new NotSupportedException(Properties.Resources.ManagedSharedCacheHooksNotSupported);
+            }
 
     private void ValidateForeignReadOnlyOptions()
     {

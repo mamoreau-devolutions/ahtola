@@ -27,14 +27,15 @@ output is compiled *into* the shipped provider nupkg. Consequences:
 ## EF Core version constraint
 
 `Directory.Build.props` centralizes:
-- `$(AhtolaEntityFrameworkCoreVersion)` = `9.0.9`
-- `$(AhtolaEntityFrameworkCoreVersionRange)` = `[9.0.9,10.0.0)`
+- `$(AhtolaEntityFrameworkCoreVersion)` = `10.0.10` on net10.0 / `9.0.9` elsewhere
+- `$(AhtolaEntityFrameworkCoreVersionRange)` = `[10.0.0,11.0.0)` on net10.0 /
+  `[9.0.9,10.0.0)` on net8.0/net9.0
 
 The closure validator enforces that
 `Devolutions.Ahtola.EntityFrameworkCore.Sqlite` declares exactly **one**
-`Microsoft.EntityFrameworkCore.Sqlite.Core` dependency per framework,
-constrained to `[9.0.9,10.0.0)`. If you bump EF Core, update **both**
-properties and the validator's expectation together in one change.
+`Microsoft.EntityFrameworkCore.Sqlite.Core` dependency per framework with the
+matching range. If you bump EF Core, update the props and the validator's
+expectation together in one change.
 
 ## The gates
 

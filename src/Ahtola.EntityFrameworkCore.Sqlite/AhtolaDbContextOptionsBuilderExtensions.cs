@@ -16,7 +16,11 @@ namespace Microsoft.EntityFrameworkCore;
 
 public static class AhtolaDbContextOptionsBuilderExtensions
 {
+    #if NET10_0_OR_GREATER
+    private const int SupportedEntityFrameworkCoreMajorVersion = 10;
+#else
     private const int SupportedEntityFrameworkCoreMajorVersion = 9;
+#endif
 
     public static DbContextOptionsBuilder UseAhtola(
         this DbContextOptionsBuilder optionsBuilder,
@@ -114,7 +118,7 @@ public static class AhtolaDbContextOptionsBuilderExtensions
         if (loadedVersion?.Major != SupportedEntityFrameworkCoreMajorVersion)
         {
             throw new NotSupportedException(
-                $"Ahtola.EntityFrameworkCore.Sqlite supports EF Core 9.x, but EF Core {loadedVersion?.ToString() ?? "with an unknown version"} is loaded.");
+                $"Ahtola.EntityFrameworkCore.Sqlite supports EF Core {SupportedEntityFrameworkCoreMajorVersion}.x, but EF Core {loadedVersion?.ToString() ?? "with an unknown version"} is loaded.");
         }
     }
 

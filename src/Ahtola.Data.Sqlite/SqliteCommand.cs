@@ -368,19 +368,31 @@ public class SqliteCommand : DbCommand
             throw new InvalidOperationException(Properties.Resources.DataReaderOpen);
         if (Connection is null || Connection.State != ConnectionState.Open)
             throw new InvalidOperationException(Properties.Resources.CallRequiresOpenConnection(method));
-        if (Transaction is { IsCompleted: true } or { WasRolledBackExternally: true })
-            throw new InvalidOperationException(Properties.Resources.TransactionCompleted);
-        if (Transaction is not null && !ReferenceEquals(Transaction.Connection, Connection))
-            throw new InvalidOperationException(Properties.Resources.TransactionConnectionMismatch);
 
-        var connectionTransaction = Connection.Transaction;
-        if (connectionTransaction is null || ReferenceEquals(Transaction, connectionTransaction))
-            return;
-        if (connectionTransaction.IsCompleted)
-            throw new InvalidOperationException(Properties.Resources.TransactionCompleted);
-        if (!IsTransactionControlCommand(CommandText))
-            throw new InvalidOperationException(Properties.Resources.TransactionRequired);
-    }
+            // EF Core's SQLite migration lock is released after the migrator commits. A command may
+            // still hold a completed DbTransaction while connection.Transaction is already null.
+            // Treat that leftover as autocommit so lock-release DELETE can succeed. External rollbacks
+            // and completed leftovers while another connection transaction is active stay rejected.
+            if (Transaction is { } assignedTransaction
+                && (assignedTransaction.IsCompleted || assignedTransaction.WasRolledBackExternally))
+            {
+                if (assignedTransaction.WasRolledBackExternally || Connection.Transaction is not null)
+                    throw new InvalidOperationException(Properties.Resources.TransactionCompleted);
+
+                _transaction = null;
+            }
+
+            if (Transaction is not null && !ReferenceEquals(Transaction.Connection, Connection))
+                throw new InvalidOperationException(Properties.Resources.TransactionConnectionMismatch);
+
+            var connectionTransaction = Connection.Transaction;
+            if (connectionTransaction is null || ReferenceEquals(Transaction, connectionTransaction))
+                return;
+            if (connectionTransaction.IsCompleted)
+                throw new InvalidOperationException(Properties.Resources.TransactionCompleted);
+            if (!IsTransactionControlCommand(CommandText))
+                throw new InvalidOperationException(Properties.Resources.TransactionRequired);
+        }
 
     private void CloseReader()
     {

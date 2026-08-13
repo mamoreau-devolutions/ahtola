@@ -139,8 +139,9 @@ Four logical layers, each a project under `src/`:
 - **`Ahtola.Data.Sqlite`** — the shipped ADO.NET provider and the
   `Microsoft.Data.Sqlite`-compatible facade (`SqliteConnection` etc. in
   namespace `Ahtola.Data.Sqlite`). This is the package consumers add.
-- **`Ahtola.EntityFrameworkCore.Sqlite`** — EF Core 9.x provider; entry point is
-  `AhtolaDbContextOptionsBuilderExtensions` (`UseAhtola`).
+- **`Ahtola.EntityFrameworkCore.Sqlite`** — EF Core provider (9.x on net8/net9,
+  10.x on net10); entry point is `AhtolaDbContextOptionsBuilderExtensions`
+  (`UseAhtola`).
 
 Two non-shipped projects for perf: `src/Benchmarks` and
 `src/ConsumerBenchmarks`. `samples/ManagedPackageConsumer` is the packaged-
@@ -223,14 +224,15 @@ reflection against this list yourself before committing.
 
 - `$(AhtolaTargetFrameworks)` = `net8.0;net9.0;net10.0` — use this MSBuild
   property in csproj `<TargetFrameworks>`, do not hard-code frameworks.
-- `$(AhtolaEntityFrameworkCoreVersion)` = `9.0.9` and
-  `$(AhtolaEntityFrameworkCoreVersionRange)` = `[9.0.9,10.0.0)`.
+- `$(AhtolaEntityFrameworkCoreVersion)` defaults to `10.0.10` (net10) / `9.0.9`
+  (older TFMs) and `$(AhtolaEntityFrameworkCoreVersionRange)` is
+  `[10.0.0,11.0.0)` on net10.0 / `[9.0.9,10.0.0)` elsewhere.
 - `Version`, `Company`, `Product`, `Authors`, `Copyright` are centralized here.
 
 The closure validator enforces that `Devolutions.Ahtola.EntityFrameworkCore.Sqlite`
 declares exactly one `Microsoft.EntityFrameworkCore.Sqlite.Core` dependency
-per framework constrained to `[9.0.9,10.0.0)`. If you bump EF Core, update
-both properties and the validator's expectation together.
+per framework with the matching range above. If you bump EF Core, update the
+props and the validator's expectation together.
 
 ### Naming / packaging layers
 

@@ -27,7 +27,9 @@ public static class Resources
 
     public static string ManagedSharedCacheReadUncommittedNotSupported => ManagedSharedCacheContract.ReadUncommittedNotSupportedMessage;
 
-    public static string ManagedSharedCacheCallbacksNotSupported => "Managed shared-memory databases do not support connection-local functions, aggregates, or collations because the managed catalog is shared across connections.";
+    // Retained for callers/tests that still reference the historical message surface.
+    // Functions/aggregates/collations are now catalog-scoped on shared memory; hooks remain blocked.
+    public static string ManagedSharedCacheCallbacksNotSupported => ManagedSharedCacheHooksNotSupported;
 
     public static string ManagedMemoryEncryptionNotSupported => "Encryption is supported only for file-backed databases when Local Provider=Managed.";
 
