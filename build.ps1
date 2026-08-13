@@ -22,13 +22,14 @@ param(
         'build',
         'test',
         'pack',
-            'pack-pssqlite',
-            'validate-package',
-            'validate-project-closure',
-            'validate-packed-closure',
-            'format-check'
-        )]
-        [string]$Task = 'build',
+                'pack-powershell',
+                'test-powershell',
+                'validate-package',
+                'validate-project-closure',
+                'validate-packed-closure',
+                'format-check'
+            )]
+            [string]$Task = 'build',
 
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Debug',
@@ -53,11 +54,14 @@ Set-Location -LiteralPath $RepoRoot
 
 $DataSqliteProject = './src/Ahtola.Data.Sqlite/Ahtola.Data.Sqlite.csproj'
 $EfCoreProject = './src/Ahtola.EntityFrameworkCore.Sqlite/Ahtola.EntityFrameworkCore.Sqlite.csproj'
-$PSSqliteProject = './src/Ahtola.PSSqlite/Ahtola.PSSqlite.csproj'
+$PowerShellProject = './src/Devolutions.Ahtola.PowerShell/Devolutions.Ahtola.PowerShell.csproj'
 $CoreProject = './src/Ahtola.Core/Ahtola.Core.csproj'
 $TestsProject = './src/Ahtola.Tests/Ahtola.Tests.csproj'
 $Solution = './Ahtola.slnx'
-$PSSqliteModuleOutput = './artifacts/powershell-modules/Ahtola.PSSqlite'
+$PowerShellModuleName = 'Devolutions.Ahtola.Sqlite'
+$PowerShellModuleOutput = "./artifacts/powershell-modules/$PowerShellModuleName"
+$PowerShellAssemblyName = 'Devolutions.Ahtola.PowerShell'
+$PowerShellTestRunner = Join-Path $RepoRoot 'scripts/Invoke-PowerShellModuleTests.ps1'
 $ConsumerProject = './samples/ManagedPackageConsumer/ManagedPackageConsumer.csproj'
 $ConsumerNugetConfig = './samples/ManagedPackageConsumer/obj/managed-package-consumer.nuget.config'
 $ClosureValidator = Join-Path $RepoRoot 'scripts/Validate-ManagedPackageClosure.ps1'
@@ -120,9 +124,9 @@ function Assert-ManagedProjectClosure {
         (Join-Path $RepoRoot 'src/Ahtola.Data'),
         (Join-Path $RepoRoot 'src/Ahtola.Data.Sqlite'),
         (Join-Path $RepoRoot 'src/Ahtola.EntityFrameworkCore.Sqlite'),
-            (Join-Path $RepoRoot 'src/Ahtola.PSSqlite'),
-            (Join-Path $RepoRoot 'samples/ManagedPackageConsumer')
-        )
+                (Join-Path $RepoRoot 'src/Devolutions.Ahtola.PowerShell'),
+                (Join-Path $RepoRoot 'samples/ManagedPackageConsumer')
+            )
     foreach ($root in $projectRoots) {
         if (-not (Test-Path -LiteralPath $root -PathType Container)) {
             continue
@@ -144,7 +148,7 @@ function Invoke-Restore {
     Write-Step 'Restoring managed packages'
     Invoke-DotNet @('restore', $DataSqliteProject)
     Invoke-DotNet @('restore', $EfCoreProject)
-    Invoke-DotNet @('restore', $PSSqliteProject)
+        Invoke-DotNet @('restore', $PowerShellProject)
 }
 
 function Invoke-Build {
@@ -155,26 +159,43 @@ function Invoke-Build {
     Write-Step "Building managed packages ($BuildConfiguration)"
     Invoke-DotNet @('build', '--no-restore', '-c', $BuildConfiguration, $DataSqliteProject)
     Invoke-DotNet @('build', '--no-restore', '-c', $BuildConfiguration, $EfCoreProject)
-    Invoke-DotNet @('build', '--no-restore', '-c', $BuildConfiguration, $PSSqliteProject)
+        Invoke-DotNet @('build', '--no-restore', '-c', $BuildConfiguration, $PowerShellProject)
 }
 
-function Invoke-PackPSSqlite {
+    function Invoke-PackPowerShell {
     param([string]$BuildConfiguration = $Configuration)
 
     Assert-ManagedProjectClosure
-    Write-Step "Building and staging Ahtola.PSSqlite PowerShell module ($BuildConfiguration)"
-    Invoke-DotNet @('build', '-c', $BuildConfiguration, '-f', 'net8.0', $PSSqliteProject)
+        Write-Step "Building and staging $PowerShellModuleName PowerShell module ($BuildConfiguration)"
+        Invoke-DotNet @('build', '-c', $BuildConfiguration, '-f', 'net8.0', $PowerShellProject)
 
-    $moduleAbsolute = Get-AbsolutePath $PSSqliteModuleOutput
-    if (-not (Test-Path -LiteralPath (Join-Path $moduleAbsolute 'Ahtola.PSSqlite.psd1'))) {
-        throw "Expected staged module manifest at $moduleAbsolute"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $moduleAbsolute 'bin\Ahtola.PSSqlite.dll'))) {
-        throw "Expected staged module assembly at $moduleAbsolute\bin\Ahtola.PSSqlite.dll"
+        $moduleAbsolute = Get-AbsolutePath $PowerShellModuleOutput
+        $manifestPath = Join-Path $moduleAbsolute "$PowerShellModuleName.psd1"
+        $assemblyPath = Join-Path $moduleAbsolute "bin\$PowerShellAssemblyName.dll"
+        if (-not (Test-Path -LiteralPath $manifestPath)) {
+            throw "Expected staged module manifest at $manifestPath"
+        }
+        if (-not (Test-Path -LiteralPath $assemblyPath)) {
+            throw "Expected staged module assembly at $assemblyPath"
+        }
+
+        Write-Host "PowerShell module staged at $moduleAbsolute" -ForegroundColor Green
     }
 
-    Write-Host "PowerShell module staged at $moduleAbsolute" -ForegroundColor Green
-}
+    function Invoke-TestPowerShell {
+        param([string]$BuildConfiguration = $Configuration)
+
+        Invoke-PackPowerShell -BuildConfiguration $BuildConfiguration
+        Write-Step "Running Pester 6 tests for $PowerShellModuleName"
+        if (-not (Test-Path -LiteralPath $PowerShellTestRunner -PathType Leaf)) {
+            throw "PowerShell module test runner not found: $PowerShellTestRunner"
+        }
+
+        & $PowerShellTestRunner -ModulePath (Get-AbsolutePath $PowerShellModuleOutput) -Configuration $BuildConfiguration
+        if ($LASTEXITCODE -ne 0) {
+            throw "PowerShell module tests failed with exit code $LASTEXITCODE"
+        }
+    }
 
 function Invoke-Pack {
     param(
@@ -322,13 +343,14 @@ switch ($Task) {
     'restore' { Invoke-Restore }
     'build' { Invoke-Build }
     'pack' { Invoke-Pack }
-        'pack-pssqlite' { Invoke-PackPSSqlite }
+        'pack-powershell' { Invoke-PackPowerShell }
+        'test-powershell' { Invoke-TestPowerShell }
         'validate-project-closure' { Assert-ManagedProjectClosure }
         'validate-packed-closure' { Invoke-ValidatePackedClosure }
         'validate-package' { Invoke-ValidatePackage }
         'test' { Invoke-Test }
         'format-check' { Invoke-FormatCheck }
         default { throw "Unknown task '$Task'" }
-}
+    }
 
 Write-Host "Task '$Task' completed." -ForegroundColor Green

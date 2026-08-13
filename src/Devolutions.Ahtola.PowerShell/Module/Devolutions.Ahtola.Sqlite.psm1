@@ -1,4 +1,5 @@
-# Export Ahtola.PSSqlite model types through module-qualified type accelerators.
+# Export Devolutions.Ahtola.Sqlite model types through module-qualified type accelerators.
+# CLR types live in Ahtola.PSSqlite (binary assembly Devolutions.Ahtola.PowerShell).
 $ExportableTypes = [ordered]@{
     'SqliteDBConfig' = 'Ahtola.PSSqlite.SQLiteDBConfig'
     'SqliteDBSchema' = 'Ahtola.PSSqlite.SqliteDBSchema'

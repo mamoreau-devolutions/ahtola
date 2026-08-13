@@ -3,7 +3,7 @@ $moduleRoot = Split-Path -Path $PSScriptRoot -Parent
 $binPath = Join-Path -Path $moduleRoot -ChildPath 'bin'
 
 if (-not (Test-Path -LiteralPath $binPath)) {
-    Write-Error "Ahtola.PSSqlite bin folder not found: $binPath"
+    Write-Error "Devolutions.Ahtola.Sqlite bin folder not found: $binPath"
     return
 }
 
@@ -13,7 +13,7 @@ $preferredOrder = @(
     'Ahtola.Core.dll'
     'Ahtola.Data.dll'
     'Ahtola.Data.Sqlite.dll'
-    'Ahtola.PSSqlite.dll'
+    'Devolutions.Ahtola.PowerShell.dll'
 )
 
 $loadedNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)

@@ -1,5 +1,5 @@
 @{
-    RootModule = 'Ahtola.PSSqlite.psm1'
+    RootModule = 'Devolutions.Ahtola.Sqlite.psm1'
     ModuleVersion = '0.1.0'
     GUID = 'b7c2f0d1-8a4e-4f6b-9c3d-2e1a0b9f8d7c'
     Author = 'Devolutions'
@@ -8,7 +8,7 @@
     Description = 'PowerShell SQLite module backed by the pure-managed Ahtola engine (cloned from synedgy.PSSqlite). PowerShell 7+ / .NET 8+ only.'
     PowerShellVersion = '7.4'
     CompatiblePSEditions = @('Core')
-    NestedModules = @('bin\Ahtola.PSSqlite.dll')
+    NestedModules = @('bin\Devolutions.Ahtola.PowerShell.dll')
     FunctionsToExport = @()
     CmdletsToExport = @(
         'Close-PSSqliteConnection'
