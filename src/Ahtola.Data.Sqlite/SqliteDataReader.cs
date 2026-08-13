@@ -419,7 +419,13 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                 : GetClrTypeFromValueType(sampledValueType);
         }
 
-        return GetClrTypeFromSqliteType(GetDataTypeName(ordinal), valueType);
+        var dataTypeName = GetDataTypeName(ordinal);
+        // Expression results have no declared affinity. A sampled BLOB can surface as a text
+        // GUID or another storage class on a later row, so expose object for DataAdapter-safe
+        // materialization instead of committing it to byte[].
+        return IsBlobType(dataTypeName)
+            ? typeof(object)
+            : GetClrTypeFromSqliteType(dataTypeName, valueType);
     }
 
     public override T GetFieldValue<T>(int ordinal)
@@ -657,7 +663,11 @@ public class SqliteDataReader : DbDataReader, IConnectionOwnedReader
                     : IsBlobType(info.TypeName)
                         ? typeof(object)
                     : GetClrTypeFromSqliteType(info.TypeName, valueType)
-                : GetClrTypeFromValueType(valueType);
+                // Expressions have no declared affinity. A sampled BLOB may be materialized as
+                // a GUID string by GetValue, so object is the only DataAdapter-safe schema type.
+                : valueType == ReaderValueKind.Blob
+                    ? typeof(object)
+                    : GetClrTypeFromValueType(valueType);
             var isExpression = info is null;
             var isAliased = info is null
                 || !string.Equals(info.Name, columnName, StringComparison.Ordinal);

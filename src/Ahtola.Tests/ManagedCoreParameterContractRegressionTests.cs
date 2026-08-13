@@ -327,6 +327,36 @@ public sealed class ManagedCoreParameterContractRegressionTests
     }
 
     [Test]
+    public void ManagedSqliteFacadeFormatsGuidBlobsAsTextInXmlStyleConcatenation()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE PamProviderCommand(ID BLOB NOT NULL);";
+            create.ExecuteNonQuery();
+        }
+
+        var commandId = new Guid("00000008-cb65-4f23-a388-f2c7af681fec");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO PamProviderCommand(ID) VALUES ($id);";
+            insert.Parameters.AddWithValue("$id", commandId);
+            insert.ExecuteNonQuery().Should().Be(1);
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = """
+            SELECT '<Commands><Command><ID>' || CAST(Command.ID AS TEXT) || '</ID></Command></Commands>'
+            FROM PamProviderCommand Command;
+            """;
+        var xml = (string)select.ExecuteScalar()!;
+
+        xml.Should().Be($"<Commands><Command><ID>{commandId:D}</ID></Command></Commands>");
+    }
+
+    [Test]
     public void ManagedSqliteFacadeAdapterSamplesUnresolvedBlobProjectionTypes()
     {
         using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
@@ -350,6 +380,38 @@ public sealed class ManagedCoreParameterContractRegressionTests
 
         permissions.Columns["type"]!.DataType.Should().Be(typeof(string));
         permissions.Rows[0]["type"].Should().Be("USER");
+    }
+
+    [Test]
+    public void ManagedSqliteFacadeAdapterMaterializesGuidBlobsInUnresolvedIdentifierExpressions()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Local Provider=Managed");
+        connection.Open();
+
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE PamFolder(FolderID BLOB NOT NULL);";
+            create.ExecuteNonQuery();
+        }
+
+        var folderId = new Guid("09b4a80a-cb65-4f23-a388-f2c7af681fec");
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT INTO PamFolder(FolderID) VALUES ($folderId);";
+            insert.Parameters.AddWithValue("$folderId", folderId);
+            insert.ExecuteNonQuery().Should().Be(1);
+        }
+
+        using var select = connection.CreateCommand();
+        select.CommandText = "SELECT CASE WHEN 1 THEN FolderID END AS FolderID FROM PamFolder;";
+        using var adapter = new GenericDataAdapter();
+        ((IDbDataAdapter)adapter).SelectCommand = select;
+        var folders = new DataTable();
+        adapter.Fill(folders).Should().Be(1);
+
+        folders.Columns["FolderID"]!.DataType.Should().Be(typeof(object));
+        Guid.TryParse((string)folders.Rows[0]["FolderID"], out var readFolderId).Should().BeTrue();
+        readFolderId.Should().Be(folderId);
     }
 
     [Test]
