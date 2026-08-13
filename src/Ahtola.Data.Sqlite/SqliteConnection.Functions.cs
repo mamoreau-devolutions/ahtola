@@ -12,9 +12,10 @@ public partial class SqliteConnection
     private void RegisterScalarFunction(string name, int argc, bool isDeterministic, Func<object?[], object?>? function)
     {
         ArgumentNullException.ThrowIfNull(name);
-        if (function is not null && IsManagedSharedMemory)
-            throw new NotSupportedException(Properties.Resources.ManagedSharedCacheCallbacksNotSupported);
-        if (function is null)
+            // Shared-memory catalogs are process-wide for the named database. Scalar
+            // registrations are therefore catalog-scoped (visible to every lease), which is
+            // what EF Core needs when multiple connections share Mode=Memory;Cache=Shared.
+            if (function is null)
         {
             RemoveFunctionRegistrations(_scalarFunctions, name);
             if (IsManagedConnection)

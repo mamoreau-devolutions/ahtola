@@ -11,8 +11,8 @@ public sealed class ManagedSharedCacheContractTests
     private const string ReadUncommittedNotSupportedMessage =
         "PRAGMA read_uncommitted and IsolationLevel.ReadUncommitted are not supported for managed shared-memory databases because the managed engine preserves transaction isolation and does not expose dirty reads.";
 
-    private const string CallbacksNotSupportedMessage =
-        "Managed shared-memory databases do not support connection-local functions, aggregates, or collations because the managed catalog is shared across connections.";
+    private const string HooksNotSupportedMessage =
+            "Managed shared-memory databases do not support update, commit, rollback, authorizer, trace, or progress callbacks because the managed catalog is shared across connections.";
 
     [SetUp]
     public void SetUp() => SqliteConnection.ClearAllPools();
@@ -397,23 +397,50 @@ public sealed class ManagedSharedCacheContractTests
     }
 
     [Test]
-    public void ManagedSharedMemoryRejectsConnectionLocalCallbacks()
+        public void ManagedSharedMemorySharesCatalogScopedCallbacksAcrossConnections()
     {
-        using var beforeOpen = new SqliteConnection(CreateConnectionString());
-        beforeOpen.CreateFunction("local_value", static () => 1L);
-        beforeOpen.Invoking(static connection => connection.Open())
-            .Should()
-            .Throw<NotSupportedException>()
-            .WithMessage(CallbacksNotSupportedMessage);
-        beforeOpen.State.Should().Be(ConnectionState.Closed);
+            var connectionString = CreateConnectionString();
+            using var first = new SqliteConnection(connectionString);
+            // EF-style: register before Open, then open additional leases.
+            first.CreateFunction("local_value", static () => 41L);
+            first.CreateCollation("local_collation", StringComparer.OrdinalIgnoreCase.Compare);
+            first.CreateAggregate<long, long>(
+                "local_sum",
+                seed: 0L,
+                (acc, value) => acc + value,
+                isDeterministic: true);
+            first.Open();
+            first.ExecuteNonQuery("CREATE TABLE data(name TEXT COLLATE local_collation, value INTEGER);");
+            first.ExecuteNonQuery("INSERT INTO data VALUES ('Alpha', 1), ('beta', 2);");
+            first.ExecuteScalar<long>("SELECT local_value();").Should().Be(41);
+            first.ExecuteScalar<long>("SELECT local_sum(value) FROM data;").Should().Be(3);
+            first.ExecuteScalar<long>("SELECT COUNT(*) FROM data WHERE name = 'alpha';").Should().Be(1);
 
-        using var afterOpen = new SqliteConnection(CreateConnectionString());
-        afterOpen.Open();
-        afterOpen.Invoking(static connection => connection.CreateCollation("local", StringComparer.Ordinal.Compare))
-            .Should()
-            .Throw<NotSupportedException>()
-            .WithMessage(CallbacksNotSupportedMessage);
-    }
+            using var second = new SqliteConnection(connectionString);
+            // Second EF connection registers the same catalog-scoped callbacks and still sees data.
+            second.CreateFunction("local_value", static () => 41L);
+            second.CreateCollation("local_collation", StringComparer.OrdinalIgnoreCase.Compare);
+            second.CreateAggregate<long, long>(
+                "local_sum",
+                seed: 0L,
+                (acc, value) => acc + value,
+                isDeterministic: true);
+            second.Open();
+            second.ExecuteScalar<long>("SELECT local_value();").Should().Be(41);
+            second.ExecuteScalar<long>("SELECT local_sum(value) FROM data;").Should().Be(3);
+            second.ExecuteScalar<long>("SELECT COUNT(*) FROM data WHERE name = 'ALPHA';").Should().Be(1);
+        }
+
+        [Test]
+        public void ManagedSharedMemoryRejectsHooks()
+        {
+            using var connection = new SqliteConnection(CreateConnectionString());
+            connection.Open();
+            connection.Invoking(static c => c.SetUpdateHook(_ => { }))
+                .Should()
+                .Throw<NotSupportedException>()
+                .WithMessage(HooksNotSupportedMessage);
+        }
 
     [Test]
     public async Task CanceledOpenDoesNotAcquireSharedMemoryLifetime()
