@@ -124,11 +124,12 @@ Wrong/missing password failures include the phrase
 ## PowerShell module
 
 `Devolutions.Ahtola.Sqlite` is a binary PowerShell module that exposes the
-Ahtola engine through `*-PSSqlite*` cmdlets, including a YAML-driven schema /
-migration model. It is a clone of the synedgy.PSSqlite C# port, re-backed onto
-`Ahtola.Data.Sqlite` instead of Microsoft.Data.Sqlite / SQLitePCLRaw — so
-importing it pulls in **no native SQLite assets**. Cmdlet names and YAML config
-shapes are preserved, so existing PSSqlite scripts migrate with minimal changes.
+Ahtola engine through `*-AhtolaSqlite*` cmdlets, including a YAML-driven schema /
+migration model. Its implementation is ported from synedgy.PSSqlite and
+re-backed onto `Ahtola.Data.Sqlite` instead of Microsoft.Data.Sqlite /
+SQLitePCLRaw — so importing it pulls in **no native SQLite assets**. The
+public command noun is `AhtolaSqlite` to avoid collisions with other SQLite
+PowerShell modules.
 
 Requires PowerShell **7.4+**. Windows PowerShell 5.1 is not supported.
 
@@ -156,33 +157,63 @@ Model types are available as module-qualified type accelerators, e.g.
 
 | Cmdlet | Purpose |
 | --- | --- |
-| `New-PSSqliteConnection` | Open a connection by `-ConnectionString` or `-DatabasePath` + `-DatabaseFile` |
-| `Close-PSSqliteConnection` | Close/dispose the tracked connection |
-| `Invoke-PSSqliteQuery` | Run SQL with `-Parameters`, `-CommandTimeout`, `-KeepAlive`, `-CastAs` |
-| `Get-PSSqliteRow` / `New-PSSqliteRow` / `Set-PSSqliteRow` / `Remove-PSSqliteRow` | CRUD driven by a `SQLiteDBConfig` + `-TableName` (+ `-RowData` / `-ClauseData`) |
-| `Get-PSSqliteDBConfig` / `Get-PSSqliteDBConfigFile` | Load / locate the YAML database config |
-| `Initialize-PSSqliteDatabase` | Apply the YAML schema (`-MigrationMode INCREMENTAL\|CREATE\|OVERWRITE`) |
-| `Get-PSSqliteDBMetadata` / `Compare-PSSqliteDBVersion` | Read stored metadata; compare deployed vs expected version |
-| `Get-ExpandedString` / `Get-PSSqliteAbsolutePath` | Expand `$env:`-style strings; resolve paths |
+| `New-AhtolaSqliteConnection` / `Test-AhtolaSqliteConnection` / `Close-AhtolaSqliteConnection` / `Clear-AhtolaSqliteConnectionPool` | Open, test, close/dispose, and explicitly clear managed connection pools |
+| `Invoke-AhtolaSqliteQuery` | Run parameterized SQL; emits `PSCustomObject` rows by default and supports scalar, non-query, `DataTable`, `DataSet`, and detached-reader modes |
+| `Start-AhtolaSqliteTransaction` / `Save-AhtolaSqliteTransaction` / `Complete-AhtolaSqliteTransaction` / `Undo-AhtolaSqliteTransaction` | Start, save, commit/release, or roll back managed transactions and savepoints |
+| `Invoke-AhtolaSqliteBulkCopy` | Insert pipeline objects, dictionaries, or `DataRow` values in an all-or-nothing transaction |
+| `Backup-AhtolaSqliteDatabase` | Copy one managed SQLite database into a distinct destination connection |
+| `Get-AhtolaSqliteSchema` / `Get-AhtolaSqliteTable` / `Get-AhtolaSqliteIndex` / `Get-AhtolaSqliteDatabaseInfo` | Inspect provider schema, database objects, and database page/journal information |
+| `Test-AhtolaSqliteIntegrity` / `Optimize-AhtolaSqliteDatabase` / `Checkpoint-AhtolaSqliteDatabase` / `Invoke-AhtolaSqliteMaintenance` | Run focused integrity, optimization, WAL checkpoint, and constrained maintenance operations |
+| `Export-AhtolaSqliteTable` / `Import-AhtolaSqliteTable` | Move table data as portable JSON or CSV; this is distinct from a database backup |
+| `Set-AhtolaSqlitePassword` / `Clear-AhtolaSqlitePassword` | Encrypt, rekey, or decrypt file-backed managed Ahtola databases using a `SecureString` passphrase |
+| `Get-AhtolaSqliteRow` / `New-AhtolaSqliteRow` / `Set-AhtolaSqliteRow` / `Remove-AhtolaSqliteRow` | CRUD driven by a `SQLiteDBConfig` + `-Table` (+ `-Values` / `-Where`); update/delete emit affected-row counts |
+| `Import-AhtolaSqliteConfiguration` / `Find-AhtolaSqliteConfigurationFile` | Load / locate the YAML database config |
+| `Initialize-AhtolaSqliteDatabase` | Apply the YAML schema (`-MigrationMode INCREMENTAL\|CREATE\|OVERWRITE`) |
+| `Get-AhtolaSqliteDatabaseMetadata` / `Compare-AhtolaSqliteDatabaseVersion` | Read stored metadata; compare deployed vs expected version |
 
-`Invoke-PSSqliteQuery` and the `Get-PSSqliteRow` family support
-`-As DataTable | DataReader | DataSet | OrderedDictionary | PSCustomObject`.
+`New-AhtolaSqliteConnection` returns an open connection. Every cmdlet that
+receives `-Connection` may open a closed connection but never closes or
+disposes it. Configuration-driven CRUD creates and disposes its own temporary
+connection only when `-Connection` is omitted. `-SqliteConnection`,
+`-SqliteDBConfig`, `-TableName`, `-RowData`, and `-ClauseData` remain
+compatibility aliases; use `-Connection`, `-Configuration`, `-Table`,
+`-Values`, and `-Where` in new scripts.
+
+`Invoke-AhtolaSqliteQuery` and the `Get-AhtolaSqliteRow` family support
+`-As DataTable | DetachedDataReader | DataSet | OrderedDictionary |
+PSCustomObject`; `Invoke-AhtolaSqliteQuery` additionally supports `Scalar` and
+`NonQuery`. `DataReader` remains a compatibility alias for
+`DetachedDataReader`: it is a materialized snapshot, not a live streaming
+reader.
+
+Bulk imports fail and roll back their own transaction on the first conflicting
+row. When passed a caller-owned transaction, the cmdlet uses a savepoint and
+rolls back only that bulk operation.
 
 ### Example
 
 ```powershell
-# Ad hoc query
-$connection = New-PSSqliteConnection -ConnectionString 'Data Source=:memory:'
-Invoke-PSSqliteQuery -SqliteConnection $connection `
+# Ad hoc query and default PowerShell-object output
+$connection = New-AhtolaSqliteConnection -ConnectionString 'Data Source=:memory:'
+Invoke-AhtolaSqliteQuery -Connection $connection `
     -CommandText 'SELECT id, name FROM t WHERE name = $name' `
-    -Parameters @{ '$name' = 'b' } -KeepAlive -As PSCustomObject
+    -Parameters @{ '$name' = 'b' }
 
 # YAML-defined schema + CRUD
-Initialize-PSSqliteDatabase -Path ./Database.yml -MigrationMode CREATE
-$config = Get-PSSqliteDBConfig -Path ./Database.yml
-New-PSSqliteRow -SqliteDBConfig $config -TableName Items -RowData @{ Id = 1; Name = 'widget' }
-Get-PSSqliteRow  -SqliteDBConfig $config -TableName Items -ClauseData @{ Id = 1 }
-Close-PSSqliteConnection
+Initialize-AhtolaSqliteDatabase -Path ./Database.yml -MigrationMode CREATE
+$config = Import-AhtolaSqliteConfiguration -Path ./Database.yml
+New-AhtolaSqliteRow -Configuration $config -Table Items -Values @{ Id = 1; Name = 'widget' }
+Get-AhtolaSqliteRow -Configuration $config -Table Items -Where @{ Id = 1 }
+$transaction = Start-AhtolaSqliteTransaction -Connection $connection
+Invoke-AhtolaSqliteQuery -Connection $connection -Transaction $transaction `
+    -CommandText 'UPDATE Items SET Name = $name WHERE Id = $id' `
+    -Parameters @{ '$name' = 'updated'; '$id' = 1 } -As NonQuery
+Complete-AhtolaSqliteTransaction -Transaction $transaction
+
+# Portable table export/import infers JSON or CSV from the file extension.
+Export-AhtolaSqliteTable -Connection $connection -Table Items -Path ./items.json
+Import-AhtolaSqliteTable -Connection $connection -Table Items -Path ./items.csv
+$connection | Close-AhtolaSqliteConnection -ClearPool
 ```
 
 If you'd rather call the ADO.NET provider from a plain script module instead of

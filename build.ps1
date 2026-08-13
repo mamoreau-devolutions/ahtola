@@ -46,7 +46,7 @@ param(
 
         # Floor for Pester module tests (test-powershell). Keep in sync with
         # tests/PowerShell/Devolutions.Ahtola.Sqlite/Module.Tests.ps1.
-        [int]$PowerShellMinimumExecutedTests = 11
+        [int]$PowerShellMinimumExecutedTests = 25
     )
 
 Set-StrictMode -Version Latest

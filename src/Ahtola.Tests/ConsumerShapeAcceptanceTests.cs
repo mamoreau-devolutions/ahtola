@@ -268,7 +268,7 @@ public sealed class ConsumerShapeAcceptanceTests
     [Test]
     public void PSSqliteDefaultConnectionStringSupportsMetadataLifecycle()
     {
-        // The exact default connection string New-PSSqliteConnection produces.
+        // The exact default connection string New-AhtolaSqliteConnection produces.
         const string connectionString = "Data Source=:memory:;Cache=Shared;";
         using var managed = new SqliteConnection(connectionString + "Local Provider=Managed");
         using var sqlite = new MsData.SqliteConnection(connectionString);
@@ -286,12 +286,12 @@ public sealed class ConsumerShapeAcceptanceTests
 
         SelectMetadata(managed).Should().Equal(SelectMetadata(sqlite));
 
-        // Get-PSSqliteDBMetadata probes existence through sqlite_schema with NOCASE.
+        // Get-AhtolaSqliteDBMetadata probes existence through sqlite_schema with NOCASE.
         SchemaHasTable(managed, "_METADATA").Should().BeTrue();
         SchemaHasTable(sqlite, "_METADATA").Should().BeTrue();
         SchemaHasTable(managed, "missing").Should().BeFalse();
 
-        // IN-parameter expansion, as Get-PSSqliteDBMetadata builds it.
+        // IN-parameter expansion, as Get-AhtolaSqliteDBMetadata builds it.
         SelectMetadataKeys(managed, ["version", "other"]).Should()
             .Equal(SelectMetadataKeys(sqlite, ["version", "other"]));
     }
@@ -341,13 +341,13 @@ public sealed class ConsumerShapeAcceptanceTests
 
         SelectServers(managed).Should().Equal(SelectServers(sqlite));
 
-        // Set-PSSqliteRow UPDATE shape with parameterized WHERE clause.
+        // Set-AhtolaSqliteRow UPDATE shape with parameterized WHERE clause.
         const string update = "UPDATE servers SET os = @newOs WHERE name = @name AND os = @oldOs;";
         UpdateServer(managed, update, "web01", "linux", "macos");
         UpdateServer(sqlite, update, "web01", "linux", "macos");
         SelectServers(managed).Should().Equal(SelectServers(sqlite));
 
-        // Remove-PSSqliteRow DELETE shape.
+        // Remove-AhtolaSqliteRow DELETE shape.
         const string delete = "DELETE FROM servers WHERE name = @name;";
         DeleteServer(managed, delete, "web01").Should().Be(DeleteServer(sqlite, delete, "web01"));
         SelectServers(managed).Should().Equal(SelectServers(sqlite));
@@ -356,7 +356,7 @@ public sealed class ConsumerShapeAcceptanceTests
     [Test]
     public void PSSqliteInsertReturningStarMatchesSqlite()
     {
-        // New-PSSqliteRow.ps1 appends 'RETURNING *;' to inserts (New-PSSqliteRow.ps1:103).
+        // New-AhtolaSqliteRow appends 'RETURNING *;' to inserts.
         // The managed engine must return the same columns — names, values, and order —
         // as Microsoft.Data.Sqlite for both an AUTOINCREMENT primary key and a
         // composite PRIMARY KEY table.
@@ -398,7 +398,7 @@ public sealed class ConsumerShapeAcceptanceTests
     [Test]
     public void PSSqliteDataTableLoadMatchesSqliteWithNullableJoinColumn()
     {
-        // Invoke-PSSqliteQuery.ps1 default -As DataTable calls DataTable.Load(IDataReader).
+        // Invoke-AhtolaSqliteQuery defaults to a DataTable result.
         // The managed reader must load a multi-column result set — including a nullable
         // LEFT JOIN column — into a DataTable with the same columns, rows, and cell values
         // (incl. DBNull) as Microsoft.Data.Sqlite.
@@ -440,7 +440,7 @@ public sealed class ConsumerShapeAcceptanceTests
     [Test]
     public void PSSqliteOverwriteRecreatesAfterClearingPoolsAndDeletingSidecars()
     {
-        // Initialize-PSSqliteDatabase.ps1 OVERWRITE: Close-PSSqliteConnection ->
+        // Initialize-AhtolaSqliteDatabase OVERWRITE: Close-AhtolaSqliteConnection ->
         // ClearAllPools() -> delete .db (+ -wal/-shm/-journal) -> recreate. The managed
         // engine must reopen a fresh file-backed database at the same path with no stale
         // ownership or orphan lock errors after the previous connection released its

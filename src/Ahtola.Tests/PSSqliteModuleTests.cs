@@ -41,11 +41,42 @@ public sealed class PSSqliteModuleTests
             connection,
             "SELECT id, name FROM t WHERE name = $name ORDER BY id;",
             new Hashtable { ["$name"] = "b" },
-            new QueryOptions { OutputFormat = "DataTable", KeepAlive = true }) as DataTable;
+            new QueryOptions { OutputFormat = "DataTable" }) as DataTable;
 
         table.Should().NotBeNull();
         table!.Rows.Count.Should().Be(1);
         table.Rows[0]["name"].Should().Be("b");
+    }
+
+    [Test]
+    public void QueryExecutor_Uses_Transaction_And_Leaves_Caller_Connection_Open()
+    {
+        using var connection = ConnectionFactory.Create("Data Source=:memory:");
+        connection.Open();
+
+        QueryExecutor.Execute(
+            connection,
+            "CREATE TABLE values_table(id INTEGER PRIMARY KEY, value TEXT);",
+            parameters: null,
+            new QueryOptions { OutputFormat = "NonQuery" }).Should().Be(0);
+        connection.State.Should().Be(ConnectionState.Open);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            QueryExecutor.Execute(
+                connection,
+                "INSERT INTO values_table(id, value) VALUES ($id, $value);",
+                new Hashtable { ["$id"] = 1, ["$value"] = "rolled-back" },
+                new QueryOptions { OutputFormat = "NonQuery", Transaction = transaction }).Should().Be(1);
+            transaction.Rollback();
+        }
+
+        QueryExecutor.Execute(
+            connection,
+            "SELECT COUNT(*) FROM values_table;",
+            parameters: null,
+            new QueryOptions { OutputFormat = "Scalar" }).Should().Be(0L);
+        connection.State.Should().Be(ConnectionState.Open);
     }
 
     [Test]
@@ -106,7 +137,6 @@ public sealed class PSSqliteModuleTests
                     ["Year"] = 1981
                 },
                 connection,
-                keepAlive: true,
                 warning: _ => { });
 
             inserted.Should().NotBeNull();
@@ -118,7 +148,6 @@ public sealed class PSSqliteModuleTests
                 connection,
                 outputFormat: "OrderedDictionary",
                 caseSensitive: false,
-                keepAlive: true,
                 warning: _ => { });
 
             selected.Should().NotBeNull();
@@ -135,8 +164,38 @@ public sealed class PSSqliteModuleTests
                 new Hashtable { ["Id"] = 1 },
                 connection,
                 caseSensitive: false,
-                keepAlive: true,
                 warning: _ => { });
+
+            CrudSqlBuilder.ExecuteUpdate(
+                config,
+                "Cars",
+                new Hashtable { ["Id"] = 1, ["Year"] = 1982 },
+                new Hashtable { ["Id"] = 1 },
+                connection,
+                caseSensitive: false,
+                onConflict: "UPSERT",
+                warning: _ => { });
+
+            CrudSqlBuilder.ExecuteUpdate(
+                config,
+                "Cars",
+                new Hashtable { ["Colour"] = null },
+                new Hashtable { ["Id"] = 1 },
+                connection,
+                caseSensitive: false,
+                warning: _ => { });
+
+            var updated = CrudSqlBuilder.ExecuteSelect(
+                config,
+                "Cars",
+                new Hashtable { ["Id"] = 1 },
+                connection,
+                outputFormat: "OrderedDictionary",
+                caseSensitive: false,
+                warning: _ => { });
+            var updatedRow = ((IEnumerable)updated!).Cast<OrderedDictionary>().Single();
+            updatedRow["Year"].Should().Be(1982L);
+            updatedRow["Colour"].Should().BeNull();
 
             var metadata = MetadataStore.Get(config.ConnectionString!, new[] { "version" });
             metadata.Should().NotBeNull();
@@ -148,7 +207,6 @@ public sealed class PSSqliteModuleTests
                 new Hashtable { ["Id"] = 1 },
                 connection,
                 caseSensitive: false,
-                keepAlive: true,
                 warning: _ => { });
 
             var afterDelete = CrudSqlBuilder.ExecuteSelect(
@@ -158,7 +216,6 @@ public sealed class PSSqliteModuleTests
                 connection,
                 outputFormat: "DataTable",
                 caseSensitive: false,
-                keepAlive: true,
                 warning: _ => { }) as DataTable;
 
             afterDelete.Should().NotBeNull();
@@ -175,9 +232,17 @@ public sealed class PSSqliteModuleTests
     }
 
     [Test]
-    public void PathUtilities_Resolves_Relative_Paths()
+    public void QueryExecutor_Opens_And_Retains_Caller_Owned_Connection()
     {
-        var absolute = PathUtilities.GetPSSqliteAbsolutePath("child", Path.GetTempPath());
-        absolute.Should().Be(Path.GetFullPath(Path.Combine(Path.GetTempPath(), "child")));
+        using var connection = ConnectionFactory.Create("Data Source=:memory:");
+
+        var result = QueryExecutor.Execute(
+            connection,
+            "SELECT 17;",
+            parameters: null,
+            new QueryOptions { OutputFormat = "Scalar" });
+
+        Convert.ToInt64(result).Should().Be(17);
+        connection.State.Should().Be(ConnectionState.Open);
     }
 }
