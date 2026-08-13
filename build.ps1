@@ -167,7 +167,10 @@ function Invoke-Build {
 }
 
     function Invoke-PackPowerShell {
-    param([string]$BuildConfiguration = $Configuration)
+    param(
+        [string]$BuildConfiguration = $Configuration,
+        [string]$Version = $PackageVersion
+    )
 
     Assert-ManagedProjectClosure
         Write-Step "Building and staging $PowerShellModuleName PowerShell module ($BuildConfiguration)"
@@ -181,6 +184,20 @@ function Invoke-Build {
         }
         if (-not (Test-Path -LiteralPath $assemblyPath)) {
             throw "Expected staged module assembly at $assemblyPath"
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($Version)) {
+            if ($Version -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?$') {
+                throw "PowerShell module versions must contain only numeric components. Received '$Version'."
+            }
+
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw
+            if ($manifest -notmatch '(?m)^\s*ModuleVersion\s*=\s*''[^'']+''') {
+                throw "Could not locate ModuleVersion in staged manifest $manifestPath"
+            }
+
+            $updatedManifest = $manifest -replace '(?m)^(\s*ModuleVersion\s*=\s*)''[^'']+''', "`$1'$Version'"
+            Set-Content -LiteralPath $manifestPath -Value $updatedManifest -Encoding utf8NoBOM
         }
 
         Write-Host "PowerShell module staged at $moduleAbsolute" -ForegroundColor Green

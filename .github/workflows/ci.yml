@@ -5,7 +5,7 @@ on:
     branches:
       - master
     tags-ignore:
-      - 'v*'
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -15,14 +15,13 @@ permissions:
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
-  # The managed test suite wrapper enforces a minimum executed-test count so an
-  # empty/discovered-zero run cannot return success. Keep this in sync with the
-  # real test count; the wrapper fails if fewer than this many tests execute.
+  # Keep this in sync with the managed test count. The wrapper fails closed if
+  # the runner discovers or executes fewer tests than this threshold.
   MINIMUM_EXECUTED_TESTS: "2500"
 
 jobs:
   lint:
-    name: Lint & closure
+    name: Lint and closure
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -36,32 +35,28 @@ jobs:
             9.0.x
             10.0.x
 
-      - name: Restore (full solution, so dotnet format's implicit restore is cached)
+      - name: Restore full solution
         shell: pwsh
         run: |
-          # ConsumerBenchmarks/nuget.config declares a local source at
-          # artifacts/nupkg that only exists after `pack`. Create it empty so
-          # full-solution restore (and dotnet format's implicit restore)
-          # doesn't fail with NU1301 on a fresh checkout.
+          # ConsumerBenchmarks declares a local package source that is created
+          # by pack. Create it for format's implicit restore on a clean checkout.
           New-Item -ItemType Directory -Force -Path artifacts/nupkg | Out-Null
           ./build.ps1 restore
           dotnet restore ./Ahtola.slnx
 
       - name: Check formatting
         shell: pwsh
-        # Non-blocking: the imported codebase has pre-existing formatting
-        # violations (e.g. ResumableStatement.cs indentation). Reported
-        # informatively until a separate reformat pass lands. The hard gate
-        # for this job is validate-project-closure below.
+        # The imported codebase has known formatting violations. Keep the report
+        # visible while validate-project-closure remains the hard gate.
         continue-on-error: true
         run: ./build.ps1 format-check
 
-      - name: Validate managed project closure (no native/Rust refs)
+      - name: Validate managed project closure
         shell: pwsh
         run: ./build.ps1 validate-project-closure
 
   build-test:
-    name: Build & test (${{ matrix.os }})
+    name: Build and test (${{ matrix.os }})
     needs: lint
     runs-on: ${{ matrix.os }}
     strategy:
@@ -91,114 +86,91 @@ jobs:
         shell: pwsh
         run: ./build.ps1 build -Framework net10.0
 
-            # Stage the Devolutions.Ahtola.Sqlite module on every OS (compile + packaging
-            # gate). Pester runs separately below where file-DB locks are supported.
-            - name: Pack PowerShell module
-              shell: pwsh
-              run: ./build.ps1 pack-powershell
+      - name: Pack PowerShell module
+        shell: pwsh
+        run: ./build.ps1 pack-powershell
 
-            # The managed engine uses SQLite main-file byte-range locks for physical
-            # databases, which the port currently only implements on Windows and
-            # Linux. On macOS it throws PlatformNotSupportedException at runtime, so
-            # we build there (compile gate) but skip the test suite. tracked: macOS
-            # byte-range locking support.
-            #
-            # Windows is the authoritative hard gate: it runs the whole suite
-            # including the cross-process WAL byte-range-lock isolation tests. On
-            # GitHub Actions Linux runners those cross-process tests fail because
-            # OFD fcntl locks probed with a zero timeout don't coordinate across
-            # forked worker processes under runner scheduling (they pass on
-            # Windows and on a normal Linux box). Keep the Ubuntu leg non-blocking
-            # so the 5 known cross-process failures don't gate the PR; the other
-            # ~3754 tests still run and their output stays in the log. tracked:
-            # harden the cross-process WAL path for GitHub Actions Linux runners.
-            - name: "Test (full gate: pack, validate, run suite)"
-              if: matrix.os != 'macos-latest'
-              id: managed-test
-              continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
+      - name: Test
+        if: matrix.os != 'macos-latest'
+        id: managed-test
+        continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
+        shell: pwsh
+        run: ./build.ps1 test -Framework net10.0 -MinimumExecutedTests $env:MINIMUM_EXECUTED_TESTS
+
+      - name: Report Ubuntu cross-process WAL gap
+        if: always() && steps.managed-test.outcome == 'failure'
         shell: pwsh
         run: |
-                ./build.ps1 test -Framework net10.0 -MinimumExecutedTests $env:MINIMUM_EXECUTED_TESTS
+          Write-Host "::warning::Ubuntu managed suite failed known cross-process WAL byte-range-lock isolation tests. Windows remains the hard test gate."
 
-            - name: Report Ubuntu cross-process WAL gap
-              if: always() && steps.managed-test.outcome == 'failure'
-              shell: pwsh
-              run: |
-                Write-Host "::warning::Ubuntu managed suite failed the cross-process WAL byte-range-lock isolation tests (known gap on GitHub Actions Linux runners; Windows passes them). See the Test step log for the failing test names."
+      - name: Upload test results
+        if: always() && matrix.os != 'macos-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-${{ matrix.os }}
+          path: |
+            **/*.trx
+            artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
 
-            - name: Upload test results
-              if: always() && matrix.os != 'macos-latest'
-              uses: actions/upload-artifact@v7
-              with:
-                name: test-results-${{ matrix.os }}
-                path: |
-                  **/*.trx
-                  artifacts/
-                if-no-files-found: ignore
-                retention-days: 7
+  powershell-module:
+    name: PowerShell module (${{ matrix.os }})
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-        powershell-module:
-          name: PowerShell module (${{ matrix.os }})
-          needs: lint
-          runs-on: ${{ matrix.os }}
-          strategy:
-            fail-fast: false
-            matrix:
-              os:
-                # Windows is the hard gate. Ubuntu exercises the pure-managed module
-                # on Linux (file DB + in-memory). macOS is pack-only in build-test
-                # until byte-range locks land.
-                - windows-latest
-                - ubuntu-latest
-          steps:
-            - name: Checkout
-              uses: actions/checkout@v6
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
 
-            - name: Setup .NET SDK
-              uses: actions/setup-dotnet@v5
-              with:
-                dotnet-version: |
-                  8.0.x
-                  9.0.x
-                  10.0.x
+      - name: Restore
+        shell: pwsh
+        run: ./build.ps1 restore
 
-            - name: Restore
-              shell: pwsh
-              run: ./build.ps1 restore
+      - name: Install Pester 6
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name Pester -MinimumVersion 6.0.0 -MaximumVersion 6.99.99 `
+            -Force -Scope CurrentUser -SkipPublisherCheck -AllowClobber
+          $pester = Get-Module -ListAvailable -Name Pester |
+            Where-Object { $_.Version -ge [version]'6.0.0' } |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+          if (-not $pester) {
+            throw 'Pester 6.0+ was not installed.'
+          }
+          Write-Host "Installed Pester $($pester.Version)"
 
-            - name: Install Pester 6
-              shell: pwsh
-              run: |
-                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-                Install-Module -Name Pester -MinimumVersion 6.0.0 -MaximumVersion 6.99.99 `
-                  -Force -Scope CurrentUser -SkipPublisherCheck -AllowClobber
-                $pester = Get-Module -ListAvailable -Name Pester |
-                  Where-Object { $_.Version -ge [version]'6.0.0' } |
-                  Sort-Object Version -Descending |
-                  Select-Object -First 1
-                if (-not $pester) {
-                  throw 'Pester 6.0+ was not installed.'
-                }
-                Write-Host "Installed Pester $($pester.Version)"
+      - name: Pack and test PowerShell module
+        shell: pwsh
+        run: ./build.ps1 test-powershell
 
-            - name: Pack and test PowerShell module (Pester 6)
-              shell: pwsh
-              # pack-powershell + Pester 6; default PowerShellMinimumExecutedTests=11
-              # fails closed on empty/partial runs.
-              run: ./build.ps1 test-powershell
+      - name: Upload PowerShell module and Pester results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: powershell-module-${{ matrix.os }}
+          path: |
+            artifacts/powershell-modules/Devolutions.Ahtola.Sqlite/**
+            artifacts/test-results/powershell/**
+          if-no-files-found: ignore
+          retention-days: 7
 
-            - name: Upload PowerShell module + Pester results
-              if: always()
-              uses: actions/upload-artifact@v7
-              with:
-                name: powershell-module-${{ matrix.os }}
-                path: |
-                  artifacts/powershell-modules/Devolutions.Ahtola.Sqlite/**
-                  artifacts/test-results/powershell/**
-                if-no-files-found: ignore
-                retention-days: 7
-
-              test-downlevel:
+  test-downlevel:
     name: Test downlevel framework (${{ matrix.framework }})
     needs: lint
     runs-on: ubuntu-latest
@@ -230,24 +202,24 @@ jobs:
 
       - name: Test
         id: managed-test
-        # Downlevel compile gate is the Build step above. The test step is
-        # non-blocking for the same cross-process WAL reason as the
-        # build-test Ubuntu leg (these run on Linux only); failures stay
-        # visible in the log. tracked: harden cross-process WAL for GH Linux.
+        # This Linux leg remains informational while cross-process WAL locking
+        # is hardened for GitHub-hosted runners.
         continue-on-error: true
         shell: pwsh
-        run: |
-          ./build.ps1 test -Framework ${{ matrix.framework }} -MinimumExecutedTests $env:MINIMUM_EXECUTED_TESTS
+        run: ./build.ps1 test -Framework ${{ matrix.framework }} -MinimumExecutedTests $env:MINIMUM_EXECUTED_TESTS
 
       - name: Report downlevel cross-process WAL gap
         if: always() && steps.managed-test.outcome == 'failure'
         shell: pwsh
         run: |
-          Write-Host "::warning::Downlevel (${{ matrix.framework }}) managed suite failed the cross-process WAL byte-range-lock isolation tests (known gap on GitHub Actions Linux runners). See the Test step log."
+          Write-Host "::warning::Downlevel managed suite failed known cross-process WAL byte-range-lock isolation tests on GitHub-hosted Linux."
 
   package:
-    name: Package & validate closure
-      needs: [build-test, test-downlevel, powershell-module]
+    name: Package and validate closure
+    needs:
+      - build-test
+      - test-downlevel
+      - powershell-module
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -265,30 +237,30 @@ jobs:
         shell: pwsh
         run: ./build.ps1 pack -Configuration Release -PackageVersion 0.0.0-ci.${{ github.run_number }}
 
-            - name: Pack PowerShell module (Release)
+      - name: Pack PowerShell module
         shell: pwsh
-              run: ./build.ps1 pack-powershell -Configuration Release
+        run: ./build.ps1 pack-powershell -Configuration Release
 
-            - name: Validate packed closure (no native/Rust in nupkgs)
+      - name: Validate packed closure
         shell: pwsh
-              run: ./build.ps1 validate-packed-closure
+        run: ./build.ps1 validate-packed-closure
 
-            - name: Validate packaged consumer (restore/build/run/publish across net8/9/10)
-              shell: pwsh
-              run: ./build.ps1 validate-package
+      - name: Validate packaged consumer
+        shell: pwsh
+        run: ./build.ps1 validate-package
 
-            - name: Upload nupkgs
-              uses: actions/upload-artifact@v7
-              with:
-                name: managed-packages
-                path: artifacts/managed-packages/*.nupkg
-                if-no-files-found: error
-                retention-days: 7
+      - name: Upload nupkgs
+        uses: actions/upload-artifact@v7
+        with:
+          name: managed-packages
+          path: artifacts/managed-packages/*.nupkg
+          if-no-files-found: error
+          retention-days: 7
 
-            - name: Upload PowerShell module
-              uses: actions/upload-artifact@v7
-              with:
-                name: powershell-module
-                path: artifacts/powershell-modules/Devolutions.Ahtola.Sqlite/**
-                if-no-files-found: error
-                retention-days: 7
+      - name: Upload PowerShell module
+        uses: actions/upload-artifact@v7
+        with:
+          name: powershell-module
+          path: artifacts/powershell-modules/Devolutions.Ahtola.Sqlite/**
+          if-no-files-found: error
+          retention-days: 7
