@@ -33,8 +33,9 @@
         <ProjectReference Include="..\Ahtola.Data\Ahtola.Data.csproj" />
         <ProjectReference Include="..\Ahtola.Data.Sqlite\Ahtola.Data.Sqlite.csproj" />
         <ProjectReference Include="..\Ahtola.EntityFrameworkCore.Sqlite\Ahtola.EntityFrameworkCore.Sqlite.csproj" />
-        <ProjectReference Include="..\Ahtola.Core\Ahtola.Core.csproj" />
-    </ItemGroup>
+                <ProjectReference Include="..\Ahtola.PSSqlite\Ahtola.PSSqlite.csproj" />
+                <ProjectReference Include="..\Ahtola.Core\Ahtola.Core.csproj" />
+            </ItemGroup>
 
     <ItemGroup>
         <!-- The managed conformance runner discovers every case in the corpus, so the whole

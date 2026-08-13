@@ -22,12 +22,13 @@ param(
         'build',
         'test',
         'pack',
-        'validate-package',
-        'validate-project-closure',
-        'validate-packed-closure',
-        'format-check'
-    )]
-    [string]$Task = 'build',
+            'pack-pssqlite',
+            'validate-package',
+            'validate-project-closure',
+            'validate-packed-closure',
+            'format-check'
+        )]
+        [string]$Task = 'build',
 
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Debug',
@@ -52,9 +53,11 @@ Set-Location -LiteralPath $RepoRoot
 
 $DataSqliteProject = './src/Ahtola.Data.Sqlite/Ahtola.Data.Sqlite.csproj'
 $EfCoreProject = './src/Ahtola.EntityFrameworkCore.Sqlite/Ahtola.EntityFrameworkCore.Sqlite.csproj'
+$PSSqliteProject = './src/Ahtola.PSSqlite/Ahtola.PSSqlite.csproj'
 $CoreProject = './src/Ahtola.Core/Ahtola.Core.csproj'
 $TestsProject = './src/Ahtola.Tests/Ahtola.Tests.csproj'
 $Solution = './Ahtola.slnx'
+$PSSqliteModuleOutput = './artifacts/powershell-modules/Ahtola.PSSqlite'
 $ConsumerProject = './samples/ManagedPackageConsumer/ManagedPackageConsumer.csproj'
 $ConsumerNugetConfig = './samples/ManagedPackageConsumer/obj/managed-package-consumer.nuget.config'
 $ClosureValidator = Join-Path $RepoRoot 'scripts/Validate-ManagedPackageClosure.ps1'
@@ -117,8 +120,9 @@ function Assert-ManagedProjectClosure {
         (Join-Path $RepoRoot 'src/Ahtola.Data'),
         (Join-Path $RepoRoot 'src/Ahtola.Data.Sqlite'),
         (Join-Path $RepoRoot 'src/Ahtola.EntityFrameworkCore.Sqlite'),
-        (Join-Path $RepoRoot 'samples/ManagedPackageConsumer')
-    )
+            (Join-Path $RepoRoot 'src/Ahtola.PSSqlite'),
+            (Join-Path $RepoRoot 'samples/ManagedPackageConsumer')
+        )
     foreach ($root in $projectRoots) {
         if (-not (Test-Path -LiteralPath $root -PathType Container)) {
             continue
@@ -140,6 +144,7 @@ function Invoke-Restore {
     Write-Step 'Restoring managed packages'
     Invoke-DotNet @('restore', $DataSqliteProject)
     Invoke-DotNet @('restore', $EfCoreProject)
+    Invoke-DotNet @('restore', $PSSqliteProject)
 }
 
 function Invoke-Build {
@@ -150,6 +155,25 @@ function Invoke-Build {
     Write-Step "Building managed packages ($BuildConfiguration)"
     Invoke-DotNet @('build', '--no-restore', '-c', $BuildConfiguration, $DataSqliteProject)
     Invoke-DotNet @('build', '--no-restore', '-c', $BuildConfiguration, $EfCoreProject)
+    Invoke-DotNet @('build', '--no-restore', '-c', $BuildConfiguration, $PSSqliteProject)
+}
+
+function Invoke-PackPSSqlite {
+    param([string]$BuildConfiguration = $Configuration)
+
+    Assert-ManagedProjectClosure
+    Write-Step "Building and staging Ahtola.PSSqlite PowerShell module ($BuildConfiguration)"
+    Invoke-DotNet @('build', '-c', $BuildConfiguration, '-f', 'net8.0', $PSSqliteProject)
+
+    $moduleAbsolute = Get-AbsolutePath $PSSqliteModuleOutput
+    if (-not (Test-Path -LiteralPath (Join-Path $moduleAbsolute 'Ahtola.PSSqlite.psd1'))) {
+        throw "Expected staged module manifest at $moduleAbsolute"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $moduleAbsolute 'bin\Ahtola.PSSqlite.dll'))) {
+        throw "Expected staged module assembly at $moduleAbsolute\bin\Ahtola.PSSqlite.dll"
+    }
+
+    Write-Host "PowerShell module staged at $moduleAbsolute" -ForegroundColor Green
 }
 
 function Invoke-Pack {
@@ -298,12 +322,13 @@ switch ($Task) {
     'restore' { Invoke-Restore }
     'build' { Invoke-Build }
     'pack' { Invoke-Pack }
-    'validate-project-closure' { Assert-ManagedProjectClosure }
-    'validate-packed-closure' { Invoke-ValidatePackedClosure }
-    'validate-package' { Invoke-ValidatePackage }
-    'test' { Invoke-Test }
-    'format-check' { Invoke-FormatCheck }
-    default { throw "Unknown task '$Task'" }
+        'pack-pssqlite' { Invoke-PackPSSqlite }
+        'validate-project-closure' { Assert-ManagedProjectClosure }
+        'validate-packed-closure' { Invoke-ValidatePackedClosure }
+        'validate-package' { Invoke-ValidatePackage }
+        'test' { Invoke-Test }
+        'format-check' { Invoke-FormatCheck }
+        default { throw "Unknown task '$Task'" }
 }
 
 Write-Host "Task '$Task' completed." -ForegroundColor Green
